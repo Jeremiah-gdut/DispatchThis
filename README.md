@@ -50,7 +50,7 @@ past the first jump gadget, and most of the function is never recovered:
 
 **Recovered pseudocode.** With the jumps resolved, the dispatcher deflattened, the gadgets cleaned up, and indirect calls resolved, the function decompiles to readable pseudocode:
 
-![Fully recovered pseudocode](docs/assets/RECOVERED_CONTROL_FLOW.png)
+![Fully recovered pseudocode](docs/assets/RECOVERED_PSEUDOCODE.png)
 
 ## Installation
 
