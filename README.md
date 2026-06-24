@@ -28,10 +28,6 @@ the IL level** - every transformation is an *IL expression rewrite* performed in
 clone of Binary Ninja's `core.function.metaAnalysis` workflow. **No bytes are ever
 patched.**
 
-A quick before/after intuition: a flattened function is a fan of unrelated blocks all
-looping back through one dispatcher; after the passes run, the blocks branch directly to
-one another and the dispatcher falls away as dead code.
-
 > [!NOTE]
 > **Why a workflow / IL rewriting?** Operating on the IL is enormously versatile: whole
 > expressions and control-flow edges can be rewritten directly, which eliminates the need
@@ -68,17 +64,14 @@ past the first jump gadget, and most of the function is never recovered:
 
 ### Install the plugin
 
-Drop the `DispatchThis` folder into your Binary Ninja user plugins directory, then
-restart Binary Ninja:
+Clone this repo or download it into your Binary Ninja user plugins directory and 
+restart Binary Ninja.
 
 | OS | Plugins path |
 | --- | --- |
 | **macOS** | `~/Library/Application Support/Binary Ninja/plugins/` |
 | **Linux** | `~/.binaryninja/plugins/` |
 | **Windows** | `%APPDATA%\Binary Ninja\plugins` |
-
-> [!IMPORTANT]
-> Binary Ninja does **not** hot-reload plugin Python. After installing **fully restart** Binary Ninja.
 
 ## Usage
 
