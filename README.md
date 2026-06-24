@@ -64,8 +64,10 @@ past the first jump gadget, and most of the function is never recovered:
 
 ### Install the plugin
 
-Clone this repo or download it into your Binary Ninja user plugins directory and 
+Copy the folder located in the "plugins/DispatchThis" directory into your Binary Ninja user plugins directory and 
 restart Binary Ninja.
+
+For example: `~/.binaryninja/plugins/DispatchThis`
 
 | OS | Plugins path |
 | --- | --- |
