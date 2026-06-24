@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/LOGO.png" alt="Logo">
+  <img src="docs/assets/LOGO.jpg" alt="Logo">
 </p>
 
 # DispatchThis
