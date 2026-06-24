@@ -1,0 +1,55 @@
+# Known issues & limitations
+
+This is an experimental proof of concept built around a **single sample** and a **single
+Binary Ninja version**. The list below is non-exhaustive - expect rough edges.
+
+## Scope
+
+- **One sample, one version.** Everything was developed and verified against
+  `FortiEndpoint_Patch.exe` on Binary Ninja 5.3.9757. The gadget shapes, decode variants,
+  and predicate forms are tuned to what that sample emits; other binaries (even from the
+  same family) may use shapes the parsers don't yet recognize.
+- **Heuristic state-variable recovery.** The state variable is identified as the variable
+  appearing in the most equality compares. On a function that isn't actually flattened this
+  heuristic is meaningless - which is why the deflatten/cleanup passes are opt-in and off by
+  default. If recovery picks the wrong variable, the deflattener will produce nonsense;
+  disable it for that view.
+
+## Indirect calls
+
+- **Some decode variants don't fold.** `resolve_call_target` handles the common
+  spilled-variable and call-through-slot forms, but other decode variants are not covered.
+  When a call can't be folded it is left indirect, and because no prototype is pinned its
+  arguments may render as `/* nop */` in HLIL.
+
+## Cleanup residue
+
+- **Dead copy chains can survive.** Fully dead chains that end in a `var = var` copy pass
+  the cleanup's escape check and are left in place. They are harmless (genuinely dead) but
+  visible in the output. The escape check is deliberately conservative - it would rather
+  leave dead residue than risk NOPing a live value.
+
+## Conditional reconstruction
+
+- **The Z3 path is the most fragile.** It decompiles the canonical `||` / `&&` cases
+  cleanly, but conditional reconstruction touches the most moving parts (chain recovery,
+  monotone classification, predicate rebuilding). Unusual `cmov` compositions may be
+  misclassified or left intact. See [`conditional-deflattening.md`](conditional-deflattening.md).
+
+## Operational
+
+- **No plugin hot-reload.** Binary Ninja runs the Python at startup; editing any file
+  requires a **full restart**, not just a reanalysis.
+- **Reanalyze to apply toggles.** Enabling or disabling a pass only takes effect on the
+  next reanalysis (the menu items say so).
+- **Verbose logging.** The passes log heavily (per-jump / per-link detail) to make misses
+  visible. This is useful while iterating but noisy; it has not been dialled back to a
+  summary.
+- **Cost.** Flattened functions are large and the LLIL resolver iterates to a fixpoint, so
+  analysis can take many passes. The plugin raises Binary Ninja's analysis limits to
+  accommodate this.
+
+## Reporting
+
+Because this is an educational PoC rather than a maintained tool, treat surprising output as
+expected and verify against the disassembly before trusting it.
