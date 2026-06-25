@@ -4,7 +4,8 @@
 
 # DispatchThis
 
-> Flattened the graph? DispatchThis! An IL-level deobfuscator for an **indirect jump + indirect call + control flow flattener**, built as 
+> Your obfuscating compiler can **DispatchThis** 😛
+> An IL-level deobfuscator for an **indirect jump + indirect call + control flow flattener**, built as 
 > a [Binary Ninja](https://binary.ninja/) Workflow.
 
 ![status: proof of concept](https://img.shields.io/badge/status-proof--of--concept-yellow)
@@ -20,9 +21,10 @@
 ## What it does
 
 The target obfuscator flattens control flow with a **compare-tree dispatcher** keyed on a
-32-bit **state variable**, and routes between the original blocks through **decode-gadget
-indirect jumps** (`jump(reg)`, where the destination is recovered from a relocated jump
-table at run time). DispatchThis recovers the original control flow **entirely at
+32-bit **state variable**, and routes to original blocks through **COMPARE EQUAL** or **COMPARE NOT EQUAL**.
+An annoted portion of one of the functions analyzed is shown in the figure below.
+
+DispatchThis recovers the original control flow **entirely at
 the IL level** - every transformation is an *IL expression rewrite* performed inside a
 clone of Binary Ninja's `core.function.metaAnalysis` workflow. **No bytes are ever
 patched.**
