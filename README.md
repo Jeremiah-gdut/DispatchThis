@@ -48,7 +48,7 @@ past the first jump gadget, and most of the function is never recovered:
 
 ![Recovered control-flow graph](docs/assets/RESOLVED_INDIRECT_JUMPS.png)
 
-**Recovered pseudocode.** With the jumps resolved, the dispatcher deflattened, the gadgets cleaned up, and indirect calls resolved, the function decompiles to readable pseudocode:
+**Recovered pseudocode.** With the jumps resolved, control flow deflattened, jump gadgets cleaned up, state write instructions NOP'd, and indirect calls resolved, the function decompiles to readable pseudocode:
 
 ![Fully recovered pseudocode](docs/assets/RECOVERED_PSEUDOCODE.png)
 
