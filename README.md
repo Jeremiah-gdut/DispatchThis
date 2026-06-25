@@ -27,6 +27,8 @@ the IL level** - every transformation is an *IL expression rewrite* performed in
 clone of Binary Ninja's `core.function.metaAnalysis` workflow. **No bytes are ever
 patched.**
 
+![Dispatcher](docs/assets/DISPATCHER_TO_OBB.png)
+
 > [!NOTE]
 > **Why a workflow / IL rewriting?** Replacing IL expressions with Binary Ninja Workflows
 is incredibly versatile: whole expressions and control-flow edges, unconditional jumps and conditional expressions
