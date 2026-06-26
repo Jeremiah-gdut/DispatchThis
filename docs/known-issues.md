@@ -1,7 +1,7 @@
 # Known issues & limitations
 
-This is an experimental proof of concept built around a **single sample** and a **single
-Binary Ninja version**. The list below is non-exhaustive - expect rough edges.
+Proof of concept indirect jump and control flow unflattener built around a
+**single sample** and a **single Binary Ninja version**. The list below is non-exhaustive - expect rough edges.
 
 ## Scope
 
