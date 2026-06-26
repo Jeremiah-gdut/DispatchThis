@@ -15,11 +15,7 @@ Binary Ninja version**. The list below is non-exhaustive - expect rough edges.
   and often serve as jump targets for gadgets referenced by named functions (e.g., chromium_extract).
   As the control-flow graphs for named functions expand, many of these auto-generated functions are
   removed automatically by calling `bv.remove_user_function`.
-- **Heuristic state-variable recovery.** The state variable is identified as the variable
-  appearing in the most equality compares. On a function that isn't actually flattened this
-  heuristic is meaningless - which is why the deflatten/cleanup passes are opt-in and off by
-  default. If recovery picks the wrong variable, the deflattener will produce nonsense;
-  disable it for that view.
+- **Slow with larger functions.** Larger functions take some time to handle.
 
 ## Indirect calls
 
