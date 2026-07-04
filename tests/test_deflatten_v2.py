@@ -31,12 +31,7 @@ for name in (
     "plugins.DispatchThis.passes.medium",
 ):
     sys.modules.setdefault(name, types.ModuleType(name))
-utils_mod = sys.modules.setdefault("plugins.DispatchThis.utils", types.ModuleType("plugins.DispatchThis.utils"))
-utils_mod.StateMachine = object
-sys.modules.setdefault(
-    "plugins.DispatchThis.utils.state_machine",
-    types.SimpleNamespace(resolve_to_constants=lambda *_args, **_kwargs: [], match_successor=lambda _bv, bb: bb),
-)
+sys.modules.setdefault("plugins.DispatchThis.utils", types.ModuleType("plugins.DispatchThis.utils"))
 sys.modules.setdefault(
     "plugins.DispatchThis.utils.log",
     types.SimpleNamespace(
@@ -216,6 +211,32 @@ def build_uncond_function():
     return FakeFunc(mlil), obb1, obb2
 
 
+def build_entry_function():
+    entry = Block(90, set_var("state", const(0x1111000011110001), 90), goto(91))
+    d1 = Block(0, if_instr(cmp_e("t1", 0x1111000011110001), 10, 1, 0))
+    d2 = Block(1, if_instr(cmp_e("t2", 0x2222000022220002), 20, 2, 1))
+    d3 = Block(2, if_instr(cmp_e("t3", 0x3333000033330003), 30, 99, 2))
+    obb1 = Block(10, set_var("state", const(0x2222000022220002), 10), goto(11))
+    obb2 = Block(20, set_var("state", const(0x3333000033330003), 20), goto(21))
+    obb3 = Block(30, set_var("state", const(0x1111000011110001), 30), goto(31))
+    exit_bb = Block(99, goto(99))
+    link(entry, d1)
+    link(d1, obb1, d2)
+    link(d2, obb2, d3)
+    link(d3, obb3, exit_bb)
+    link(obb1, d1)
+    link(obb2, d1)
+    link(obb3, d1)
+    defs = {
+        "t1": [set_var("t1", var("state"), 100)],
+        "t2": [set_var("t2", var("state"), 101)],
+        "t3": [set_var("t3", var("state"), 102)],
+        "state": [entry[90], obb1[10], obb2[20], obb3[30]],
+    }
+    mlil = FakeMlil([entry, d1, d2, d3, obb1, obb2, obb3, exit_bb], defs)
+    return FakeFunc(mlil), entry, obb1
+
+
 def build_cond_function():
     d1 = Block(0, if_instr(cmp_e("t1", 0x1111000011110001), 10, 1, 0))
     d2 = Block(1, if_instr(cmp_e("t2", 0x2222000022220002), 20, 2, 1))
@@ -309,6 +330,22 @@ def test_compute_redirections_ignores_stray_equality_compare():
     assert any(r["kind"] == "uncond" and r["obb"] is obb1 and r["target_bb"] is obb2 for r in redirections)
 
 
+def test_compute_redirections_recovers_entry_state_transition():
+    func, entry, obb1 = build_entry_function()
+
+    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+
+    assert any(
+        r["kind"] == "uncond"
+        and r.get("entry") is True
+        and r["obb"] is entry
+        and r["jump"] is entry[91]
+        and r["target_bb"] is obb1
+        and r["state_token"] == (0x1111000011110001, 8)
+        for r in redirections
+    )
+
+
 def test_compute_redirections_recovers_conditional_two_branch_transition():
     func, chooser, obb2, obb3 = build_cond_function()
 
@@ -372,6 +409,7 @@ def test_apply_redirections_rewrites_unconditional_and_conditional_transitions()
 if __name__ == "__main__":
     test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster()
     test_compute_redirections_ignores_stray_equality_compare()
+    test_compute_redirections_recovers_entry_state_transition()
     test_compute_redirections_recovers_conditional_two_branch_transition()
     test_compute_redirections_allows_nested_pure_condition_in_branch_tail()
     test_apply_redirections_rewrites_unconditional_and_conditional_transitions()

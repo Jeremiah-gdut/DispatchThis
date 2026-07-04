@@ -238,7 +238,7 @@ def workflow_resolve_global_constants_mlil(analysis_context: AnalysisContext):
 def workflow_deflatten_mlil(analysis_context: AnalysisContext):
     func = analysis_context.function
     bv = analysis_context.view
-    mlil = func.mlil
+    mlil = analysis_context.mlil
     if mlil is None:
         return
 
@@ -257,7 +257,7 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
         log_warn(f"[workflow] {func.name}: no resolved gadget map; nothing to deflatten")
         return
 
-    redirections = compute_redirections(bv, func, gadget_map=gadget_map)
+    redirections = compute_redirections(bv, func, gadget_map=gadget_map, mlil=mlil)
     if not redirections:
         return
 
@@ -274,9 +274,10 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
     bv.session_data.setdefault("dispatchthis_state_vars", {})[func.start] = state_vars
     log_info(f"[workflow] {func.name}: recorded {len(state_tokens)} dispatcher state token(s)")
 
-    applied = apply_redirections_il(func.medium_level_il, redirections)
+    applied = apply_redirections_il(mlil, redirections)
 
     if applied:
+        analysis_context.set_mlil_function(mlil)
         mlil_stable = bv.session_data.setdefault("dispatchthis_mlil_stable", {})
         log_info(f"{func.name} has been deflattened")
         mlil_stable[func.start] = True
@@ -285,7 +286,7 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
 def workflow_cleanup(analysis_context: AnalysisContext):
     func = analysis_context.function
     bv = analysis_context.view
-    mlil = func.mlil
+    mlil = analysis_context.mlil
     if mlil is None:
         return
 
@@ -295,7 +296,8 @@ def workflow_cleanup(analysis_context: AnalysisContext):
         log_debug(f"[workflow] {func.name}: deflattener has not run yet, skipping cleanup")
         return
 
-    # Convert remaining gadget jumps to gotos and NOP dead decode gadgets.
-    clean_resolved_gadget_jumps(bv, func)
+    _jumps, _ifs, _nops, state_writes = clean_resolved_gadget_jumps(bv, func, mlil=mlil)
+    if state_writes:
+        analysis_context.set_mlil_function(mlil)
 
     log_info(f"{func.name} has been cleaned")
