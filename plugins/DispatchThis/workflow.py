@@ -4,41 +4,137 @@ from binaryninja import AnalysisContext
 
 from .passes.medium.deflatten import apply_redirections_il, compute_redirections
 from .passes.medium.nop_pass import clean_resolved_gadget_jumps
-from .passes.medium.indirect_calls import patch_indirect_calls
+from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
+from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .utils import StateMachine
-from .passes.low.gadget_llil import resolve_and_rewrite_llil_jumps
+from .passes.low.gadget_llil import (
+    apply_llil_jump_rewrites,
+    clear_resolved_indirect_branch_tags,
+    resolve_llil_jump_plan,
+    schedule_resolved_indirect_branch_tag_cleanup,
+)
 from .utils.log import log_info, log_warn, log_debug
+from .workflow_state import FunctionWorkflowState
+
+
+def _legacy_gadget_value(targets):
+    return targets[0] if len(targets) == 1 else tuple(targets)
+
+
+def _mirror_branch_state_for_legacy_passes(bv, func, state):
+    gadget_map = bv.session_data.setdefault("dispatchthis_gadget_map", {}).setdefault(func.start, {})
+    gadget_map.clear()
+    for source, targets in state.branch_target_receipts().items():
+        gadget_map[source] = _legacy_gadget_value(targets)
 
 
 def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
     func = analysis_context.function
     bv = analysis_context.view
+    state = FunctionWorkflowState(func)
+
+    if bv.arch.name != "aarch64":
+        log_debug(f"[dispatchthis] {func.name}: skipping non-aarch64 view")
+        return
+
+    llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
+    if state.branch_resolving_is_stable(func):
+        llil_stable[func.start] = True
+        _mirror_branch_state_for_legacy_passes(bv, func, state)
+        clear_resolved_indirect_branch_tags(func)
+        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
+        return
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = analysis_context.llil
-    gadget_map = bv.session_data.setdefault("dispatchthis_gadget_map", {})
-    func_map = gadget_map.setdefault(func.start, {})
-    resolved = resolve_and_rewrite_llil_jumps(bv, llil, func_map)
-    log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: rewrote {len(resolved)} jump(s)")
-    if resolved:
-        func_map.update(resolved)
-        log_info(f"[workflow] {func.name}: rewrote {len(resolved)} indirect jump(s) to direct")
-    else:
-        llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
+    plan = resolve_llil_jump_plan(bv, llil)
+    apply_llil_jump_rewrites(bv, llil, plan)
+
+    resolved_targets = {item["source"]: item["targets"] for item in plan}
+    mutations = state.branch_mutations_for(resolved_targets)
+    for source, targets in mutations.items():
+        try:
+            func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
+            changed = state.mark_branch_mutation_applied(source, targets)
+            if changed:
+                log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
+        except Exception as e:  # noqa: BLE001
+            log_warn(f"[workflow] {func.name}: failed to set branch targets @ {hex(source)}: {e}")
+
+    _mirror_branch_state_for_legacy_passes(bv, func, state)
+    log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
+    if mutations:
+        llil_stable.pop(func.start, None)
+        log_info(f"[workflow] {func.name}: submitted {len(mutations)} indirect branch target update(s)")
+        return
+
+    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
         log_info(f"All of {func.name}'s indirect jumps have been resolved")
+        state.mark_branch_resolving_stable()
         llil_stable[func.start] = True
+        clear_resolved_indirect_branch_tags(func)
+        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
 
 
 def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
     func = analysis_context.function
     bv = analysis_context.view
+    state = FunctionWorkflowState(func)
+
+    if not state.branch_resolving_is_stable(func):
+        return
 
     mlil = analysis_context.mlil
     if mlil is None:
         return
-    n = patch_indirect_calls(bv, mlil)
+
+    plans = plan_indirect_calls(bv, mlil)
+    rewrites = apply_indirect_call_rewrites(bv, mlil, plans)
+    adjustments = 0
+    for plan in plans:
+        call_addr = plan["call_addr"]
+        target = plan["target"]
+        if not state.call_adjustment_needed(call_addr, target):
+            continue
+        callee = bv.get_function_at(target)
+        if callee is None or callee.type is None:
+            continue
+        try:
+            func.set_call_type_adjustment(call_addr, callee.type)
+            changed = state.mark_call_adjustment_applied(call_addr, target)
+            if changed:
+                log_warn(f"[workflow] {func.name}: call target changed at {hex(call_addr)}")
+            adjustments += 1
+        except Exception as e:  # noqa: BLE001
+            log_warn(f"[workflow] {func.name}: type-adjust @ {hex(call_addr)} failed: {e}")
+
+    if not adjustments:
+        state.mark_indirect_call_resolving_stable()
+    if rewrites or adjustments:
+        log_info(
+            f"[workflow] {func.name}: resolved {rewrites} indirect call(s), "
+            f"submitted {adjustments} type adjustment(s)"
+        )
+
+
+def workflow_translate_branches_mlil(analysis_context: AnalysisContext):
+    func = analysis_context.function
+    bv = analysis_context.view
+
+    if bv.arch.name != "aarch64":
+        return
+
+    state = FunctionWorkflowState(func)
+    if not state.branch_resolving_is_stable(func):
+        return
+
+    mlil = analysis_context.mlil
+    if mlil is None:
+        return
+
+    _, n = translate_indirect_branch_conditions(bv, mlil)
     if n:
-        log_info(f"[workflow] {func.name}: resolved {n} indirect call(s)")
+        log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
 
 
 def workflow_deflatten_mlil(analysis_context: AnalysisContext):

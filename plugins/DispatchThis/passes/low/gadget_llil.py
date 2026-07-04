@@ -4,15 +4,49 @@ with replace_expr and an associated jump to the original address
 """
 
 
-from ...utils.log import log_debug, log_warn
+from ...utils.log import log_debug, log_warn, log_error
 
 
 U48 = 0xFFFFFFFFFFFF
 U64 = 0xFFFFFFFFFFFFFFFF
+UNRESOLVED_INDIRECT_TAG = "Unresolved Indirect Control Flow"
 
 # Phi addresses we've already warned about, so the dispatcher's giant
 # state-variable phi doesn't flood the log once per gadget.
 _warned_phi = set()
+
+
+def clear_resolved_indirect_branch_tags(func):
+    seen = set()
+    for branch in func.indirect_branches:
+        if branch.auto_defined:
+            continue
+        if branch.source_addr in seen:
+            continue
+        seen.add(branch.source_addr)
+        func.remove_auto_address_tags_of_type(
+            branch.source_addr,
+            UNRESOLVED_INDIRECT_TAG,
+        )
+
+
+def schedule_resolved_indirect_branch_tag_cleanup(bv, func_start):
+    pending = bv.session_data.setdefault("dispatchthis_tag_cleanup_pending", set())
+    if func_start in pending:
+        return
+    pending.add(func_start)
+
+    def clear_after_analysis():
+        try:
+            func = bv.get_function_at(func_start)
+            if func is not None:
+                clear_resolved_indirect_branch_tags(func)
+        except Exception as e:  # noqa: BLE001
+            log_error(f"[gadget-llil] tag cleanup @ {hex(func_start)}: {e}")
+        finally:
+            pending.discard(func_start)
+
+    bv.add_analysis_completion_event(clear_after_analysis)
 
 # Constant-truth evaluators for the LLIL comparison ops the predicates use.
 _CMP = {
@@ -81,12 +115,27 @@ def _reg_const(bv, ssa, expr, depth=0):
     if op in ("LLIL_ZX", "LLIL_SX", "LLIL_LOW_PART"):
         return _reg_const(bv, ssa, expr.src, depth + 1)
 
-    if op in ("LLIL_ADD", "LLIL_SUB"):
+    if op in ("LLIL_LSL", "LLIL_LSR"):
         l = _reg_const(bv, ssa, expr.left, depth + 1)
         r = _reg_const(bv, ssa, expr.right, depth + 1)
         if l is None or r is None:
             return None
-        return (l + r if op == "LLIL_ADD" else l - r) & U48
+        return ((l << r) if op == "LLIL_LSL" else (l >> r)) & U48
+
+    if op in ("LLIL_ADD", "LLIL_SUB", "LLIL_AND", "LLIL_OR", "LLIL_XOR"):
+        l = _reg_const(bv, ssa, expr.left, depth + 1)
+        r = _reg_const(bv, ssa, expr.right, depth + 1)
+        if l is None or r is None:
+            return None
+        if op == "LLIL_ADD":
+            return (l + r) & U48
+        if op == "LLIL_SUB":
+            return (l - r) & U48
+        if op == "LLIL_AND":
+            return (l & r) & U48
+        if op == "LLIL_OR":
+            return (l | r) & U48
+        return (l ^ r) & U48
 
     if op == "LLIL_REG_SSA":
         d = ssa.get_ssa_reg_definition(expr.src)
@@ -115,7 +164,81 @@ def _reg_const(bv, ssa, expr, depth=0):
         # LLIL_SET_REG_SSA / _PARTIAL -- a copy or materialized constant.
         return _reg_const(bv, ssa, d.src, depth + 1)
 
+    try:
+        rv = expr.value
+    except Exception:  # noqa: BLE001
+        rv = None
+    if rv is not None and rv.type.name in ("ConstantValue", "ConstantPointerValue"):
+        return rv.value & U48
+
     return None
+
+
+def _reg_consts(bv, ssa, expr, depth=0, seen=None):
+    """Resolve an expression to every small constant it may hold."""
+    if expr is None or depth > 32:
+        return set()
+    if seen is None:
+        seen = set()
+    op = expr.operation.name
+
+    if op in ("LLIL_CONST", "LLIL_CONST_PTR"):
+        return {expr.constant & U48}
+
+    if op in ("LLIL_ZX", "LLIL_SX", "LLIL_LOW_PART"):
+        return _reg_consts(bv, ssa, expr.src, depth + 1, seen)
+
+    if op in ("LLIL_LSL", "LLIL_LSR"):
+        lefts = _reg_consts(bv, ssa, expr.left, depth + 1, seen)
+        rights = _reg_consts(bv, ssa, expr.right, depth + 1, seen)
+        out = set()
+        for l in lefts:
+            for r in rights:
+                out.add(((l << r) if op == "LLIL_LSL" else (l >> r)) & U48)
+        return out
+
+    if op in ("LLIL_ADD", "LLIL_SUB", "LLIL_AND", "LLIL_OR", "LLIL_XOR"):
+        lefts = _reg_consts(bv, ssa, expr.left, depth + 1, seen)
+        rights = _reg_consts(bv, ssa, expr.right, depth + 1, seen)
+        out = set()
+        for l in lefts:
+            for r in rights:
+                if op == "LLIL_ADD":
+                    out.add((l + r) & U48)
+                elif op == "LLIL_SUB":
+                    out.add((l - r) & U48)
+                elif op == "LLIL_AND":
+                    out.add((l & r) & U48)
+                elif op == "LLIL_OR":
+                    out.add((l | r) & U48)
+                else:
+                    out.add((l ^ r) & U48)
+        return out
+
+    if op == "LLIL_REG_SSA":
+        key = ("reg", str(expr.src))
+        if key in seen:
+            return set()
+        seen.add(key)
+        d = ssa.get_ssa_reg_definition(expr.src)
+        if d is None:
+            v = _vsa_const(ssa, expr)
+            return set() if v is None else {v}
+        if d.operation.name == "LLIL_REG_PHI":
+            vals = set()
+            for var in d.src:
+                od = ssa.get_ssa_reg_definition(var)
+                if od is not None and hasattr(od, "src"):
+                    vals.update(_reg_consts(bv, ssa, od.src, depth + 1, seen.copy()))
+            if vals:
+                return vals
+            v = _reg_const(bv, ssa, expr)
+            return set() if v is None else {v}
+        if hasattr(d, "src"):
+            return _reg_consts(bv, ssa, d.src, depth + 1, seen)
+
+    v = _reg_const(bv, ssa, expr)
+    return set() if v is None else {v}
 
 
 def _diag(ssa, expr, depth=0, seen=None):
@@ -287,6 +410,10 @@ def _eval_predicate(bv, ssa, if_instr):
     cmp_fn = _CMP.get(cond.operation.name)
     if cmp_fn is None:
         return None
+    left_const = _reg_const(bv, ssa, cond.left)
+    right_const = _reg_const(bv, ssa, cond.right)
+    if left_const is not None and right_const is not None:
+        return cmp_fn(left_const, right_const)
     try:
         right = cond.right.constant
     except AttributeError:
@@ -314,6 +441,12 @@ def _controlling_if(ssa, block):
         last = ssa[pred.end - 1]
         if last.operation.name == "LLIL_IF":
             return pred, last
+        if last.operation.name == "LLIL_GOTO":
+            for pred_edge in pred.incoming_edges:
+                pred2 = pred_edge.source
+                last2 = ssa[pred2.end - 1]
+                if last2.operation.name == "LLIL_IF":
+                    return pred2, last2
     return None, None
 
 
@@ -387,12 +520,54 @@ def _live_phi_operand(bv, ssa, phi):
 # gadget parse + drive
 # --------------------------------------------------------------------------- #
 
-def parse_jump_gadget(bv, ssa, jump_il):
+def _consts_preferring_live_path(bv, ssa, expr):
+    value = _reg_const(bv, ssa, expr)
+    return {value} if value is not None else _reg_consts(bv, ssa, expr)
+
+
+def _slot_from_load(bv, ssa, sload):
+    if sload is None or sload.operation.name not in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
+        return None
+    sp = sload.src
+    if sp.operation.name in ("LLIL_CONST_PTR", "LLIL_CONST"):
+        return sp.constant & U48
+    return _reg_const(bv, ssa, sp)
+
+
+def _slot_add_const_candidates(bv, ssa, expr):
+    expr = _def_src(ssa, expr)
+    if expr is None or expr.operation.name != "LLIL_ADD":
+        return []
+    candidates = []
+    for sload_expr, const_expr in ((expr.left, expr.right), (expr.right, expr.left)):
+        slot = _slot_from_load(bv, ssa, _def_src(ssa, sload_expr))
+        if slot is None:
+            continue
+        for value in _consts_preferring_live_path(bv, ssa, const_expr):
+            candidates.append((slot, value & U48))
+    return candidates
+
+
+def _valid_offsets_for_candidate(bv, slot, table_base_key, key, offsets):
+    valid = set()
+    for offset in offsets:
+        target = resolve_indirect_jump_addr(bv, slot, offset, table_base_key, key)
+        if target is not None and bv.is_valid_offset(target):
+            valid.add(offset & U48)
+    return valid
+
+
+def _is_index_offset(ssa, expr):
+    expr = _def_src(ssa, expr)
+    return expr is not None and expr.operation.name in ("LLIL_LSL", "LLIL_LSR")
+
+
+def _parse_jump_gadget_parts(bv, ssa, jump_il):
     """
     
     Walk the decode gadget feeding ``jump_il`` backwards through LLIL SSA.
 
-    Returns ``(slot, table_base_key, key, offset)`` as ints, or ``None`` if the
+    Returns ``(slot, table_base_key, key, offsets)`` as ints, or ``None`` if the
     gadget does not match the expected shape."""
 
     jdest = jump_il.ssa_form.dest
@@ -427,6 +602,18 @@ def parse_jump_gadget(bv, ssa, jump_il):
     addr = load.src
     if addr.operation.name != "LLIL_ADD":
         return None
+
+    # Some ARM64 samples pre-add the table-base key before indexing:
+    #     target = *(*slot + table_base_key + offset) + key
+    for tb, disp_expr in ((_def_src(ssa, addr.left), addr.right), (_def_src(ssa, addr.right), addr.left)):
+        if not _is_index_offset(ssa, disp_expr):
+            continue
+        for slot, table_base_key in _slot_add_const_candidates(bv, ssa, tb):
+            offsets = {o & U48 for o in _reg_consts(bv, ssa, disp_expr)}
+            offsets = _valid_offsets_for_candidate(bv, slot, table_base_key, key, offsets)
+            if offsets:
+                return (slot, table_base_key, key & U48, offsets)
+
     cand = _def_src(ssa, addr.right)
     if cand is not None and cand.operation.name == "LLIL_ADD":
         disp_expr, tb = addr.left, cand
@@ -441,21 +628,45 @@ def parse_jump_gadget(bv, ssa, jump_il):
 
     # rax = OFFSET + [&SLOT] -- table-base add. The [&SLOT] load (of a const
     # pointer) can be on either side; the other operand is the entry offset.
-    if tb.right.operation.name in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
-        sload, off_expr = tb.right, tb.left
+    tb_left = _def_src(ssa, tb.left)
+    tb_right = _def_src(ssa, tb.right)
+    if tb_right is not None and tb_right.operation.name in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
+        sload, off_expr = tb_right, tb.left
     else:
-        sload, off_expr = tb.left, tb.right
+        sload, off_expr = tb_left, tb.right
     if sload.operation.name not in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
         return None
     sp = sload.src
-    if sp.operation.name not in ("LLIL_CONST_PTR", "LLIL_CONST"):
+    if sp.operation.name in ("LLIL_CONST_PTR", "LLIL_CONST"):
+        slot = sp.constant & U48
+    else:
+        slot = _reg_const(bv, ssa, sp)
+    if slot is None:
         return None
-    slot = sp.constant & U48
-    offset = _reg_const(bv, ssa, off_expr)
-    if offset is None:
+    offsets = _reg_consts(bv, ssa, off_expr)
+    if not offsets:
         return None
 
-    return (slot, table_base_key & U48, key & U48, offset & U48)
+    return (slot, table_base_key & U48, key & U48, {o & U48 for o in offsets})
+
+
+def parse_jump_gadget(bv, ssa, jump_il):
+    """Return one decoded gadget tuple for compatibility with single-target callers."""
+    parsed = _parse_jump_gadget_parts(bv, ssa, jump_il)
+    if parsed is None:
+        return None
+    slot, table_base_key, key, offsets = parsed
+    offset = sorted(offsets)[0]
+    return (slot, table_base_key, key, offset)
+
+
+def parse_jump_gadget_targets(bv, ssa, jump_il):
+    """Return every decoded table target tuple for this branch gadget."""
+    parsed = _parse_jump_gadget_parts(bv, ssa, jump_il)
+    if parsed is None:
+        return None
+    slot, table_base_key, key, offsets = parsed
+    return [(slot, table_base_key, key, offset) for offset in sorted(offsets)]
 
 
 def iter_llil_indirect_jumps(llil):
@@ -470,7 +681,7 @@ def iter_llil_indirect_jumps(llil):
     """
     for block in llil:
         for insn in block:
-            if insn.operation.name not in ("LLIL_JUMP", "LLIL_TAILCALL"):
+            if insn.operation.name not in ("LLIL_JUMP", "LLIL_JUMP_TO", "LLIL_TAILCALL"):
                 continue
             if insn.dest.operation.name == "LLIL_CONST_PTR":
                 continue
@@ -480,31 +691,33 @@ def iter_llil_indirect_jumps(llil):
 def resolve_llil_jump_target(bv, ssa, jump_il):
     """Decode the concrete target of one decode-gadget ``LLIL_JUMP`` by parsing
     its gadget and decoding the jump table. Returns an ``int`` or ``None``."""
-    parsed = parse_jump_gadget(bv, ssa, jump_il)
+    targets = resolve_llil_jump_targets(bv, ssa, jump_il)
+    return None if not targets else targets[0]
+
+
+def resolve_llil_jump_targets(bv, ssa, jump_il):
+    """Decode every concrete target for one decode-gadget branch."""
+    parsed = parse_jump_gadget_targets(bv, ssa, jump_il)
     if parsed is None:
         log_warn(f"[gadget-llil] shape mismatch @ {hex(jump_il.address)}")
-        return None
-    slot, table_base_key, key, offset = parsed
-    target = resolve_indirect_jump_addr(bv, slot, offset, table_base_key, key)
-    log_debug(f"[gadget-llil] {hex(jump_il.address)} slot={hex(slot)} table_base_key={hex(table_base_key)} "
-              f"key={hex(key)} off={hex(offset)} -> "
-              f"{hex(target) if target is not None else None}")
-    return target
+        return []
+    targets = []
+    for slot, table_base_key, key, offset in parsed:
+        target = resolve_indirect_jump_addr(bv, slot, offset, table_base_key, key)
+        log_debug(f"[gadget-llil] {hex(jump_il.address)} slot={hex(slot)} table_base_key={hex(table_base_key)} "
+                  f"key={hex(key)} off={hex(offset)} -> "
+                  f"{hex(target) if target is not None else None}")
+        if target is not None:
+            targets.append(target)
+    return sorted(set(targets))
 
 
-def resolve_and_rewrite_llil_jumps(bv, llil, gadget_map=None):
-    """Rewrite every decode-gadget ``jump(reg)`` in ``llil`` into a direct
-    ``jump(const target)`` so BN discovers the target as code and reconnects the
-    CFG. All jumps are resolved (read-only) before any expr is replaced, so the
-    backward SSA walk never reads mutated IL.
-
-    Returns ``{jump_addr: target}`` for every gadget resolved this run -- the
-    address of each rewritten terminator mapped to its decoded constant target.
-    The address is stable across IL levels, so the MLIL deflatten pass can use
-    this directly as its ``gadget_map`` to spot the OBB->dispatcher exit jumps.
-    """
+def resolve_llil_jump_plan(bv, llil, gadget_map=None):
+    """Resolve decode-gadget branches to a plan without mutating BN state."""
     if not llil:
-        return {}
+        return []
+    if gadget_map is None:
+        gadget_map = {}
     _warned_phi.clear()
     
 
@@ -512,40 +725,74 @@ def resolve_and_rewrite_llil_jumps(bv, llil, gadget_map=None):
     # decode gadgets are independent, so none of these reads observe a later
     # rewrite -- batching avoids rebuilding SSA between jumps.
     ssa = llil.ssa_form
-    pending = []  # (jump_addr, dest_expr_index, target)
+    pending = []
     for jump_il in iter_llil_indirect_jumps(llil):
         try:
-            # If already resolved on an earlier pass
+            newly_resolved = jump_il.address not in gadget_map
             if jump_il.address in gadget_map:
-                target = gadget_map[jump_il.address]
+                cached = gadget_map[jump_il.address]
+                if isinstance(cached, (list, tuple, set)):
+                    targets = list(cached)
+                else:
+                    targets = [cached]
             else:
                 # Otherwise resolve it
-                target = resolve_llil_jump_target(bv, ssa, jump_il)
-            if target is None or not bv.is_valid_offset(target):
+                targets = resolve_llil_jump_targets(bv, ssa, jump_il)
+            targets = [t for t in targets if t is not None and bv.is_valid_offset(t)]
+            if not targets:
                 continue
-            pending.append((jump_il.address, jump_il.dest.expr_index, target))
+            pending.append({
+                "source": jump_il.address,
+                "dest_expr_index": jump_il.dest.expr_index,
+                "targets": tuple(sorted(set(targets))),
+                "newly_resolved": newly_resolved,
+            })
         except Exception as e:  # noqa: BLE001
             log_error(f"[gadget-llil] {hex(jump_il.address)}: {e}")
             continue
 
-    if not pending:
-        return {}
+    return pending
 
-    # Phase 2: apply every rewrite, then rebuild SSA exactly once.
-    resolved = {}
-    for jump_addr, dest_expr_index, target in pending:
+
+def apply_llil_jump_rewrites(bv, llil, plan):
+    """Apply current-LLIL rewrites from a branch plan. Does not set user branches."""
+    if not llil or not plan:
+        return 0
+
+    applied = 0
+    for item in plan:
+        jump_addr = item["source"]
+        targets = item["targets"]
         try:
-            new_dest = llil.const_pointer(bv.arch.address_size, target)
-            llil.replace_expr(dest_expr_index, new_dest)
-            resolved[jump_addr] = target
-            log_debug(f"[gadget-llil] {hex(jump_addr)} -> jump {hex(target)}")
-            existing = bv.get_function_at(target)
-            if existing is not None and existing.start != llil.source_function.start:
-                bv.remove_user_function(existing)
+            if len(targets) == 1:
+                new_dest = llil.const_pointer(bv.arch.address_size, targets[0])
+                llil.replace_expr(item["dest_expr_index"], new_dest)
+                applied += 1
+            log_debug(
+                f"[gadget-llil] {hex(jump_addr)} -> "
+                f"{', '.join(hex(t) for t in targets)}"
+            )
+            for target in targets:
+                existing = bv.get_function_at(target)
+                if existing is not None and existing.start != llil.source_function.start:
+                    bv.remove_user_function(existing)
         except Exception as e:  # noqa: BLE001
             log_error(f"[gadget-llil] {hex(jump_addr)}: {e}")
             continue
 
-    llil.finalize()
-    llil.generate_ssa_form()
+    if applied:
+        llil.finalize()
+        llil.generate_ssa_form()
+    return applied
+
+
+def resolve_and_rewrite_llil_jumps(bv, llil, gadget_map=None):
+    """Compatibility wrapper: resolve and apply current-LLIL rewrites only."""
+    plan = resolve_llil_jump_plan(bv, llil, gadget_map)
+    apply_llil_jump_rewrites(bv, llil, plan)
+    resolved = {}
+    for item in plan:
+        if item["newly_resolved"]:
+            targets = item["targets"]
+            resolved[item["source"]] = targets[0] if len(targets) == 1 else targets
     return resolved

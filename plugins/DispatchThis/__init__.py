@@ -11,6 +11,7 @@ from .utils.log import log_info, log_warn
 from .workflow import (
     workflow_resolve_jumps_llil,
     workflow_resolve_calls_mlil,
+    workflow_translate_branches_mlil,
     workflow_deflatten_mlil,
     workflow_cleanup
 )
@@ -69,6 +70,14 @@ def register_workflows():
         "eligibility": _RESOLVE_OR_DEFLATTEN,
     }), action=workflow_resolve_calls_mlil))
 
+    # Recover if/else shape after indirect branches have been resolved.
+    workflow.register_activity(Activity(json.dumps({
+        "name": "extension.DispatchThis.BranchConditionTranslator",
+        "title": "DispatchThis: Translate Indirect Branch Conditions",
+        "description": "Translate resolved two-target indirect branch switches into if/else branches.",
+        "eligibility": _RESOLVE_OR_DEFLATTEN,
+    }), action=workflow_translate_branches_mlil))
+
     # Deflattener (MLIL); auto eligibility surfaces the Deflatten toggle.
     workflow.register_activity(Activity(json.dumps({
         "name": DEFLATTEN_SETTING,
@@ -90,6 +99,7 @@ def register_workflows():
 
     workflow.insert("core.function.generateHighLevelIL", [
             "extension.DispatchThis.IndirectCallPatcher",
+            "extension.DispatchThis.BranchConditionTranslator",
             DEFLATTEN_SETTING,
             "extension.DispatchThis.Cleanup"
     ])

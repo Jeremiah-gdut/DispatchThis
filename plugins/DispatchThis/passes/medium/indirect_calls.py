@@ -186,14 +186,13 @@ def iter_indirect_calls(mlil):
         yield insn
 
 
-def patch_indirect_calls(bv, mlil):
-    """Resolve all decode-gadget indirect calls in ``mlil`` and rewrite destinations to const pointers.
-    Returns the number of calls rewritten."""
+def plan_indirect_calls(bv, mlil):
+    """Resolve decode-gadget indirect calls without mutating function state."""
     if mlil is None:
         log_warn("[icall] mlil is None")
-        return 0
+        return []
 
-    rewrites = []
+    plans = []
     for call_il in iter_indirect_calls(mlil):
         try:
             target, decode_def = resolve_call_target(bv, mlil, call_il)
@@ -206,39 +205,38 @@ def patch_indirect_calls(bv, mlil):
         name = sym.name if sym else hex(target)
         log_info(f"[icall] {hex(call_il.address)}: indirect call -> "
                  f"{hex(target)} ({name})")
-        rewrites.append((call_il, target, decode_def))
+        plans.append({
+            "call_il": call_il,
+            "call_addr": call_il.address,
+            "target": target,
+            "decode_def": decode_def,
+        })
 
-    if not rewrites:
+    if not plans:
         log_info("[icall] no indirect call gadgets resolved")
-        return 0
+    return plans
 
+
+def apply_indirect_call_rewrites(bv, mlil, plans):
+    """Apply current-MLIL rewrites from indirect call plans."""
+    if mlil is None or not plans:
+        return 0
     addr_size = bv.arch.address_size
-    func = mlil.source_function
-    # Call-type adjustments are function-level edits that schedule a *fresh*
-    # reanalysis (unlike IL replace_expr, which the current pass just consumes), so
-    # re-applying them every workflow run loops analysis forever. Apply each call
-    # site at most once per session; the adjustment persists across reanalysis.
-    adjusted = bv.session_data.setdefault("dispatchthis_call_types_set", {}).setdefault(func.start, set())
-    for call_il, target, decode_def in rewrites:
+    applied = 0
+    for plan in plans:
+        call_il = plan["call_il"]
+        target = plan["target"]
+        decode_def = plan["decode_def"]
         # Replace the call destination with the resolved const pointer.
         try:
             mlil.replace_expr(
                 call_il.dest.expr_index,
                 mlil.const_pointer(addr_size, target),
             )
+            applied += 1
             log_debug(f"[icall] {hex(call_il.address)} -> call {hex(target)}")
         except Exception as e:  # noqa: BLE001
             log_error(f"[icall] failed to rewrite {hex(call_il.address)}: {e}")
-        # Pin the callee's prototype at the call site. Once the dest is a bare const
-        # the call carries only calling-convention guesses (`rcx or zmm0`), so HLIL
-        # renders the arguments as `/* nop */`; the type adjustment recovers them.
-        callee = bv.get_function_at(target)
-        if callee is not None and callee.type is not None and call_il.address not in adjusted:
-            try:
-                func.set_call_type_adjustment(call_il.address, callee.type)
-                adjusted.add(call_il.address)
-            except Exception as e:  # noqa: BLE001
-                log_warn(f"[icall] type-adjust @ {hex(call_il.address)} failed: {e}")
         # Fold the decode `var = encoded + key` that fed the call into the same
         # const pointer (`var = const`). We set it rather than NOP it: NOPing a
         # def whose variable still has uses leaves those uses dangling -- keeping
@@ -256,9 +254,13 @@ def patch_indirect_calls(bv, mlil):
                 log_error(f"[icall] failed to fold decode def @ "
                           f"{hex(decode_def.address)}: {e}")
 
-    rewrite_len = len(rewrites)
-    if rewrite_len:
+    if applied:
         mlil.finalize()
         mlil.generate_ssa_form()
-        log_info(f"[icall] {mlil.source_function.name}: rewrote {rewrite_len} indirect call(s)")
-    return rewrite_len
+        log_info(f"[icall] {mlil.source_function.name}: rewrote {applied} indirect call(s)")
+    return applied
+
+
+def patch_indirect_calls(bv, mlil):
+    """Resolve and rewrite indirect calls in the current MLIL only."""
+    return apply_indirect_call_rewrites(bv, mlil, plan_indirect_calls(bv, mlil))
