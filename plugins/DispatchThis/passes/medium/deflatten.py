@@ -180,7 +180,7 @@ def _analyze_dispatcher(mlil):
     if not candidate_groups:
         return None
     candidate_groups.sort(key=len, reverse=True)
-    if len(candidate_groups) > 1:
+    if len(candidate_groups) > 1 and len(candidate_groups[1]) * 2 >= len(candidate_groups[0]):
         log_warn("[deflat] dispatcher cluster has ambiguous state roots; skipping")
         return None
     rows = candidate_groups[0]

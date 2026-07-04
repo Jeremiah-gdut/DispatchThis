@@ -302,6 +302,37 @@ def build_nested_cond_function():
     return FakeFunc(mlil), chooser, obb2, obb3
 
 
+def build_competing_groups_function(main_count=7, small_count=3):
+    blocks = []
+    defs = {"state": [], "arg": []}
+    for i in range(main_count):
+        cmp_var = f"m{i}"
+        token = 0x1111000011110000 + i
+        row_start = i * 10
+        hit_start = 1000 + i * 10
+        miss_start = 2000 + i * 10
+        row = Block(row_start, if_instr(cmp_e(cmp_var, token, size=8), hit_start, miss_start, row_start))
+        hit = Block(hit_start, set_var("state", const(token), hit_start), goto(hit_start + 1))
+        miss = Block(miss_start, goto(miss_start))
+        link(row, hit, miss)
+        defs[cmp_var] = [set_var(cmp_var, var("state"), 1000 + i)]
+        defs["state"].append(hit[hit_start])
+        blocks.extend([row, hit, miss])
+    for i in range(small_count):
+        cmp_var = f"s{i}"
+        row_start = 3000 + i * 10
+        hit_start = 4000 + i * 10
+        miss_start = 5000 + i * 10
+        row = Block(row_start, if_instr(cmp_e(cmp_var, i, size=4), hit_start, miss_start, row_start))
+        hit = Block(hit_start, goto(hit_start))
+        miss = Block(miss_start, goto(miss_start))
+        link(row, hit, miss)
+        defs[cmp_var] = [set_var(cmp_var, var("arg"), 1100 + i)]
+        blocks.extend([row, hit, miss])
+    mlil = FakeMlil(blocks, defs)
+    return FakeFunc(mlil)
+
+
 def test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster():
     func, obb1, obb2 = build_uncond_function()
 
@@ -328,6 +359,21 @@ def test_compute_redirections_ignores_stray_equality_compare():
     redirections = compute_redirections(FakeBv(), func, gadget_map={})
 
     assert any(r["kind"] == "uncond" and r["obb"] is obb1 and r["target_bb"] is obb2 for r in redirections)
+
+
+def test_dispatcher_analysis_ignores_much_smaller_candidate_group():
+    func = build_competing_groups_function()
+
+    analysis = deflatten._analyze_dispatcher(func.mlil)
+
+    assert analysis is not None
+    assert str(analysis["state_var"]) == "state"
+
+
+def test_dispatcher_analysis_rejects_close_candidate_groups():
+    func = build_competing_groups_function(main_count=6, small_count=3)
+
+    assert deflatten._analyze_dispatcher(func.mlil) is None
 
 
 def test_compute_redirections_recovers_entry_state_transition():
@@ -409,6 +455,8 @@ def test_apply_redirections_rewrites_unconditional_and_conditional_transitions()
 if __name__ == "__main__":
     test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster()
     test_compute_redirections_ignores_stray_equality_compare()
+    test_dispatcher_analysis_ignores_much_smaller_candidate_group()
+    test_dispatcher_analysis_rejects_close_candidate_groups()
     test_compute_redirections_recovers_entry_state_transition()
     test_compute_redirections_recovers_conditional_two_branch_transition()
     test_compute_redirections_allows_nested_pure_condition_in_branch_tail()
