@@ -18,6 +18,7 @@ for name in (
     sys.modules.setdefault(name, types.ModuleType(name))
 
 calls = []
+branch_plan_calls = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -59,7 +60,7 @@ sys.modules.setdefault(
     types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
         clear_resolved_indirect_branch_tags=lambda *_args, **_kwargs: None,
-        resolve_llil_jump_plan=lambda *_args, **_kwargs: [],
+        resolve_llil_jump_plan=lambda _bv, _llil, gadget_map=None: branch_plan_calls.append(gadget_map) or [],
         schedule_resolved_indirect_branch_tag_cleanup=lambda *_args, **_kwargs: None,
     ),
 )
@@ -67,7 +68,34 @@ sys.modules.setdefault(
     "plugins.DispatchThis.utils.log",
     types.SimpleNamespace(log_info=lambda _msg: None, log_warn=lambda _msg: None, log_debug=lambda _msg: None),
 )
-sys.modules.setdefault("plugins.DispatchThis.workflow_state", types.SimpleNamespace(FunctionWorkflowState=object))
+class FakeWorkflowState:
+    receipts = {}
+    marked_stable = False
+
+    def __init__(self, _func):
+        pass
+
+    @staticmethod
+    def unmapped_unresolved_sources(_func):
+        return set()
+
+    def branch_resolving_is_stable(self, _func):
+        return False
+
+    def branch_target_receipts(self):
+        return self.receipts
+
+    def branch_mutations_for(self, _resolved_targets):
+        return {}
+
+    def mark_branch_resolving_stable(self):
+        FakeWorkflowState.marked_stable = True
+
+
+sys.modules.setdefault(
+    "plugins.DispatchThis.workflow_state",
+    types.SimpleNamespace(FunctionWorkflowState=FakeWorkflowState),
+)
 
 spec = importlib.util.spec_from_file_location(
     "plugins.DispatchThis.workflow",
@@ -109,5 +137,23 @@ def test_deflatten_workflow_runs_without_resolved_gadget_map():
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
 
 
+def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
+    FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
+    FakeWorkflowState.marked_stable = False
+    branch_plan_calls.clear()
+    ctx = FakeContext()
+    ctx.view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    ctx.llil = object()
+
+    workflow.workflow_resolve_jumps_llil(ctx)
+
+    assert branch_plan_calls == [FakeWorkflowState.receipts]
+    assert FakeWorkflowState.marked_stable is True
+
+
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_resolved_gadget_map()
+    test_branch_resolver_reuses_branch_receipts_as_gadget_cache()

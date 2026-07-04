@@ -78,7 +78,7 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = analysis_context.llil
-    plan = resolve_llil_jump_plan(bv, llil)
+    plan = resolve_llil_jump_plan(bv, llil, state.branch_target_receipts())
     apply_llil_jump_rewrites(bv, llil, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
