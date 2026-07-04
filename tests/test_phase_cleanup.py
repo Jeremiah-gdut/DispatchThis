@@ -38,9 +38,10 @@ class Op:
 
 
 class Var:
-    def __init__(self, name, version):
+    def __init__(self, name, version, source_type=None):
         self.name = name
         self.version = version
+        self.source_type = source_type
 
 
 class Ins:
@@ -102,7 +103,22 @@ def test_non_ssa_root_does_not_pull_unrelated_same_index_ssa_instruction():
     assert candidates == {10}
 
 
+def test_stack_var_state_write_keeps_source_live():
+    x = Var("x", 1)
+    state = Var("state", 1, types.SimpleNamespace(name="StackVariableSourceType"))
+
+    decode = Ins(1, "MLIL_SET_VAR_SSA", writes=[x])
+    state_write = Ins(2, "MLIL_SET_VAR_SSA", reads=[x], writes=[state])
+    ssa = FakeSSA({x: [state_write]}, [decode, state_write])
+
+    candidates, by_index = _candidate_slice(ssa, {1, 2})
+    kept = _drop_live_escapes(ssa, candidates, by_index)
+
+    assert kept == set()
+
+
 if __name__ == "__main__":
     test_phi_only_use_does_not_keep_decode_candidate_live()
     test_phi_chain_with_real_use_keeps_decode_candidate_live()
     test_non_ssa_root_does_not_pull_unrelated_same_index_ssa_instruction()
+    test_stack_var_state_write_keeps_source_live()

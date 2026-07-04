@@ -67,6 +67,12 @@ def _ssa_uses(ssa, var):
         return []
 
 
+def _is_stack_var(var):
+    var = getattr(var, "var", var)
+    source_type = getattr(var, "source_type", None)
+    return getattr(source_type, "name", str(source_type)) == "StackVariableSourceType"
+
+
 def _use_escapes(ssa, use, candidates, seen):
     if use.instr_index in candidates:
         return False
@@ -106,6 +112,8 @@ def _candidate_slice(ssa, root_indices):
             continue
         ins = by_index.get(idx)
         if ins is None or ins.operation.name not in _SSA_CLEANUP_OPS:
+            continue
+        if any(_is_stack_var(var) for var in getattr(ins, "vars_written", ())):
             continue
         candidates.add(idx)
         for var in ins.vars_read:

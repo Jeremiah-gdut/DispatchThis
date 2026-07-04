@@ -12,6 +12,10 @@ _CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 _LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
 
 
+def _walk(expr):
+    return list(expr.traverse(lambda node: node))
+
+
 def _label(idx):
     label = MediumLevelILLabel()
     label.operand = idx
@@ -20,6 +24,10 @@ def _label(idx):
 
 def _const(expr):
     return expr.constant & U64 if expr.operation.name in _CONST_OPS else None
+
+
+def _var_from_expr(expr):
+    return expr.src if expr.operation.name == "MLIL_VAR" else None
 
 
 def _single_var_def(mlil, var):
@@ -31,6 +39,13 @@ def _eval_const(bv, mlil, expr, overrides, depth=0):
     if expr is None or depth > 64:
         return None
     op = expr.operation.name
+
+    bool_expr, bool_value = overrides.get("__bool_to_int__", (None, None))
+    expr_index = getattr(expr, "expr_index", None)
+    bool_index = getattr(bool_expr, "expr_index", None)
+    same_bool = expr_index == bool_index if expr_index is not None and bool_index is not None else expr is bool_expr
+    if op == "MLIL_BOOL_TO_INT" and same_bool:
+        return bool_value & U64
 
     if op in _CONST_OPS:
         return expr.constant & U64
@@ -81,8 +96,38 @@ def _eval_const(bv, mlil, expr, overrides, depth=0):
     return None
 
 
+def _find_bool_to_int(mlil, expr, seen=None, depth=0):
+    if expr is None or depth > 64:
+        return None
+    if seen is None:
+        seen = set()
+    for node in _walk(expr):
+        if node.operation.name == "MLIL_BOOL_TO_INT":
+            return node
+        var = _var_from_expr(node)
+        if var is None or var in seen:
+            continue
+        seen.add(var)
+        d = _single_var_def(mlil, var)
+        found = None if d is None else _find_bool_to_int(mlil, d.src, seen, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
 def _target_idx_for_value(bv, mlil, jump_il, var, value):
     target = _eval_const(bv, mlil, jump_il.dest, {var: value})
+    if target is None:
+        return None
+    target &= U48
+    for addr, idx in jump_il.targets.items():
+        if (addr & U48) == target:
+            return idx
+    return None
+
+
+def _target_idx_for_bool(bv, mlil, jump_il, bool_expr, value):
+    target = _eval_const(bv, mlil, jump_il.dest, {"__bool_to_int__": (bool_expr, value)})
     if target is None:
         return None
     target &= U48
@@ -123,9 +168,29 @@ def _condition_expr(mlil, if_il):
     return d.src if d is not None else cond
 
 
+def _bool_condition_expr(mlil, bool_expr):
+    cond = bool_expr.src
+    if cond.operation.name != "MLIL_VAR":
+        return cond
+    d = _single_var_def(mlil, cond.src)
+    return d.src if d is not None else cond
+
+
 def _plan_for_jump(bv, mlil, jump_il):
     if jump_il.operation.name != "MLIL_JUMP_TO" or len(jump_il.targets) != 2:
         return None
+
+    bool_expr = _find_bool_to_int(mlil, jump_il.dest)
+    if bool_expr is not None:
+        true_idx = _target_idx_for_bool(bv, mlil, jump_il, bool_expr, 1)
+        false_idx = _target_idx_for_bool(bv, mlil, jump_il, bool_expr, 0)
+        if true_idx is not None and false_idx is not None and true_idx != false_idx:
+            return {
+                "condition": _bool_condition_expr(mlil, bool_expr),
+                "true": true_idx,
+                "false": false_idx,
+                "cleanup_roots": mlil_def_roots(mlil, jump_il.dest),
+            }
 
     join = jump_il.il_basic_block
     arms = [edge.source for edge in join.incoming_edges]
