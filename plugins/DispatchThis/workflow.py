@@ -245,19 +245,13 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
     # Eligibility (the Deflatten per-function toggle) gates whether this activity
     # runs at all; by the time we're here the function is enrolled in deflatten.
 
-    # Don't deflatten until the LLIL pass has drained every indirect jump --
-    # otherwise the CFG is still incomplete and the state machine is partial.
+    # Don't deflatten until the LLIL pass has drained every indirect jump;
+    # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
     llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
     if not llil_stable.get(func.start):
         return
 
-    # {jump_addr: target} recovered by the LLIL pass that resolved indirect jumps
-    gadget_map = bv.session_data.get("dispatchthis_gadget_map", {}).get(func.start, {})
-    if not gadget_map:
-        log_warn(f"[workflow] {func.name}: no resolved gadget map; nothing to deflatten")
-        return
-
-    redirections = compute_redirections(bv, func, gadget_map=gadget_map, mlil=mlil)
+    redirections = compute_redirections(bv, func, mlil=mlil)
     if not redirections:
         return
 
@@ -277,7 +271,7 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
     applied = apply_redirections_il(mlil, redirections)
 
     if applied:
-        analysis_context.set_mlil_function(mlil)
+        _commit_mlil(analysis_context, mlil)
         mlil_stable = bv.session_data.setdefault("dispatchthis_mlil_stable", {})
         log_info(f"{func.name} has been deflattened")
         mlil_stable[func.start] = True
@@ -298,6 +292,6 @@ def workflow_cleanup(analysis_context: AnalysisContext):
 
     _jumps, _ifs, _nops, state_writes = clean_resolved_gadget_jumps(bv, func, mlil=mlil)
     if state_writes:
-        analysis_context.set_mlil_function(mlil)
+        _commit_mlil(analysis_context, mlil)
 
     log_info(f"{func.name} has been cleaned")
