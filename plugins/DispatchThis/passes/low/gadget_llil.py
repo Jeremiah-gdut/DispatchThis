@@ -63,6 +63,42 @@ _CMP = {
 }
 
 
+def _mask_for_expr(expr):
+    try:
+        size = int(expr.size)
+    except Exception:  # noqa: BLE001
+        return U48
+    if size <= 0:
+        return U48
+    return (1 << min(size * 8, 48)) - 1
+
+
+def _expr_constant(expr):
+    try:
+        rv = expr.value
+    except Exception:  # noqa: BLE001
+        rv = None
+    if rv is not None and rv.type.name in ("ConstantValue", "ConstantPointerValue"):
+        return rv.value & U48
+    return None
+
+
+def _bool_to_int_const(bv, ssa, expr, depth):
+    try:
+        cond = _define_cond(ssa, expr.src)
+    except Exception:  # noqa: BLE001
+        cond = expr.src
+    cmp_fn = _CMP.get(cond.operation.name)
+    if cmp_fn is not None:
+        left_const = _reg_const(bv, ssa, cond.left, depth + 1)
+        right_const = _reg_const(bv, ssa, cond.right, depth + 1)
+        if left_const is not None and right_const is not None:
+            return 1 if cmp_fn(left_const, right_const) else 0
+
+    v = _expr_constant(expr)
+    return None if v is None else (v & 1)
+
+
 # --------------------------------------------------------------------------- #
 # table decode (closed form)
 # --------------------------------------------------------------------------- #
@@ -115,6 +151,9 @@ def _reg_const(bv, ssa, expr, depth=0):
     if op in ("LLIL_ZX", "LLIL_SX", "LLIL_LOW_PART"):
         return _reg_const(bv, ssa, expr.src, depth + 1)
 
+    if op == "LLIL_BOOL_TO_INT":
+        return _bool_to_int_const(bv, ssa, expr, depth + 1)
+
     if op in ("LLIL_LSL", "LLIL_LSR"):
         l = _reg_const(bv, ssa, expr.left, depth + 1)
         r = _reg_const(bv, ssa, expr.right, depth + 1)
@@ -164,12 +203,21 @@ def _reg_const(bv, ssa, expr, depth=0):
         # LLIL_SET_REG_SSA / _PARTIAL -- a copy or materialized constant.
         return _reg_const(bv, ssa, d.src, depth + 1)
 
-    try:
-        rv = expr.value
-    except Exception:  # noqa: BLE001
-        rv = None
-    if rv is not None and rv.type.name in ("ConstantValue", "ConstantPointerValue"):
-        return rv.value & U48
+    if op == "LLIL_REG_SSA_PARTIAL":
+        d = ssa.get_ssa_reg_definition(expr.full_reg)
+        if d is None:
+            return _expr_constant(expr)
+        if d.operation.name == "LLIL_REG_PHI":
+            v = _phi_const(bv, ssa, d, depth + 1)
+            return None if v is None else (v & _mask_for_expr(expr))
+        if hasattr(d, "src"):
+            v = _reg_const(bv, ssa, d.src, depth + 1)
+            return None if v is None else (v & _mask_for_expr(expr))
+        return _expr_constant(expr)
+
+    v = _expr_constant(expr)
+    if v is not None:
+        return v
 
     return None
 
@@ -187,6 +235,10 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
 
     if op in ("LLIL_ZX", "LLIL_SX", "LLIL_LOW_PART"):
         return _reg_consts(bv, ssa, expr.src, depth + 1, seen)
+
+    if op == "LLIL_BOOL_TO_INT":
+        v = _reg_const(bv, ssa, expr, depth + 1)
+        return {v} if v is not None else {0, 1}
 
     if op in ("LLIL_LSL", "LLIL_LSR"):
         lefts = _reg_consts(bv, ssa, expr.left, depth + 1, seen)
@@ -236,6 +288,29 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
             return set() if v is None else {v}
         if hasattr(d, "src"):
             return _reg_consts(bv, ssa, d.src, depth + 1, seen)
+
+    if op == "LLIL_REG_SSA_PARTIAL":
+        key = ("partial", str(expr.full_reg), str(expr.src))
+        if key in seen:
+            return set()
+        seen.add(key)
+        d = ssa.get_ssa_reg_definition(expr.full_reg)
+        if d is None:
+            v = _expr_constant(expr)
+            return set() if v is None else {v & _mask_for_expr(expr)}
+        mask = _mask_for_expr(expr)
+        if d.operation.name == "LLIL_REG_PHI":
+            vals = set()
+            for var in d.src:
+                od = ssa.get_ssa_reg_definition(var)
+                if od is not None and hasattr(od, "src"):
+                    vals.update(_reg_consts(bv, ssa, od.src, depth + 1, seen.copy()))
+            if vals:
+                return {v & mask for v in vals}
+            v = _reg_const(bv, ssa, expr)
+            return set() if v is None else {v & mask}
+        if hasattr(d, "src"):
+            return {v & mask for v in _reg_consts(bv, ssa, d.src, depth + 1, seen)}
 
     v = _reg_const(bv, ssa, expr)
     return set() if v is None else {v}
