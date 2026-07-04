@@ -70,6 +70,7 @@ sys.modules.setdefault(
 )
 class FakeWorkflowState:
     receipts = {}
+    unmapped = set()
     marked_stable = False
 
     def __init__(self, _func):
@@ -77,7 +78,7 @@ class FakeWorkflowState:
 
     @staticmethod
     def unmapped_unresolved_sources(_func):
-        return set()
+        return FakeWorkflowState.unmapped
 
     def branch_resolving_is_stable(self, _func):
         return False
@@ -139,6 +140,7 @@ def test_deflatten_workflow_runs_without_resolved_gadget_map():
 
 def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
     FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
+    FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     branch_plan_calls.clear()
     ctx = FakeContext()
@@ -151,9 +153,27 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
     workflow.workflow_resolve_jumps_llil(ctx)
 
     assert branch_plan_calls == [FakeWorkflowState.receipts]
+
+
+def test_branch_resolver_does_not_reparse_when_bn_has_no_unmapped_sources():
+    FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    branch_plan_calls.clear()
+    ctx = FakeContext()
+    ctx.view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    ctx.llil = object()
+
+    workflow.workflow_resolve_jumps_llil(ctx)
+
+    assert branch_plan_calls == []
     assert FakeWorkflowState.marked_stable is True
 
 
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_resolved_gadget_map()
     test_branch_resolver_reuses_branch_receipts_as_gadget_cache()
+    test_branch_resolver_does_not_reparse_when_bn_has_no_unmapped_sources()

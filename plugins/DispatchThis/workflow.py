@@ -76,6 +76,15 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
         return
 
+    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
+        log_info(f"All of {func.name}'s indirect jumps have been resolved")
+        state.mark_branch_resolving_stable()
+        llil_stable[func.start] = True
+        _mirror_branch_state_for_legacy_passes(bv, func, state)
+        clear_resolved_indirect_branch_tags(func)
+        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
+        return
+
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = analysis_context.llil
     plan = resolve_llil_jump_plan(bv, llil, state.branch_target_receipts())
