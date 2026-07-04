@@ -19,6 +19,7 @@ for name in (
 
 calls = []
 branch_plan_calls = []
+branch_iter_items = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -60,6 +61,7 @@ sys.modules.setdefault(
     types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
         clear_resolved_indirect_branch_tags=lambda *_args, **_kwargs: None,
+        iter_llil_indirect_jumps=lambda _llil: iter(branch_iter_items),
         resolve_llil_jump_plan=lambda _bv, _llil, gadget_map=None: branch_plan_calls.append(gadget_map) or [],
         schedule_resolved_indirect_branch_tag_cleanup=lambda *_args, **_kwargs: None,
     ),
@@ -143,6 +145,7 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     branch_plan_calls.clear()
+    branch_iter_items.clear()
     ctx = FakeContext()
     ctx.view = types.SimpleNamespace(
         arch=types.SimpleNamespace(name="aarch64"),
@@ -155,11 +158,12 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
     assert branch_plan_calls == [FakeWorkflowState.receipts]
 
 
-def test_branch_resolver_does_not_reparse_when_bn_has_no_unmapped_sources():
-    FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
+def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
+    FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
     branch_plan_calls.clear()
+    branch_iter_items[:] = [object()]
     ctx = FakeContext()
     ctx.view = types.SimpleNamespace(
         arch=types.SimpleNamespace(name="aarch64"),
@@ -169,11 +173,11 @@ def test_branch_resolver_does_not_reparse_when_bn_has_no_unmapped_sources():
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert branch_plan_calls == []
-    assert FakeWorkflowState.marked_stable is True
-
+    assert branch_plan_calls == [{}]
+    assert FakeWorkflowState.marked_stable is False
+    branch_iter_items.clear()
 
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_resolved_gadget_map()
     test_branch_resolver_reuses_branch_receipts_as_gadget_cache()
-    test_branch_resolver_does_not_reparse_when_bn_has_no_unmapped_sources()
+    test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()

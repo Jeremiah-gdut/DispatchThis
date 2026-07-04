@@ -30,10 +30,11 @@ def test_branch_receipts_gate_repeated_mutations_and_invalidate_calls():
     first_plan = {0x1000: (0x2000, 0x3000)}
     assert state.branch_mutations_for(first_plan) == first_plan
     assert state.mark_branch_mutation_applied(0x1000, first_plan[0x1000]) is False
-    assert state.branch_mutations_for(first_plan) == {}
+    assert state.branch_mutations_for(first_plan) == first_plan
 
-    func.indirect_branches = [FakeBranch(0x1000)]
+    func.indirect_branches = [FakeBranch(0x1000, 0x2000), FakeBranch(0x1000, 0x3000)]
     state.mark_branch_resolving_stable()
+    assert state.branch_mutations_for(first_plan) == {}
     assert state.branch_resolving_is_stable(func)
 
     state.mark_call_adjustment_applied(0x4000, 0x5000)
@@ -90,6 +91,26 @@ def test_existing_user_branch_metadata_seeds_branch_receipts():
     assert state.branch_mutations_for({0x4000: (0x5000,)}) == {0x4000: (0x5000,)}
 
 
+def test_stale_branch_receipts_reapply_when_bn_metadata_is_missing():
+    func = FakeFunction()
+    state = FunctionWorkflowState(func)
+    state.mark_branch_mutation_applied(0x1000, (0x2000, 0x3000))
+    state.mark_branch_resolving_stable()
+
+    plan = {0x1000: (0x2000, 0x3000)}
+
+    assert not state.branch_resolving_is_stable(func)
+    assert state.branch_mutations_for(plan) == plan
+
+    func.indirect_branches = [
+        FakeBranch(0x1000, 0x2000),
+        FakeBranch(0x1000, 0x3000),
+    ]
+
+    assert state.branch_mutations_for(plan) == {}
+    assert state.branch_resolving_is_stable(func)
+
+
 def test_cleanup_receipts_invalidate_with_phase_targets():
     state = FunctionWorkflowState(FakeFunction())
 
@@ -119,4 +140,5 @@ if __name__ == "__main__":
     test_call_receipts_gate_repeated_adjustments()
     test_call_target_receipts_feed_cleanup_without_gating_type_adjustments()
     test_existing_user_branch_metadata_seeds_branch_receipts()
+    test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()

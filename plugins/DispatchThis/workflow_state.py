@@ -28,6 +28,19 @@ def _targets_tuple(targets):
     return tuple(sorted(set(targets)))
 
 
+def _user_branch_targets(func):
+    by_source = {}
+    for branch in getattr(func, "indirect_branches", ()):
+        if getattr(branch, "auto_defined", False):
+            continue
+        source = getattr(branch, "source_addr", None)
+        target = getattr(branch, "dest_addr", None)
+        if source is None or target is None:
+            continue
+        by_source.setdefault(source, set()).add(target)
+    return {source: _targets_tuple(targets) for source, targets in by_source.items()}
+
+
 def _normalize_state(data):
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
@@ -70,15 +83,7 @@ class FunctionWorkflowState:
         empty.
         """
         func = func or self.func
-        by_source = {}
-        for branch in getattr(func, "indirect_branches", ()):
-            if getattr(branch, "auto_defined", False):
-                continue
-            source = getattr(branch, "source_addr", None)
-            target = getattr(branch, "dest_addr", None)
-            if source is None or target is None:
-                continue
-            by_source.setdefault(source, set()).add(target)
+        by_source = _user_branch_targets(func)
 
         seeded = 0
         for source, targets in by_source.items():
@@ -90,11 +95,12 @@ class FunctionWorkflowState:
 
     def branch_mutations_for(self, resolved_targets):
         mutations = {}
+        applied_targets = _user_branch_targets(self.func)
         for source, targets in resolved_targets.items():
             targets = _targets_tuple(targets)
             if not targets:
                 continue
-            if self.branch_receipts.get(source) != targets:
+            if self.branch_receipts.get(source) != targets or applied_targets.get(source) != targets:
                 mutations[source] = targets
         return mutations
 
@@ -114,7 +120,10 @@ class FunctionWorkflowState:
 
     def branch_resolving_is_stable(self, func=None):
         func = func or self.func
-        return self.data["branch"]["stable"] and not self.unmapped_unresolved_sources(func)
+        if not self.data["branch"]["stable"] or self.unmapped_unresolved_sources(func):
+            return False
+        applied_targets = _user_branch_targets(func)
+        return all(applied_targets.get(source) == targets for source, targets in self.branch_target_receipts().items())
 
     def branch_cleanup_needed(self):
         return not self.data["branch"]["cleanup_done"]

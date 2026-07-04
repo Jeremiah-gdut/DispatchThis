@@ -11,6 +11,7 @@ from .passes.medium.global_constants import CONST_SLOT_TYPE, plan_global_constan
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
+    iter_llil_indirect_jumps,
     resolve_llil_jump_plan,
     schedule_resolved_indirect_branch_tag_cleanup,
 )
@@ -76,17 +77,9 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
         return
 
-    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
-        log_info(f"All of {func.name}'s indirect jumps have been resolved")
-        state.mark_branch_resolving_stable()
-        llil_stable[func.start] = True
-        _mirror_branch_state_for_legacy_passes(bv, func, state)
-        clear_resolved_indirect_branch_tags(func)
-        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
-        return
-
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = analysis_context.llil
+    has_indirect_jumps = any(True for _ in iter_llil_indirect_jumps(llil))
     plan = resolve_llil_jump_plan(bv, llil, state.branch_target_receipts())
     apply_llil_jump_rewrites(bv, llil, plan)
 
@@ -108,7 +101,9 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} indirect branch target update(s)")
         return
 
-    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
+    if not FunctionWorkflowState.unmapped_unresolved_sources(func) and (
+        resolved_targets or getattr(func, "indirect_branches", ()) or not has_indirect_jumps
+    ):
         log_info(f"All of {func.name}'s indirect jumps have been resolved")
         state.mark_branch_resolving_stable()
         llil_stable[func.start] = True
