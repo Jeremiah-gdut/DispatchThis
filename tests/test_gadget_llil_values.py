@@ -98,6 +98,11 @@ def bool_to_int():
     return Expr("LLIL_BOOL_TO_INT", f"{cmp} ? 1 : 0", src=cmp)
 
 
+def bool_to_int_from_constant_cmp():
+    cmp = Expr("LLIL_CMP_SLT", "0 s< 0", left=const(0), right=const(0))
+    return Expr("LLIL_BOOL_TO_INT", f"{cmp} ? 1 : 0", src=cmp)
+
+
 def lsl(left, shift):
     return Expr("LLIL_LSL", f"{left} << {shift}", left=left, right=const(shift))
 
@@ -134,6 +139,12 @@ def test_zx_partial_copied_to_full_reg_offsets_collect_both_targets():
     assert gadget_llil._reg_consts(None, ssa, offset) == {0, 0x80}
 
 
+def test_bool_to_int_offsets_do_not_prune_constant_state_compare():
+    offset = lsl(bool_to_int_from_constant_cmp(), 4)
+
+    assert gadget_llil._reg_consts(None, FakeSSA({}), offset) == {0, 0x10}
+
+
 def test_stack_spill_reload_constant_is_folded_without_vsa():
     sp_1 = Var("sp", 1)
     x8_23 = Var("x8", 23)
@@ -148,4 +159,5 @@ def test_stack_spill_reload_constant_is_folded_without_vsa():
 if __name__ == "__main__":
     test_bool_to_int_partial_reg_offsets_collect_both_targets()
     test_zx_partial_copied_to_full_reg_offsets_collect_both_targets()
+    test_bool_to_int_offsets_do_not_prune_constant_state_compare()
     test_stack_spill_reload_constant_is_folded_without_vsa()

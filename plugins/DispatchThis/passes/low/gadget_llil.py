@@ -291,8 +291,7 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
         return _reg_consts(bv, ssa, expr.src, depth + 1, seen)
 
     if op == "LLIL_BOOL_TO_INT":
-        v = _reg_const(bv, ssa, expr, depth + 1)
-        return {v} if v is not None else {0, 1}
+        return {0, 1}
 
     if op in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
         src = _stack_store_source(ssa, expr)
