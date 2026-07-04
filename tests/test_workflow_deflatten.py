@@ -19,6 +19,7 @@ for name in (
 
 calls = []
 branch_plan_calls = []
+branch_plan_results = {}
 branch_iter_items = []
 
 
@@ -62,7 +63,7 @@ sys.modules.setdefault(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
         clear_resolved_indirect_branch_tags=lambda *_args, **_kwargs: None,
         iter_llil_indirect_jumps=lambda _llil: iter(branch_iter_items),
-        resolve_llil_jump_plan=lambda _bv, _llil, gadget_map=None: branch_plan_calls.append(gadget_map) or [],
+        resolve_llil_jump_plan=lambda _bv, llil, gadget_map=None: branch_plan_calls.append((llil, gadget_map)) or branch_plan_results.get(llil, []),
         schedule_resolved_indirect_branch_tag_cleanup=lambda *_args, **_kwargs: None,
     ),
 )
@@ -145,6 +146,7 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     branch_plan_calls.clear()
+    branch_plan_results.clear()
     branch_iter_items.clear()
     ctx = FakeContext()
     ctx.view = types.SimpleNamespace(
@@ -155,7 +157,7 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert branch_plan_calls == [FakeWorkflowState.receipts]
+    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [FakeWorkflowState.receipts]
 
 
 def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
@@ -163,7 +165,8 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
     branch_plan_calls.clear()
-    branch_iter_items[:] = [object()]
+    branch_plan_results.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x1000)]
     ctx = FakeContext()
     ctx.view = types.SimpleNamespace(
         arch=types.SimpleNamespace(name="aarch64"),
@@ -173,11 +176,59 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert branch_plan_calls == [{}]
+    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [{}]
     assert FakeWorkflowState.marked_stable is False
     branch_iter_items.clear()
+
+
+def test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
+    ctx = FakeContext()
+    ctx.function.indirect_branches = [types.SimpleNamespace(source_addr=0x1000)]
+    ctx.view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    ctx.llil = object()
+
+    workflow.workflow_resolve_jumps_llil(ctx)
+
+    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [{}]
+    assert FakeWorkflowState.marked_stable is False
+    branch_iter_items.clear()
+
+
+def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = {0x2000}
+    FakeWorkflowState.marked_stable = False
+    branch_plan_calls.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
+    ctx = FakeContext()
+    ctx.function.indirect_branches = [types.SimpleNamespace(source_addr=0x1000)]
+    ctx.function.low_level_il = "function-llil"
+    ctx.view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    ctx.llil = "context-llil"
+    branch_plan_results.clear()
+    branch_plan_results["function-llil"] = [{"source": 0x2000, "targets": (0x3000,)}]
+
+    workflow.workflow_resolve_jumps_llil(ctx)
+
+    assert [llil for llil, _gadget_map in branch_plan_calls] == ["function-llil"]
+    branch_iter_items.clear()
+    branch_plan_results.clear()
 
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_resolved_gadget_map()
     test_branch_resolver_reuses_branch_receipts_as_gadget_cache()
     test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
+    test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
+    test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()

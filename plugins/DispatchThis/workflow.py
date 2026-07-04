@@ -79,9 +79,23 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = analysis_context.llil
-    has_indirect_jumps = any(True for _ in iter_llil_indirect_jumps(llil))
-    plan = resolve_llil_jump_plan(bv, llil, state.branch_target_receipts())
-    apply_llil_jump_rewrites(bv, llil, plan)
+    indirect_jump_sources = {jump.address for jump in iter_llil_indirect_jumps(llil)}
+    mapped_sources = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
+    fallback_llil = getattr(func, "low_level_il", None)
+    plan_llil = fallback_llil if mapped_sources and fallback_llil is not None else llil
+    plan = resolve_llil_jump_plan(bv, plan_llil, state.branch_target_receipts())
+    if plan_llil is llil:
+        apply_llil_jump_rewrites(bv, llil, plan)
+
+    covered_sources = {item["source"] for item in plan} | mapped_sources
+    if indirect_jump_sources - covered_sources and plan_llil is not llil:
+        seen_sources = {item["source"] for item in plan}
+        context_plan = resolve_llil_jump_plan(bv, llil, state.branch_target_receipts())
+        apply_llil_jump_rewrites(bv, llil, context_plan)
+        for item in context_plan:
+            if item["source"] not in seen_sources:
+                plan.append(item)
+                seen_sources.add(item["source"])
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     mutations = state.branch_mutations_for(resolved_targets)
@@ -101,8 +115,10 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} indirect branch target update(s)")
         return
 
-    if not FunctionWorkflowState.unmapped_unresolved_sources(func) and (
-        resolved_targets or getattr(func, "indirect_branches", ()) or not has_indirect_jumps
+    covered_sources = set(resolved_targets) | mapped_sources
+    if (
+        not FunctionWorkflowState.unmapped_unresolved_sources(func)
+        and indirect_jump_sources <= covered_sources
     ):
         log_info(f"All of {func.name}'s indirect jumps have been resolved")
         state.mark_branch_resolving_stable()
