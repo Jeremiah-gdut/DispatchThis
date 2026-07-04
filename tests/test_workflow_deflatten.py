@@ -226,9 +226,21 @@ def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     branch_iter_items.clear()
     branch_plan_results.clear()
 
+
+def test_noreturn_type_detection_and_fallthrough_callsite():
+    block = types.SimpleNamespace(start=0, end=2, outgoing_edges=[])
+    first = types.SimpleNamespace(instr_index=10, il_basic_block=block)
+    call = types.SimpleNamespace(instr_index=11, il_basic_block=block)
+    mlil = [first, call]
+
+    assert workflow._type_is_noreturn("void() __noreturn")
+    assert workflow._call_has_fallthrough(mlil, first)
+    assert not workflow._call_has_fallthrough(mlil, call)
+
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_resolved_gadget_map()
     test_branch_resolver_reuses_branch_receipts_as_gadget_cache()
     test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
+    test_noreturn_type_detection_and_fallthrough_callsite()

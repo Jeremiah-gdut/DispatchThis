@@ -60,6 +60,18 @@ def _global_constant_type_applied(bv, slot_addr):
     return data_var is not None and _normalized_type_name(data_var.type) == _normalized_type_name(CONST_SLOT_TYPE)
 
 
+def _type_is_noreturn(type_):
+    return "__noreturn" in str(type_).lower()
+
+
+def _call_has_fallthrough(mlil, call_il):
+    block = call_il.il_basic_block
+    for idx in range(block.start, block.end - 1):
+        if mlil[idx].instr_index == call_il.instr_index:
+            return True
+    return bool(block.outgoing_edges)
+
+
 def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
     func = analysis_context.function
     bv = analysis_context.view
@@ -150,6 +162,13 @@ def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
             continue
         callee = bv.get_function_at(target)
         if callee is None or callee.type is None:
+            continue
+        if _type_is_noreturn(callee.type) and _call_has_fallthrough(mlil, plan["call_il"]):
+            state.mark_call_adjustment_applied(call_addr, target)
+            log_warn(
+                f"[workflow] {func.name}: skipped noreturn type adjustment at "
+                f"{hex(call_addr)} -> {callee.name}; call has fallthrough"
+            )
             continue
         try:
             func.set_call_type_adjustment(call_addr, callee.type)
