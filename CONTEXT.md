@@ -30,8 +30,18 @@ _Avoid_: global variable fixing, data constant propagation
 **Dispatcher**:
 The flattened control-flow router that chooses the next original block from a state value.
 
+**Dispatcher cluster**:
+A connected set of dispatcher comparison blocks that route by comparing state
+tokens. For current samples, identify it from equality comparisons whose
+variables trace back to the same state variable; graph shape validates the
+cluster but is not the primary signal.
+
 **State variable**:
 The value consumed by the dispatcher to select the next original block.
+
+**State token**:
+The opaque dispatcher value compared against the state variable. Its bit width is
+part of its identity; do not assume all state tokens are 32-bit.
 
 **Original basic block**:
 A block from the original control flow before flattening redirected it through the dispatcher.
@@ -39,6 +49,16 @@ _Avoid_: OBB outside short code comments
 
 **Deflattening**:
 Reconnecting original basic blocks directly after dispatcher-controlled successors are recovered.
+
+**Unconditional transition**:
+A recovered original-block successor selected by a single state token write.
+
+**Conditional transition**:
+A recovered original-block successor set selected from multiple state tokens by
+program control flow, such as a branch/cmove diamond. For the current sample
+family it carries two branch outcomes, each with its own state token and target
+original basic block. Deflattening rewrites conditional transitions when both
+branch outcomes resolve.
 
 **Workflow phase**:
 A named stage of per-function recovery work whose result controls whether later recovery work may run.

@@ -41,9 +41,18 @@ def _txt(instr):
 
 
 def _ref_consts(instr):
-    """Every constant value referenced anywhere in ``instr`` (masked to 32 bits, to
-    match the recorded dispatcher state constants regardless of signedness)."""
-    return {e.constant & 0xFFFFFFFF for e in _walk(instr) if e.operation.name in _CONST_OPS}
+    """Every constant value referenced anywhere in ``instr``.
+
+    Include the legacy low-32-bit form as well as the full value because v2
+    deflatten records state tokens without assuming a 32-bit width.
+    """
+    values = set()
+    for expr in _walk(instr):
+        if expr.operation.name not in _CONST_OPS:
+            continue
+        values.add(expr.constant)
+        values.add(expr.constant & 0xFFFFFFFF)
+    return values
 
 
 def _walk(expr):
@@ -343,7 +352,9 @@ def nop_state_writes(mlil, state_consts, state_vars):
             continue
         if ins.instr_index in seen:
             continue
-        by_value = ins.src.operation.name in _CONST_OPS and (ins.src.constant & u32) in state_consts
+        by_value = ins.src.operation.name in _CONST_OPS and (
+            ins.src.constant in state_consts or (ins.src.constant & u32) in state_consts
+        )
         by_var = ins.operation.name in var_ops and ins.dest in state_vars
         if not (by_value or by_var):
             continue

@@ -8,7 +8,6 @@ from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_ind
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_phase_decode, mlil_set_var_roots_before_sites
 from .passes.medium.global_constants import CONST_SLOT_TYPE, plan_global_constant_slots
-from .utils import StateMachine
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -252,25 +251,30 @@ def workflow_deflatten_mlil(analysis_context: AnalysisContext):
     if not llil_stable.get(func.start):
         return
 
-    # MLIL rewrites are overlays on LLIL and reverted on each regeneration, so deflatten re-applies every pass.
-    sm = StateMachine(bv, func).analyze()
-    if sm.state_var is None:
-        return
-
     # {jump_addr: target} recovered by the LLIL pass that resolved indirect jumps
     gadget_map = bv.session_data.get("dispatchthis_gadget_map", {}).get(func.start, {})
     if not gadget_map:
         log_warn(f"[workflow] {func.name}: no resolved gadget map; nothing to deflatten")
         return
 
-    # Stash state constants and variable aliases so cleanup can precisely NOP state writes.
-    state_consts = set(sm.backbone.keys())
-    bv.session_data.setdefault("dispatchthis_state_consts", {})[func.start] = state_consts
-    bv.session_data.setdefault("dispatchthis_state_vars", {})[func.start] = sm.state_write_vars
-    log_info(f"[workflow] {func.name}: recorded {len(state_consts)} dispatcher state constant(s)")
+    redirections = compute_redirections(bv, func, gadget_map=gadget_map)
+    if not redirections:
+        return
 
-    redirections = compute_redirections(bv, func, sm=sm, gadget_map=gadget_map)
-    applied = apply_redirections_il(func.medium_level_il, redirections) if redirections else 0
+    # Stash state tokens and variables so cleanup can NOP state writes. The
+    # cleanup pass still consumes integer constants, so keep the value component
+    # here; deflatten matching itself uses full (value, width) tokens.
+    state_tokens = set()
+    state_vars = set()
+    for plan in redirections:
+        state_tokens.update(plan.get("state_tokens", ()))
+        state_vars.update(plan.get("state_vars", ()))
+    state_consts = {value for value, _size in state_tokens}
+    bv.session_data.setdefault("dispatchthis_state_consts", {})[func.start] = state_consts
+    bv.session_data.setdefault("dispatchthis_state_vars", {})[func.start] = state_vars
+    log_info(f"[workflow] {func.name}: recorded {len(state_tokens)} dispatcher state token(s)")
+
+    applied = apply_redirections_il(func.medium_level_il, redirections)
 
     if applied:
         mlil_stable = bv.session_data.setdefault("dispatchthis_mlil_stable", {})
