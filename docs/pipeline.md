@@ -5,20 +5,21 @@ own activities into it. Everything is IL expression rewriting - no bytes are pat
 
 ## Registration and ordering
 
-From `__init__.py` / `workflow.py`, five activities are inserted:
+From `__init__.py` / `workflow.py`, six activities are inserted:
 
 | Activity ID | Stage | Inserted before |
 | --- | --- | --- |
 | `extension.DispatchThis.IndirectPatcher` | LLIL | `core.function.generateMediumLevelIL` |
 | `extension.DispatchThis.IndirectCallPatcher` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.BranchConditionTranslator` | MLIL | `core.function.generateHighLevelIL` |
+| `extension.DispatchThis.GlobalConstantResolver` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.Deflattener` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.Cleanup` | MLIL | `core.function.generateHighLevelIL` |
 
 The indirect-jump resolver runs **before MLIL is generated**, because the deflattener needs
 the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
-The other four run before HLIL generation, in the order call-resolve → branch-condition
-translation → deflatten → cleanup. The MLIL activities gate themselves on function phase
+The other five run before HLIL generation, in the order call-resolve → branch-condition
+translation → global-constant resolving → deflatten → cleanup. The MLIL activities gate themselves on function phase
 state, so they do not submit reanalysis-triggering mutations until indirect branch
 resolving is stable.
 
@@ -63,7 +64,18 @@ After indirect branch resolving is stable, the translator rewrites those two-tar
 switches back into `MLIL_IF` expressions. This is a repeatable presentation rewrite and
 does not own mutation receipts.
 
-### 4. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
+### 4. Global constant resolver (MLIL) - `passes/medium/global_constants.py`
+
+`plan_global_constant_slots` recognizes narrow writable-section global pointer slots that
+are only used as read-only constant bases. The workflow callback applies the
+BinaryView-level `define_user_data_var` mutation with a `uint8_t const* const` type and
+records a view-level receipt so several functions do not retype the same slot.
+
+The first scope is intentionally narrow: a qword slot in `.data`, a nonzero constant
+offset chain, a valid resolved address, and no store to the slot in the known direct-ref
+functions.
+
+### 5. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
 
 Gated behind the `Enable Deflattening` setting, and only runs once the LLIL stage has
 drained every indirect jump (otherwise the CFG - and the recovered state machine - would be
@@ -79,7 +91,7 @@ incomplete).
 - The resolved dispatcher state values and the state variable's alias set are recorded to
   `session_data` so the cleanup can NOP the state writes precisely (by value and by var).
 
-### 5. Cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
+### 6. Cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
 
 Gated behind `Enable Cleanup` **and** `Enable Deflattening`; it only acts once deflatten has
 rewritten the OBB exits this pass. `clean_resolved_gadget_jumps` then, to a fixpoint:
@@ -111,6 +123,7 @@ latching off after the first apply. Deflatten runs before cleanup so that cleanu
 | `dispatchthis_state_consts` | `{start: set(state_value)}` - for state-write NOP |
 | `dispatchthis_state_vars` | `{start: set(var)}` - state var + aliases |
 | `dispatchthis_tag_cleanup_pending` | `set(start)` - view-level analysis-completion callbacks pending |
+| `dispatchthis_global_constant_slots` | `{slot_addr: type_string}` - view-level global constant type receipts |
 
 Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`:
 

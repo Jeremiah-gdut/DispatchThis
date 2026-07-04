@@ -49,11 +49,30 @@ def test_branch_receipts_gate_repeated_mutations_and_invalidate_calls():
 def test_call_receipts_gate_repeated_adjustments():
     state = FunctionWorkflowState(FakeFunction())
 
+    assert not state.indirect_call_resolving_is_stable()
     assert state.call_adjustment_needed(0x1111, 0x2222)
     assert state.mark_call_adjustment_applied(0x1111, 0x2222) is False
     assert not state.call_adjustment_needed(0x1111, 0x2222)
     assert state.mark_call_adjustment_applied(0x1111, 0x3333) is True
     assert not state.call_adjustment_needed(0x1111, 0x3333)
+    state.mark_indirect_call_resolving_stable()
+    assert state.indirect_call_resolving_is_stable()
+
+
+def test_call_target_receipts_feed_cleanup_without_gating_type_adjustments():
+    state = FunctionWorkflowState(FakeFunction())
+
+    state.mark_call_cleanup_done()
+    assert state.mark_call_target_resolved(0x1111, 0x2222) is False
+    assert state.call_target_receipts == {0x1111: 0x2222}
+    assert state.call_adjustment_needed(0x1111, 0x2222)
+    assert state.call_cleanup_needed()
+
+    state.mark_call_adjustment_applied(0x1111, 0x2222)
+    state.mark_call_cleanup_done()
+    assert state.mark_call_target_resolved(0x1111, 0x3333) is True
+    assert state.call_adjustment_needed(0x1111, 0x3333)
+    assert state.call_cleanup_needed()
 
 
 def test_existing_user_branch_metadata_seeds_branch_receipts():
@@ -75,6 +94,7 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
     state = FunctionWorkflowState(FakeFunction())
 
     state.mark_branch_cleanup_done()
+    state.mark_call_target_resolved(0x4000, 0x5000)
     state.mark_call_adjustment_applied(0x4000, 0x5000)
     state.mark_indirect_call_resolving_stable()
     state.mark_call_cleanup_done()
@@ -83,6 +103,7 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
 
     state.mark_branch_mutation_applied(0x1000, (0x2000,))
     assert state.branch_cleanup_needed()
+    assert state.call_target_receipts == {}
     assert state.call_adjustment_needed(0x4000, 0x5000)
     assert state.call_cleanup_needed()
 
@@ -96,5 +117,6 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
 if __name__ == "__main__":
     test_branch_receipts_gate_repeated_mutations_and_invalidate_calls()
     test_call_receipts_gate_repeated_adjustments()
+    test_call_target_receipts_feed_cleanup_without_gating_type_adjustments()
     test_existing_user_branch_metadata_seeds_branch_receipts()
     test_cleanup_receipts_invalidate_with_phase_targets()

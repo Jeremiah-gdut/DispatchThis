@@ -5,8 +5,8 @@ DispatchThis/
 ├── __init__.py                 Plugin entry point: registers the workflow + activities,
 │                               the settings, the analysis-limit overrides, and the
 │                               Plugins-menu Enable/Disable toggles.
-├── workflow.py                 The four workflow activity callbacks (LLIL jump resolve,
-│                               MLIL call resolve, deflatten, cleanup) and their gating.
+├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
+│                               MLIL call/global resolve, deflatten, cleanup) and their gating.
 ├── utils/
 │   ├── log.py                  Shared "DispatchThis" logger.
 │   └── state_machine.py        StateMachine: recovers the state variable, the backbone
@@ -17,6 +17,7 @@ DispatchThis/
 │   │                           including opaque-predicate offset selection.
 │   └── medium/
 │       ├── indirect_calls.py   MLIL indirect-call decode fold + call-type adjustment.
+│       ├── global_constants.py MLIL global constant slot planner.
 │       ├── deflatten.py        Computes and applies the OBB -> goto redirections,
 │       │                       including the conditional/Z3 path.
 │       ├── nop_pass.py         Signature-based gadget cleanup, dead-decode residue
@@ -32,7 +33,7 @@ DispatchThis/
 ## Module responsibilities
 
 ### `__init__.py`
-Clones `core.function.metaAnalysis`, registers the four activities and their insertion
+Clones `core.function.metaAnalysis`, registers the activities and their insertion
 points, registers the boolean setting (`dispatchthis.enableDeflatten`, raises analysis limits, and wires up the `Enable`/`Disable` menu pair for each pass.
 
 ### `workflow.py`
@@ -56,6 +57,10 @@ recovery for the displacement/key registers the dispatcher merges.
 Folds the call-gadget decode (`eval_const`), rewrites the call destination to a const
 pointer, folds the spilled decode definition, and pins the callee prototype once per call
 site per session.
+
+### `passes/medium/global_constants.py`
+Finds `.data` qword slots that are used as read-only constant pointer bases and returns
+type-mutation plans for the workflow callback.
 
 ### `passes/medium/deflatten.py`
 `compute_redirections` turns the state-machine links + resolved gadget map into a set of

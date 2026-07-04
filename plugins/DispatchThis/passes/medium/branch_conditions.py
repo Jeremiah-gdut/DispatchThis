@@ -197,8 +197,7 @@ def translate_indirect_branch_conditions(bv, mlil):
             log_warn(f"[branch-conditions] failed to translate {hex(jump_il.address)}: {e}")
 
     if applied:
-        # ponytail: avoid assigning a fresh MLIL function; BN can keep regenerating
-        # HLIL when workflow code swaps analysis_context.mlil during HLIL generation.
+        # The workflow callback owns committing this MLIL object to AnalysisContext.
         mlil.finalize()
         mlil.generate_ssa_form()
         log_info(f"[branch-conditions] translated {applied} indirect branch switch(es) to if/else")

@@ -67,6 +67,22 @@ def _ssa_uses(ssa, var):
         return []
 
 
+def _use_escapes(ssa, use, candidates, seen):
+    if use.instr_index in candidates:
+        return False
+    if use.operation.name != "MLIL_VAR_PHI":
+        return True
+    if use.instr_index in seen:
+        return False
+
+    seen.add(use.instr_index)
+    for var in use.vars_written:
+        for downstream in _ssa_uses(ssa, var):
+            if _use_escapes(ssa, downstream, candidates, seen):
+                return True
+    return False
+
+
 def _candidate_slice(ssa, root_indices):
     by_index = {ins.instr_index: ins for ins in ssa.instructions}
     by_non_ssa = {}
@@ -77,8 +93,10 @@ def _candidate_slice(ssa, root_indices):
 
     pending = []
     for idx in root_indices:
-        pending.extend(ins.instr_index for ins in by_non_ssa.get(idx, ()))
-        if idx in by_index:
+        mapped = by_non_ssa.get(idx)
+        if mapped:
+            pending.extend(ins.instr_index for ins in mapped)
+        elif idx in by_index:
             pending.append(idx)
     candidates = set()
 
@@ -106,7 +124,7 @@ def _drop_live_escapes(ssa, candidates, by_index):
             ins = by_index[idx]
             escapes = False
             for var in ins.vars_written:
-                if any(use.instr_index not in candidates for use in _ssa_uses(ssa, var)):
+                if any(_use_escapes(ssa, use, candidates, set()) for use in _ssa_uses(ssa, var)):
                     escapes = True
                     break
             if escapes:
@@ -144,5 +162,5 @@ def cleanup_phase_decode(mlil, root_indices, phase_name):
     if applied:
         mlil.finalize()
         mlil.generate_ssa_form()
-    log_info(f"[phase-cleanup] {phase_name}: NOP'd {applied} decode instruction(s)")
+        log_info(f"[phase-cleanup] {phase_name}: NOP'd {applied} decode instruction(s)")
     return applied

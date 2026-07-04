@@ -7,6 +7,7 @@ from .passes.medium.nop_pass import clean_resolved_gadget_jumps
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_phase_decode, mlil_set_var_roots_before_sites
+from .passes.medium.global_constants import CONST_SLOT_TYPE, plan_global_constant_slots
 from .utils import StateMachine
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
@@ -18,6 +19,9 @@ from .utils.log import log_info, log_warn, log_debug
 from .workflow_state import FunctionWorkflowState
 
 
+GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
+
+
 def _legacy_gadget_value(targets):
     return targets[0] if len(targets) == 1 else tuple(targets)
 
@@ -27,6 +31,33 @@ def _mirror_branch_state_for_legacy_passes(bv, func, state):
     gadget_map.clear()
     for source, targets in state.branch_target_receipts().items():
         gadget_map[source] = _legacy_gadget_value(targets)
+
+
+def _commit_mlil(analysis_context, mlil):
+    try:
+        analysis_context.mlil = mlil
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        analysis_context.set_mlil_function(mlil)
+    except Exception as e:  # noqa: BLE001
+        func = analysis_context.function
+        log_warn(f"[workflow] {func.name}: failed to commit MLIL changes: {e}")
+
+
+def _normalized_type_name(type_value):
+    return str(type_value).replace(" ", "")
+
+
+def _global_constant_slot_type(bv):
+    parsed, _ = bv.parse_type_string(f"{CONST_SLOT_TYPE} dispatchthis_global_constant_slot")
+    return parsed
+
+
+def _global_constant_type_applied(bv, slot_addr):
+    data_var = bv.get_data_var_at(slot_addr)
+    return data_var is not None and _normalized_type_name(data_var.type) == _normalized_type_name(CONST_SLOT_TYPE)
 
 
 def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
@@ -95,6 +126,7 @@ def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
     for plan in plans:
         call_addr = plan["call_addr"]
         target = plan["target"]
+        state.mark_call_target_resolved(call_addr, target)
         if not state.call_adjustment_needed(call_addr, target):
             continue
         callee = bv.get_function_at(target)
@@ -111,14 +143,17 @@ def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
 
     if not adjustments:
         state.mark_indirect_call_resolving_stable()
-        if state.call_cleanup_needed():
-            cleanup_roots = set()
-            for plan in plans:
-                cleanup_roots.update(plan["cleanup_roots"])
-            call_sites = {plan["call_addr"] for plan in plans} or set(state.call_receipts)
-            cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, call_sites))
-            cleanup_phase_decode(mlil, cleanup_roots, "call")
-            state.mark_call_cleanup_done()
+        cleanup_roots = set()
+        for plan in plans:
+            cleanup_roots.update(plan["cleanup_roots"])
+        call_sites = {plan["call_addr"] for plan in plans} or (
+            set(state.call_receipts) | set(state.call_target_receipts)
+        )
+        cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, call_sites))
+        cleaned = cleanup_phase_decode(mlil, cleanup_roots, "call")
+        state.mark_call_cleanup_done()
+        if rewrites or cleaned:
+            _commit_mlil(analysis_context, mlil)
     if rewrites or adjustments:
         log_info(
             f"[workflow] {func.name}: resolved {rewrites} indirect call(s), "
@@ -136,6 +171,8 @@ def workflow_translate_branches_mlil(analysis_context: AnalysisContext):
     state = FunctionWorkflowState(func)
     if not state.branch_resolving_is_stable(func):
         return
+    if not state.indirect_call_resolving_is_stable():
+        return
 
     mlil = analysis_context.mlil
     if mlil is None:
@@ -144,10 +181,59 @@ def workflow_translate_branches_mlil(analysis_context: AnalysisContext):
     _, n, cleanup_roots = translate_indirect_branch_conditions(bv, mlil)
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
-    if state.branch_cleanup_needed():
-        cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, state.branch_receipts))
-        cleanup_phase_decode(mlil, cleanup_roots, "branch")
-        state.mark_branch_cleanup_done()
+    cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, state.branch_receipts))
+    cleaned = cleanup_phase_decode(mlil, cleanup_roots, "branch")
+    state.mark_branch_cleanup_done()
+    if n or cleaned:
+        _commit_mlil(analysis_context, mlil)
+
+
+def workflow_resolve_global_constants_mlil(analysis_context: AnalysisContext):
+    func = analysis_context.function
+    bv = analysis_context.view
+
+    if bv.arch.name != "aarch64":
+        return
+
+    state = FunctionWorkflowState(func)
+    if not state.branch_resolving_is_stable(func):
+        return
+    if not state.indirect_call_resolving_is_stable():
+        return
+
+    mlil = analysis_context.mlil
+    if mlil is None:
+        return
+
+    plans = plan_global_constant_slots(bv, mlil)
+    if not plans:
+        return
+
+    receipts = bv.session_data.setdefault(GLOBAL_CONSTANT_RECEIPTS, {})
+    slot_type = None
+    applied = 0
+    for plan in plans:
+        slot_addr = plan["slot_addr"]
+        type_name = plan["type"]
+        if receipts.get(slot_addr) == type_name and _global_constant_type_applied(bv, slot_addr):
+            continue
+        if _global_constant_type_applied(bv, slot_addr):
+            receipts[slot_addr] = type_name
+            continue
+        try:
+            if slot_type is None:
+                slot_type = _global_constant_slot_type(bv)
+            bv.define_user_data_var(slot_addr, slot_type)
+            if not _global_constant_type_applied(bv, slot_addr):
+                log_warn(f"[workflow] {func.name}: failed to verify global const slot @ {hex(slot_addr)}")
+                continue
+            receipts[slot_addr] = type_name
+            applied += 1
+        except Exception as e:  # noqa: BLE001
+            log_warn(f"[workflow] {func.name}: global const slot @ {hex(slot_addr)} failed: {e}")
+
+    if applied:
+        log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
 
 
 def workflow_deflatten_mlil(analysis_context: AnalysisContext):

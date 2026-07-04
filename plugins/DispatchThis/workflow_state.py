@@ -14,6 +14,7 @@ def _fresh_state():
         "call": {
             "stable": False,
             "receipts": {},
+            "targets": {},
             "cleanup_done": False,
         },
     }
@@ -35,6 +36,7 @@ def _normalize_state(data):
     call = data.setdefault("call", {})
     call.setdefault("stable", False)
     call.setdefault("receipts", {})
+    call.setdefault("targets", {})
     call.setdefault("cleanup_done", False)
     return data
 
@@ -124,8 +126,21 @@ class FunctionWorkflowState:
     def call_receipts(self):
         return self.data["call"]["receipts"]
 
+    @property
+    def call_target_receipts(self):
+        return self.data["call"]["targets"]
+
     def call_adjustment_needed(self, call_addr, target):
         return self.call_receipts.get(call_addr) != target
+
+    def mark_call_target_resolved(self, call_addr, target):
+        previous = self.call_target_receipts.get(call_addr)
+        if previous == target:
+            return False
+        self.call_target_receipts[call_addr] = target
+        self.data["call"]["stable"] = False
+        self.data["call"]["cleanup_done"] = False
+        return previous is not None
 
     def mark_call_adjustment_applied(self, call_addr, target):
         previous = self.call_receipts.get(call_addr)
@@ -139,6 +154,9 @@ class FunctionWorkflowState:
     def mark_indirect_call_resolving_stable(self):
         self.data["call"]["stable"] = True
 
+    def indirect_call_resolving_is_stable(self):
+        return self.data["call"]["stable"]
+
     def call_cleanup_needed(self):
         return not self.data["call"]["cleanup_done"]
 
@@ -149,3 +167,4 @@ class FunctionWorkflowState:
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
         self.call_receipts.clear()
+        self.call_target_receipts.clear()

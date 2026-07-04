@@ -1,7 +1,7 @@
 """DispatchThis -- IL-level deflattener for an indirect-jump control-flow flattener.
 
-Registers a clone of ``core.function.metaAnalysis`` with four plugin activities that
-resolve decode-gadget indirect jumps/calls and optionally deflatten and clean up
+Registers a clone of ``core.function.metaAnalysis`` with plugin activities that
+resolve decode-gadget indirect jumps/calls, recover global constants, and optionally deflatten and clean up
 obfuscated functions. All passes are opt-in per-function via Function Analysis settings.
 """
 
@@ -12,6 +12,7 @@ from .workflow import (
     workflow_resolve_jumps_llil,
     workflow_resolve_calls_mlil,
     workflow_translate_branches_mlil,
+    workflow_resolve_global_constants_mlil,
     workflow_deflatten_mlil,
     workflow_cleanup
 )
@@ -78,6 +79,14 @@ def register_workflows():
         "eligibility": _RESOLVE_OR_DEFLATTEN,
     }), action=workflow_translate_branches_mlil))
 
+    # Recover read-only semantics for narrow global constant slots before deflattening.
+    workflow.register_activity(Activity(json.dumps({
+        "name": "extension.DispatchThis.GlobalConstantResolver",
+        "title": "DispatchThis: Resolve Global Constants",
+        "description": "Type writable-section global pointer slots as constants when they are used read-only.",
+        "eligibility": _RESOLVE_OR_DEFLATTEN,
+    }), action=workflow_resolve_global_constants_mlil))
+
     # Deflattener (MLIL); auto eligibility surfaces the Deflatten toggle.
     workflow.register_activity(Activity(json.dumps({
         "name": DEFLATTEN_SETTING,
@@ -100,6 +109,7 @@ def register_workflows():
     workflow.insert("core.function.generateHighLevelIL", [
             "extension.DispatchThis.IndirectCallPatcher",
             "extension.DispatchThis.BranchConditionTranslator",
+            "extension.DispatchThis.GlobalConstantResolver",
             DEFLATTEN_SETTING,
             "extension.DispatchThis.Cleanup"
     ])

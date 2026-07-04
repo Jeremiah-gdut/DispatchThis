@@ -23,6 +23,10 @@ _Avoid_: generic rule engine
 Recovering the concrete callee of a computed call target.
 _Avoid_: deincall
 
+**Global constant resolving**:
+Recovering read-only semantics for global data slots that the sample family stores in writable sections but uses as constants.
+_Avoid_: global variable fixing, data constant propagation
+
 **Dispatcher**:
 The flattened control-flow router that chooses the next original block from a state value.
 
