@@ -6,6 +6,7 @@ from .passes.medium.deflatten import apply_redirections_il, compute_redirections
 from .passes.medium.nop_pass import clean_resolved_gadget_jumps
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
+from .passes.medium.phase_cleanup import cleanup_phase_decode, mlil_set_var_roots_before_sites
 from .utils import StateMachine
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
@@ -110,6 +111,14 @@ def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
 
     if not adjustments:
         state.mark_indirect_call_resolving_stable()
+        if state.call_cleanup_needed():
+            cleanup_roots = set()
+            for plan in plans:
+                cleanup_roots.update(plan["cleanup_roots"])
+            call_sites = {plan["call_addr"] for plan in plans} or set(state.call_receipts)
+            cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, call_sites))
+            cleanup_phase_decode(mlil, cleanup_roots, "call")
+            state.mark_call_cleanup_done()
     if rewrites or adjustments:
         log_info(
             f"[workflow] {func.name}: resolved {rewrites} indirect call(s), "
@@ -132,9 +141,13 @@ def workflow_translate_branches_mlil(analysis_context: AnalysisContext):
     if mlil is None:
         return
 
-    _, n = translate_indirect_branch_conditions(bv, mlil)
+    _, n, cleanup_roots = translate_indirect_branch_conditions(bv, mlil)
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
+    if state.branch_cleanup_needed():
+        cleanup_roots.update(mlil_set_var_roots_before_sites(mlil, state.branch_receipts))
+        cleanup_phase_decode(mlil, cleanup_roots, "branch")
+        state.mark_branch_cleanup_done()
 
 
 def workflow_deflatten_mlil(analysis_context: AnalysisContext):

@@ -15,6 +15,14 @@ Indirect branch resolving and indirect call resolving are split into two layers:
 
 Indirect call resolving depends on indirect branch resolving being stable. Branch condition translation is a presentation rewrite over the current MLIL and does not own mutation receipts.
 
+Phase cleanup runs only after its owning phase is stable. For indirect branch resolving, cleanup runs after branch condition translation so the translator can still read the resolved `MLIL_JUMP_TO` shape and the target-decode assignments it needs. For indirect call resolving, cleanup runs after indirect call resolving is stable.
+
+Indirect branch and indirect call phase cleanup will reuse the existing decode-gadget taint/dead-residue ideas, but not the full deflatten cleanup pass. Phase cleanup may NOP pure decode computations; it must not collapse control flow or NOP deflatten state writes.
+
+Phase cleanup must be rooted in the owning phase's resolved sites rather than in all decode-gadget magic constants. Indirect branch cleanup roots from resolved branch-target decode sites. Indirect call cleanup roots from resolved call-target decode sites. This prevents branch cleanup from deleting call-target decode inputs before indirect call resolving has run.
+
+Cleanup receipts are phase-level booleans on the function, not per branch source or per call site. A phase cleanup scans the current function MLIL once for its owning phase, sets `cleanup_done`, and only runs again if an upstream receipt change invalidates that phase.
+
 Workflow callbacks are the orchestration seam. Pass modules may produce plans and perform current-IL rewrites, but workflow callbacks own Binary Ninja reanalysis-triggering mutations such as user branch metadata, call type adjustments, and analysis completion callbacks.
 
 The function phase state module exposes phase semantic operations rather than raw dictionaries or sets. Moving raw dict access from `BinaryView.session_data` to `Function.session_data` is not enough; the module owns readiness, receipt comparison, and downstream invalidation rules.

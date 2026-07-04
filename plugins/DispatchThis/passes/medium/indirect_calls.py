@@ -5,6 +5,7 @@ destination to a ``MLIL_CONST_PTR``. Also folds the spilled decode definition in
 the same const so BN's dataflow can clean up the dead assignment.
 """
 
+from .phase_cleanup import mlil_def_roots
 from ...utils.log import log_info, log_warn, log_error, log_debug
 
 
@@ -113,16 +114,16 @@ def _is_callee(bv, addr):
 
 def resolve_call_target(bv, mlil, call_il):
     """Resolve the concrete target of one indirect call by folding its decode add.
-    Returns ``(target, decode_def)`` or ``(None, None)``."""
+    Returns ``(target, decode_def, cleanup_roots)`` or ``(None, None, set())``."""
     dest = call_il.dest
 
     # Already a direct call (const, or a var that folds to a const pointer).
     if dest.operation.name in _CONST_OPS:
-        return None, None
+        return None, None, set()
     trail = []
     resolved = _peel_def(mlil, dest, trail)
     if resolved.operation.name in _CONST_OPS:
-        return None, None
+        return None, None, set()
     # A variant calls *through* the decoded slot (`call([rax + KEY])`). BN wraps
     # the decode add in an outer load, but the decoded pointer (the load's address
     # operand) is the real target -- not a dereference of it. Unwrap the load and
@@ -130,11 +131,11 @@ def resolve_call_target(bv, mlil, call_il):
     if resolved.operation.name in ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT"):
         resolved = _peel_def(mlil, resolved.src, trail)
         if resolved.operation.name in _CONST_OPS:
-            return None, None
+            return None, None, set()
     if resolved.operation.name != "MLIL_ADD":
         log_debug(f"[icall] {hex(call_il.address)}: dest def is "
                   f"{resolved.operation.name}, not a decode add; skipping")
-        return None, None
+        return None, None, set()
     # The SET_VAR whose source is the decode add (last def walked), if any.
     decode_def = trail[-1] if trail else None
 
@@ -153,23 +154,27 @@ def resolve_call_target(bv, mlil, call_il):
     key = eval_const(bv, mlil, key_expr)
     if key is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold decode key")
-        return None, None
+        return None, None, set()
     encoded = eval_const(bv, mlil, enc_expr)
     if encoded is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold encoded target")
-        return None, None
+        return None, None, set()
+
+    cleanup_roots = mlil_def_roots(mlil, resolved)
+    if decode_def is not None:
+        cleanup_roots.add(decode_def.instr_index)
 
     # Modular decode wraps to the 48-bit address space; fall back to the full
     # 64-bit result if that does not land on a real callee.
     for mask in (U48, U64):
         target = (encoded + key) & mask
         if _is_callee(bv, target):
-            return target, decode_def
+            return target, decode_def, cleanup_roots
 
     target = (encoded + key) & U48
     log_warn(f"[icall] {hex(call_il.address)}: (encoded {hex(encoded)} + key "
              f"{hex(key)}) = {hex(target)} is not a callee")
-    return None, None
+    return None, None, set()
 
 
 # --------------------------------------------------------------------------- #
@@ -195,7 +200,7 @@ def plan_indirect_calls(bv, mlil):
     plans = []
     for call_il in iter_indirect_calls(mlil):
         try:
-            target, decode_def = resolve_call_target(bv, mlil, call_il)
+            target, decode_def, cleanup_roots = resolve_call_target(bv, mlil, call_il)
         except Exception as e:  # noqa: BLE001
             log_warn(f"[icall] {hex(call_il.address)}: {e}")
             continue
@@ -210,6 +215,7 @@ def plan_indirect_calls(bv, mlil):
             "call_addr": call_il.address,
             "target": target,
             "decode_def": decode_def,
+            "cleanup_roots": cleanup_roots,
         })
 
     if not plans:

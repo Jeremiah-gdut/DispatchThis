@@ -9,10 +9,12 @@ def _fresh_state():
         "branch": {
             "stable": False,
             "receipts": {},
+            "cleanup_done": False,
         },
         "call": {
             "stable": False,
             "receipts": {},
+            "cleanup_done": False,
         },
     }
 
@@ -29,9 +31,11 @@ def _normalize_state(data):
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
+    branch.setdefault("cleanup_done", False)
     call = data.setdefault("call", {})
     call.setdefault("stable", False)
     call.setdefault("receipts", {})
+    call.setdefault("cleanup_done", False)
     return data
 
 
@@ -99,6 +103,7 @@ class FunctionWorkflowState:
             return False
         self.branch_receipts[source] = targets
         self.data["branch"]["stable"] = False
+        self.data["branch"]["cleanup_done"] = False
         self.invalidate_indirect_call_resolving()
         return previous is not None
 
@@ -108,6 +113,12 @@ class FunctionWorkflowState:
     def branch_resolving_is_stable(self, func=None):
         func = func or self.func
         return self.data["branch"]["stable"] and not self.unmapped_unresolved_sources(func)
+
+    def branch_cleanup_needed(self):
+        return not self.data["branch"]["cleanup_done"]
+
+    def mark_branch_cleanup_done(self):
+        self.data["branch"]["cleanup_done"] = True
 
     @property
     def call_receipts(self):
@@ -122,11 +133,19 @@ class FunctionWorkflowState:
             return False
         self.call_receipts[call_addr] = target
         self.data["call"]["stable"] = False
+        self.data["call"]["cleanup_done"] = False
         return previous is not None
 
     def mark_indirect_call_resolving_stable(self):
         self.data["call"]["stable"] = True
 
+    def call_cleanup_needed(self):
+        return not self.data["call"]["cleanup_done"]
+
+    def mark_call_cleanup_done(self):
+        self.data["call"]["cleanup_done"] = True
+
     def invalidate_indirect_call_resolving(self):
         self.data["call"]["stable"] = False
+        self.data["call"]["cleanup_done"] = False
         self.call_receipts.clear()

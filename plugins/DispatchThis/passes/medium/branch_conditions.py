@@ -2,6 +2,7 @@
 
 from binaryninja import ILSourceLocation, MediumLevelILLabel
 
+from .phase_cleanup import mlil_def_roots
 from ...utils.log import log_info, log_warn
 
 
@@ -99,7 +100,7 @@ def _const_assigns(mlil, bb):
             continue
         value = _const(ins.src)
         if value is not None:
-            assigns[ins.dest] = value
+            assigns[ins.dest] = (value, ins)
     return assigns
 
 
@@ -145,14 +146,20 @@ def _plan_for_jump(bv, mlil, jump_il):
     true_assigns = _const_assigns(mlil, true_arm)
     false_assigns = _const_assigns(mlil, false_arm)
     for var in set(true_assigns) & set(false_assigns):
-        true_idx = _target_idx_for_value(bv, mlil, jump_il, var, true_assigns[var])
-        false_idx = _target_idx_for_value(bv, mlil, jump_il, var, false_assigns[var])
+        true_value, true_assign = true_assigns[var]
+        false_value, false_assign = false_assigns[var]
+        true_idx = _target_idx_for_value(bv, mlil, jump_il, var, true_value)
+        false_idx = _target_idx_for_value(bv, mlil, jump_il, var, false_value)
         if true_idx is None or false_idx is None or true_idx == false_idx:
             continue
         return {
             "condition": _condition_expr(mlil, if_il),
             "true": true_idx,
             "false": false_idx,
+            "cleanup_roots": (
+                mlil_def_roots(mlil, jump_il.dest)
+                | {true_assign.instr_index, false_assign.instr_index}
+            ),
         }
 
     return None
@@ -166,8 +173,12 @@ def translate_indirect_branch_conditions(bv, mlil):
         if plan is not None:
             plans.append((ins, plan))
 
+    cleanup_roots = set()
+    for _, plan in plans:
+        cleanup_roots.update(plan["cleanup_roots"])
+
     if not plans:
-        return mlil, 0
+        return mlil, 0, cleanup_roots
 
     applied = 0
     for jump_il, plan in plans:
@@ -191,4 +202,4 @@ def translate_indirect_branch_conditions(bv, mlil):
         mlil.finalize()
         mlil.generate_ssa_form()
         log_info(f"[branch-conditions] translated {applied} indirect branch switch(es) to if/else")
-    return mlil, applied
+    return mlil, applied, cleanup_roots

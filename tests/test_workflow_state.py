@@ -71,7 +71,30 @@ def test_existing_user_branch_metadata_seeds_branch_receipts():
     assert state.branch_mutations_for({0x4000: (0x5000,)}) == {0x4000: (0x5000,)}
 
 
+def test_cleanup_receipts_invalidate_with_phase_targets():
+    state = FunctionWorkflowState(FakeFunction())
+
+    state.mark_branch_cleanup_done()
+    state.mark_call_adjustment_applied(0x4000, 0x5000)
+    state.mark_indirect_call_resolving_stable()
+    state.mark_call_cleanup_done()
+    assert not state.branch_cleanup_needed()
+    assert not state.call_cleanup_needed()
+
+    state.mark_branch_mutation_applied(0x1000, (0x2000,))
+    assert state.branch_cleanup_needed()
+    assert state.call_adjustment_needed(0x4000, 0x5000)
+    assert state.call_cleanup_needed()
+
+    state.mark_call_adjustment_applied(0x4000, 0x6000)
+    state.mark_call_cleanup_done()
+    assert not state.call_cleanup_needed()
+    state.mark_call_adjustment_applied(0x4000, 0x7000)
+    assert state.call_cleanup_needed()
+
+
 if __name__ == "__main__":
     test_branch_receipts_gate_repeated_mutations_and_invalidate_calls()
     test_call_receipts_gate_repeated_adjustments()
     test_existing_user_branch_metadata_seeds_branch_receipts()
+    test_cleanup_receipts_invalidate_with_phase_targets()

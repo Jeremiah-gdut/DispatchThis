@@ -118,8 +118,10 @@ Function-scoped phase state lives in `Function.session_data["dispatchthis_workfl
 | --- | --- |
 | `branch.stable` | indirect branch resolving has reached its current fixpoint |
 | `branch.receipts` | `{source_addr: (target_addr, ...)}` submitted as user branch metadata |
+| `branch.cleanup_done` | branch-target decode cleanup has run for the current branch receipts |
 | `call.stable` | indirect call resolving has reached its current fixpoint |
 | `call.receipts` | `{call_addr: target_addr}` submitted as call type adjustments |
+| `call.cleanup_done` | call-target decode cleanup has run for the current call receipts |
 
 ## Analysis limits
 
