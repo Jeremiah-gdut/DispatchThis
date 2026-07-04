@@ -61,11 +61,15 @@ class Expr:
 
 
 class FakeSSA:
-    def __init__(self, defs):
+    def __init__(self, defs, instructions=()):
         self.defs = defs
+        self.instructions = list(instructions)
 
     def get_ssa_reg_definition(self, var):
         return self.defs.get(var)
+
+    def __iter__(self):
+        return iter([self.instructions])
 
 
 def const(value):
@@ -98,6 +102,18 @@ def lsl(left, shift):
     return Expr("LLIL_LSL", f"{left} << {shift}", left=left, right=const(shift))
 
 
+def add(left, right):
+    return Expr("LLIL_ADD", f"{left} + {right}", left=left, right=right)
+
+
+def load(src, instr_index):
+    return Expr("LLIL_LOAD_SSA", f"[{src}]", src=src, instr_index=instr_index)
+
+
+def store(dest, src, instr_index):
+    return Expr("LLIL_STORE_SSA", f"[{dest}] = {src}", dest=dest, src=src, instr_index=instr_index)
+
+
 def test_bool_to_int_partial_reg_offsets_collect_both_targets():
     x9_42 = Var("x9", 42)
     ssa = FakeSSA({x9_42: set_reg(zx(bool_to_int()))})
@@ -118,6 +134,18 @@ def test_zx_partial_copied_to_full_reg_offsets_collect_both_targets():
     assert gadget_llil._reg_consts(None, ssa, offset) == {0, 0x80}
 
 
+def test_stack_spill_reload_constant_is_folded_without_vsa():
+    sp_1 = Var("sp", 1)
+    x8_23 = Var("x8", 23)
+    stack_slot = add(reg(sp_1), const(0x20))
+    spill = store(stack_slot, const(0xA456F0), 10)
+    reload = load(stack_slot, 20)
+    ssa = FakeSSA({x8_23: set_reg(reload)}, [spill])
+
+    assert gadget_llil._reg_const(None, ssa, add(reg(x8_23), const(8))) == 0xA456F8
+
+
 if __name__ == "__main__":
     test_bool_to_int_partial_reg_offsets_collect_both_targets()
     test_zx_partial_copied_to_full_reg_offsets_collect_both_targets()
+    test_stack_spill_reload_constant_is_folded_without_vsa()

@@ -83,6 +83,55 @@ def _expr_constant(expr):
     return None
 
 
+def _stack_slot(expr):
+    if expr is None or expr.operation.name not in ("LLIL_ADD", "LLIL_SUB"):
+        return None
+
+    if expr.operation.name == "LLIL_ADD":
+        for reg_expr, const_expr in ((expr.left, expr.right), (expr.right, expr.left)):
+            if reg_expr.operation.name != "LLIL_REG_SSA":
+                continue
+            if const_expr.operation.name not in ("LLIL_CONST", "LLIL_CONST_PTR"):
+                continue
+            reg = getattr(reg_expr.src, "reg", None)
+            if str(reg) in ("sp", "fp"):
+                return (str(reg_expr.src), const_expr.constant)
+
+    if expr.operation.name == "LLIL_SUB" and expr.left.operation.name == "LLIL_REG_SSA":
+        right = expr.right
+        if right.operation.name in ("LLIL_CONST", "LLIL_CONST_PTR"):
+            reg = getattr(expr.left.src, "reg", None)
+            if str(reg) in ("sp", "fp"):
+                return (str(expr.left.src), -right.constant)
+    return None
+
+
+def _stack_store_source(ssa, load_expr):
+    if ssa is None:
+        return None
+    if load_expr.operation.name not in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
+        return None
+    slot = _stack_slot(load_expr.src)
+    if slot is None:
+        return None
+    best = None
+    best_index = -1
+    load_index = getattr(load_expr, "instr_index", 1 << 60)
+    for block in ssa:
+        for insn in block:
+            if insn.operation.name not in ("LLIL_STORE", "LLIL_STORE_SSA"):
+                continue
+            if getattr(insn, "instr_index", -1) >= load_index:
+                continue
+            if _stack_slot(insn.dest) != slot:
+                continue
+            instr_index = getattr(insn, "instr_index", -1)
+            if instr_index > best_index:
+                best = insn.src
+                best_index = instr_index
+    return best
+
+
 def _bool_to_int_const(bv, ssa, expr, depth):
     try:
         cond = _define_cond(ssa, expr.src)
@@ -153,6 +202,11 @@ def _reg_const(bv, ssa, expr, depth=0):
 
     if op == "LLIL_BOOL_TO_INT":
         return _bool_to_int_const(bv, ssa, expr, depth + 1)
+
+    if op in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
+        src = _stack_store_source(ssa, expr)
+        if src is not None:
+            return _reg_const(bv, ssa, src, depth + 1)
 
     if op in ("LLIL_LSL", "LLIL_LSR"):
         l = _reg_const(bv, ssa, expr.left, depth + 1)
@@ -239,6 +293,11 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
     if op == "LLIL_BOOL_TO_INT":
         v = _reg_const(bv, ssa, expr, depth + 1)
         return {v} if v is not None else {0, 1}
+
+    if op in ("LLIL_LOAD", "LLIL_LOAD_SSA"):
+        src = _stack_store_source(ssa, expr)
+        if src is not None:
+            return _reg_consts(bv, ssa, src, depth + 1, seen)
 
     if op in ("LLIL_LSL", "LLIL_LSR"):
         lefts = _reg_consts(bv, ssa, expr.left, depth + 1, seen)
