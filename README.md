@@ -21,7 +21,8 @@
 ## What it does
 
 The target obfuscator flattens control flow with a **compare-tree dispatcher** keyed on a
-32-bit **state variable**, and routes to original blocks through **COMPARE EQUAL** or **COMPARE NOT EQUAL**.
+**state variable**, and routes to original blocks through **COMPARE EQUAL** or **COMPARE NOT EQUAL**.
+Dispatcher state tokens may be wider than 32 bits.
 An annoted portion of one of the functions analyzed is shown in the figure below.
 
 DispatchThis recovers the original control flow **entirely at
@@ -37,7 +38,7 @@ is incredibly versatile: whole expressions and control-flow edges, unconditional
 > are replaced in the IL following state to Original Basic Block resolution, ultimately eliminating
 > the need to patch assembly - a process that can be incredibly burdensome.
 
-For the full obfuscation breakdown including indirect jumps, opaque predicates, control flow flattening w/ a 32-bit-state
+For the full obfuscation breakdown including indirect jumps, opaque predicates, control flow flattening
 constant, and indirect call gadgets from the sample, see [`docs/obfuscation.md`](docs/obfuscation.md).
 
 ## See it in action
@@ -61,11 +62,6 @@ past the first jump gadget, and most of the function is never recovered:
 ### Prerequisites
 
 - Binary Ninja (see [Compatibility](#compatibility)).
-- **[Z3](https://github.com/Z3Prover/z3) must be installed** in the Python environment
-  Binary Ninja uses - the deflattener relies on it to reconstruct conditional
-  (cmov-selected) transitions. Install it with `pip install z3-solver` into that
-  interpreter.
-
 ### Install the plugin
 
 Copy the folder located in the "plugins/DispatchThis" directory into your Binary Ninja user plugins directory and 
@@ -90,9 +86,9 @@ The passes are enabled per-function from the **Function Settings** context menu.
   targets can be decoded. If reanalysis does not trigger automatically, run it manually via
   *Analysis ▸ Reanalyze All Functions*.
 
-- **Deflatten** - enables the deflattener and the cleanup NOP pass together. The deflattener
-  rebuilds the original control flow graph, and the NOP pass then removes the dead decode
-  gadgets and state writes. The result is a cleaner function in the pseudocode view with the
+- **Deflatten** - enables the deflattener and the final state-write cleanup together. The deflattener
+  rebuilds the original control flow graph, and the cleanup pass then removes dispatcher
+  state writes recorded by deflattening. The result is a cleaner function in the pseudocode view with the
   dispatcher overhead stripped out. If reanalysis does not trigger automatically, run it
   manually via *Analysis ▸ Reanalyze All Functions*.
 
@@ -106,24 +102,26 @@ functions.
 
 ## Pipeline at a glance
 
-Four workflow activities run per function, in order. The first resolves indirect jumps at
+Six workflow activities run per function, in order. The first resolves indirect jumps at
 **LLIL**; the rest run at **MLIL**:
 
 1. **Indirect jump resolver** (LLIL) - rewrites each decode-gadget `jump(reg)` into
-   `jump(const)` so Binary Ninja discovers the target as code and reconnects the CFG.
-   Re-runs to a fixpoint as the function grows.
+   `jump(const)` in the current IL. The workflow callback owns user branch metadata and
+   analysis-completion tag cleanup scheduling. Re-runs to a fixpoint as the function grows.
 2. **Indirect call resolver** (MLIL) - folds each import call's decode and rewrites the
-   call destination to a constant pointer, recovering the callee prototype.
-3. **Deflattener** (MLIL, *opt-in*) - recovers the state machine and rewrites each
+   call destination to a constant pointer. The workflow callback owns call type adjustments
+   and call-target phase cleanup.
+3. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
+   switches back into `if` expressions, then runs branch-target phase cleanup.
+4. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
+5. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
    `OBB → dispatcher` jump into a direct `goto` to the real successor. Conditional
-   (cmov-selected) transitions are reconstructed into the original `if`/branch control
-   flow, using Z3 to recover the routing predicate.
-4. **Cleanup / NOP pass** (MLIL, *opt-in*) - converts any remaining resolved gadget jumps
-   to gotos, collapses the always-true opaque predicates, and NOPs the dead jump gadgets
-   and state writes.
+   transitions are reconstructed when each branch arm selects one dispatcher state token.
+6. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
+   recorded by deflattening.
 
 Full details, ordering rationale, and the `session_data` contract are in
-[`docs/pipeline.md`](docs/pipeline.md). The conditional/Z3 path has its own write-up in
+[`docs/pipeline.md`](docs/pipeline.md). Conditional deflattening has its own write-up in
 [`docs/conditional-deflattening.md`](docs/conditional-deflattening.md). A file-by-file map
 of the source is in [`docs/files.md`](docs/files.md).
 

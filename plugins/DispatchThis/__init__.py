@@ -102,7 +102,7 @@ def register_workflows():
     workflow.register_activity(Activity(json.dumps({
         "name": "extension.DispatchThis.Cleanup",
         "title": "DispatchThis: Cleanup",
-        "description": "Erase dead decode gadgets and collapse opaque predicates.",
+        "description": "NOP dispatcher state writes recorded by deflattening.",
         "eligibility": _DEFLATTEN_ONLY,
     }), action=workflow_cleanup))
 

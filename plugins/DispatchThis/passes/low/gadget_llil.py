@@ -29,25 +29,6 @@ def clear_resolved_indirect_branch_tags(func):
             UNRESOLVED_INDIRECT_TAG,
         )
 
-
-def schedule_resolved_indirect_branch_tag_cleanup(bv, func_start):
-    pending = bv.session_data.setdefault("dispatchthis_tag_cleanup_pending", set())
-    if func_start in pending:
-        return
-    pending.add(func_start)
-
-    def clear_after_analysis():
-        try:
-            func = bv.get_function_at(func_start)
-            if func is not None:
-                clear_resolved_indirect_branch_tags(func)
-        except Exception as e:  # noqa: BLE001
-            log_error(f"[gadget-llil] tag cleanup @ {hex(func_start)}: {e}")
-        finally:
-            pending.discard(func_start)
-
-    bv.add_analysis_completion_event(clear_after_analysis)
-
 # Constant-truth evaluators for the LLIL comparison ops the predicates use.
 _CMP = {
     "LLIL_CMP_E": lambda a, b: a == b,

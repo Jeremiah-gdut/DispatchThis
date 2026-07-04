@@ -156,7 +156,7 @@ sequence handles `||`, `&&`, and mixed uniformly with no classification.
 
 ---
 
-## Generic model + why Z3
+## Historical symbolic model
 
 Model each conditional block as: a single state-temp `t`, an ordered list of
 conditional assignments, and a store:
@@ -180,13 +180,11 @@ observed here.
 
 **Non-monotone case (a later cmov re-selects the default value, e.g.
 `default A; c1->B; c2->A`):** forward-first-match is WRONG (`c1` true does not
-imply B because `c2` may override back to A). The correct structure tests the
-dominating (latest) condition first. **This is where Z3 earns its place:** build
-the ITE expression for `t` over boolean condition vars, then for each leaf derive
-`final == A` vs `final == B`, yielding a minimal/correct decision tree (possibly
-reordered) instead of relying on a hand-rolled fold that breaks on re-selection.
+imply B because `c2` may override back to A). A symbolic model can build the ITE
+expression for `t` over boolean condition vars, then for each leaf derive
+`final == A` vs `final == B`, yielding a minimal/correct decision tree.
 
-Z3 sketch:
+Symbolic sketch:
 ```
 t = default
 for c_i, v_i in chain:  t = If(c_i, v_i, t)        # ordered ITE = override semantics
@@ -213,7 +211,7 @@ Key facts for these conditional blocks:
 **Chosen approach: edge re-pointing only -- never hand-delete instructions.**
 1. For each MLIL_IF in the chain, `replace_expr` its terminator with a new
    `if(SAME condition expr, true_label, false_label)` whose labels target either a
-   successor block or the next condition block, per the Z3-derived decision tree.
+   successor block or the next condition block, per the symbolic decision tree.
 2. `replace_expr` the converged gadget block's `MLIL_JUMP_TO` with a `goto` to the
    fall-through successor.
 3. Leave every value-computation instruction in place. After `finalize()` +
@@ -229,7 +227,7 @@ jump-gadget-specific instructions."
 Location note: because the chain is entered at its top block (via the previous
 OBB's gadget) and all alternates collapse to the single non-default state, forward
 order needs no physical block reordering for the monotone cases. Only the
-non-monotone (re-selection) case requires the Z3 tree to re-point edges so the
+non-monotone (re-selection) case requires the symbolic tree to re-point edges so the
 dominating condition is evaluated first; even then we re-point edges, not move
 instructions.
 

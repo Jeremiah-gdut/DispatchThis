@@ -3,7 +3,7 @@
 from binaryninja import AnalysisContext
 
 from .passes.medium.deflatten import apply_redirections_il, compute_redirections
-from .passes.medium.nop_pass import clean_resolved_gadget_jumps
+from .passes.medium.nop_pass import clean_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_phase_decode, mlil_set_var_roots_before_sites
@@ -13,9 +13,8 @@ from .passes.low.gadget_llil import (
     clear_resolved_indirect_branch_tags,
     iter_llil_indirect_jumps,
     resolve_llil_jump_plan,
-    schedule_resolved_indirect_branch_tag_cleanup,
 )
-from .utils.log import log_info, log_warn, log_debug
+from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
 
 
@@ -44,6 +43,25 @@ def _commit_mlil(analysis_context, mlil):
     except Exception as e:  # noqa: BLE001
         func = analysis_context.function
         log_warn(f"[workflow] {func.name}: failed to commit MLIL changes: {e}")
+
+
+def _schedule_resolved_indirect_branch_tag_cleanup(bv, func_start):
+    pending = bv.session_data.setdefault("dispatchthis_tag_cleanup_pending", set())
+    if func_start in pending:
+        return
+    pending.add(func_start)
+
+    def clear_after_analysis():
+        try:
+            func = bv.get_function_at(func_start)
+            if func is not None:
+                clear_resolved_indirect_branch_tags(func)
+        except Exception as e:  # noqa: BLE001
+            log_error(f"[workflow] tag cleanup @ {hex(func_start)}: {e}")
+        finally:
+            pending.discard(func_start)
+
+    bv.add_analysis_completion_event(clear_after_analysis)
 
 
 def _normalized_type_name(type_value):
@@ -86,7 +104,7 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         llil_stable[func.start] = True
         _mirror_branch_state_for_legacy_passes(bv, func, state)
         clear_resolved_indirect_branch_tags(func)
-        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
+        _schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
         return
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
@@ -136,7 +154,7 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         state.mark_branch_resolving_stable()
         llil_stable[func.start] = True
         clear_resolved_indirect_branch_tags(func)
-        schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
+        _schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
 
 
 def workflow_resolve_calls_mlil(analysis_context: AnalysisContext):
@@ -329,7 +347,7 @@ def workflow_cleanup(analysis_context: AnalysisContext):
         log_debug(f"[workflow] {func.name}: deflattener has not run yet, skipping cleanup")
         return
 
-    _jumps, _ifs, _nops, state_writes = clean_resolved_gadget_jumps(bv, func, mlil=mlil)
+    state_writes = clean_deflatten_state_writes(bv, func, mlil=mlil)
     if state_writes:
         _commit_mlil(analysis_context, mlil)
 

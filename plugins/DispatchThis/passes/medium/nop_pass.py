@@ -75,13 +75,12 @@ def nop_state_writes(mlil, state_consts, state_vars):
     return len(seen)
 
 
-def clean_resolved_gadget_jumps(bv, func, mlil=None):
-    """Workflow cleanup hook kept for compatibility; deflatten now only owns state writes."""
+def clean_deflatten_state_writes(bv, func, mlil=None):
+    """NOP dispatcher state writes recorded by the deflatten workflow."""
     mlil = mlil or func.medium_level_il
     if mlil is None:
-        return 0, 0, 0, 0
+        return 0
 
     state_consts = bv.session_data.get("dispatchthis_state_consts", {}).get(func.start, set())
     state_vars = bv.session_data.get("dispatchthis_state_vars", {}).get(func.start, set())
-    nopd_state_writes = nop_state_writes(mlil, state_consts, state_vars)
-    return 0, 0, 0, nopd_state_writes
+    return nop_state_writes(mlil, state_consts, state_vars)

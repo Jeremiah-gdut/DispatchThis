@@ -17,10 +17,9 @@ Proof of concept indirect jump and control flow unflattener built around a
 
 ## Conditional reconstruction
 
-- **The Z3 path is the most fragile.** It decompiles the canonical `||` / `&&` cases
-  cleanly, but conditional reconstruction touches the most moving parts (chain recovery,
-  monotone classification, predicate rebuilding). Unusual `cmov` compositions may be
-  misclassified or left intact. See [`conditional-deflattening.md`](conditional-deflattening.md).
+- **Conditional deflattening is narrow.** It handles branch regions where each arm writes
+  exactly one known dispatcher state token. More complex `cmov` compositions or impure
+  branch tails are left intact. See [`conditional-deflattening.md`](conditional-deflattening.md).
 
 ## Operational
 
