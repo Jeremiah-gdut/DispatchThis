@@ -1,9 +1,12 @@
+from contextlib import contextmanager
+import importlib.util
 import sys
 import types
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_MISSING = object()
 
 
 def ensure_package(name, path):
@@ -96,3 +99,38 @@ log_stub = sys.modules.setdefault("plugins.DispatchThis.utils.log", types.Simple
 for name in ("log_info", "log_warn", "log_error", "log_debug"):
     if not hasattr(log_stub, name):
         setattr(log_stub, name, lambda _msg: None)
+
+
+def load_plugin_module(name):
+    path = ROOT.joinpath(*name.split(".")).with_suffix(".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = name.rpartition(".")[0]
+    previous = sys.modules.get(name, _MISSING)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+        raise
+    return module
+
+
+@contextmanager
+def temporary_modules(modules, clear=()):
+    names = set(modules) | set(clear)
+    saved = {name: sys.modules.get(name, _MISSING) for name in names}
+    for name in clear:
+        sys.modules.pop(name, None)
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module

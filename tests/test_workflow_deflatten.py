@@ -1,21 +1,7 @@
-import importlib.util
-import sys
 import types
-from pathlib import Path
 
+from conftest import load_plugin_module, temporary_modules
 
-sys.modules.setdefault("binaryninja", types.SimpleNamespace(AnalysisContext=object))
-ROOT = Path(__file__).resolve().parents[1]
-
-for name in (
-    "plugins",
-    "plugins.DispatchThis",
-    "plugins.DispatchThis.passes",
-    "plugins.DispatchThis.passes.low",
-    "plugins.DispatchThis.passes.medium",
-    "plugins.DispatchThis.utils",
-):
-    sys.modules.setdefault(name, types.ModuleType(name))
 
 calls = []
 branch_plan_calls = []
@@ -105,24 +91,8 @@ _FAKE_MODULES = {
     ),
 }
 
-_MISSING = object()
-_saved_modules = {name: sys.modules.get(name, _MISSING) for name in _FAKE_MODULES}
-_saved_modules["plugins.DispatchThis.workflow"] = sys.modules.get("plugins.DispatchThis.workflow", _MISSING)
-sys.modules.update(_FAKE_MODULES)
-
-spec = importlib.util.spec_from_file_location(
-    "plugins.DispatchThis.workflow",
-    ROOT / "plugins" / "DispatchThis" / "workflow.py",
-)
-workflow = importlib.util.module_from_spec(spec)
-workflow.__package__ = "plugins.DispatchThis"
-sys.modules[spec.name] = workflow
-spec.loader.exec_module(workflow)
-for name, module in _saved_modules.items():
-    if module is _MISSING:
-        sys.modules.pop(name, None)
-    else:
-        sys.modules[name] = module
+with temporary_modules(_FAKE_MODULES, clear=("plugins.DispatchThis.workflow",)):
+    workflow = load_plugin_module("plugins.DispatchThis.workflow")
 
 
 class FakeContext:

@@ -1,32 +1,9 @@
-import sys
 import types
-import importlib.util
-from pathlib import Path
 
-sys.modules.setdefault("binaryninja", types.SimpleNamespace(AnalysisContext=object))
-ROOT = Path(__file__).resolve().parents[1]
+from conftest import load_plugin_module
 
-for name in (
-    "plugins",
-    "plugins.DispatchThis",
-    "plugins.DispatchThis.passes",
-    "plugins.DispatchThis.passes.medium",
-    "plugins.DispatchThis.utils",
-):
-    sys.modules.setdefault(name, types.ModuleType(name))
-sys.modules.setdefault(
-    "plugins.DispatchThis.utils.log",
-    types.SimpleNamespace(log_info=lambda _msg: None, log_warn=lambda _msg: None),
-)
 
-spec = importlib.util.spec_from_file_location(
-    "plugins.DispatchThis.passes.medium.global_constants",
-    ROOT / "plugins" / "DispatchThis" / "passes" / "medium" / "global_constants.py",
-)
-global_constants = importlib.util.module_from_spec(spec)
-global_constants.__package__ = "plugins.DispatchThis.passes.medium"
-sys.modules[spec.name] = global_constants
-spec.loader.exec_module(global_constants)
+global_constants = load_plugin_module("plugins.DispatchThis.passes.medium.global_constants")
 
 CONST_SLOT_TYPE = global_constants.CONST_SLOT_TYPE
 plan_global_constant_slots = global_constants.plan_global_constant_slots

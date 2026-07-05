@@ -1,32 +1,7 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
+from conftest import load_plugin_module
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-for name in (
-    "plugins",
-    "plugins.DispatchThis",
-    "plugins.DispatchThis.passes",
-    "plugins.DispatchThis.passes.low",
-    "plugins.DispatchThis.utils",
-):
-    sys.modules.setdefault(name, types.ModuleType(name))
-log_stub = sys.modules.setdefault("plugins.DispatchThis.utils.log", types.SimpleNamespace())
-log_stub.log_debug = getattr(log_stub, "log_debug", lambda _msg: None)
-log_stub.log_warn = getattr(log_stub, "log_warn", lambda _msg: None)
-log_stub.log_error = getattr(log_stub, "log_error", lambda _msg: None)
-
-spec = importlib.util.spec_from_file_location(
-    "plugins.DispatchThis.passes.low.gadget_llil",
-    ROOT / "plugins" / "DispatchThis" / "passes" / "low" / "gadget_llil.py",
-)
-gadget_llil = importlib.util.module_from_spec(spec)
-gadget_llil.__package__ = "plugins.DispatchThis.passes.low"
-sys.modules[spec.name] = gadget_llil
-spec.loader.exec_module(gadget_llil)
+gadget_llil = load_plugin_module("plugins.DispatchThis.passes.low.gadget_llil")
 
 
 class Op:

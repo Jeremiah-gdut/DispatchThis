@@ -1,40 +1,9 @@
-import importlib.util
-import sys
 import types
-from pathlib import Path
+
+from conftest import load_plugin_module
 
 
-sys.modules.setdefault(
-    "binaryninja",
-    types.SimpleNamespace(ILSourceLocation=object, MediumLevelILLabel=object),
-)
-ROOT = Path(__file__).resolve().parents[1]
-
-for name in (
-    "plugins",
-    "plugins.DispatchThis",
-    "plugins.DispatchThis.passes",
-    "plugins.DispatchThis.passes.medium",
-    "plugins.DispatchThis.utils",
-):
-    sys.modules.setdefault(name, types.ModuleType(name))
-sys.modules.setdefault(
-    "plugins.DispatchThis.passes.medium.phase_cleanup",
-    types.SimpleNamespace(mlil_def_roots=lambda *_args: set()),
-)
-sys.modules.setdefault(
-    "plugins.DispatchThis.utils.log",
-    types.SimpleNamespace(log_info=lambda _msg: None, log_warn=lambda _msg: None),
-)
-
-spec = importlib.util.spec_from_file_location(
-    "plugins.DispatchThis.passes.medium.branch_conditions",
-    ROOT / "plugins" / "DispatchThis" / "passes" / "medium" / "branch_conditions.py",
-)
-branch_conditions = importlib.util.module_from_spec(spec)
-branch_conditions.__package__ = "plugins.DispatchThis.passes.medium"
-sys.modules[spec.name] = branch_conditions
-spec.loader.exec_module(branch_conditions)
+branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_conditions")
 
 
 class Op:

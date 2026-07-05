@@ -1,54 +1,9 @@
-import sys
 import types
-import importlib.util
-from pathlib import Path
+
+from conftest import load_plugin_module
 
 
-class FakeLabel:
-    pass
-
-
-class FakeLoc:
-    @staticmethod
-    def from_instruction(instr):
-        return ("loc", instr.expr_index)
-
-
-sys.modules.setdefault(
-    "binaryninja",
-    types.SimpleNamespace(
-        ILSourceLocation=FakeLoc,
-        MediumLevelILJump=object,
-        MediumLevelILLabel=FakeLabel,
-    ),
-)
-ROOT = Path(__file__).resolve().parents[1]
-
-for name in (
-    "plugins",
-    "plugins.DispatchThis",
-    "plugins.DispatchThis.passes",
-    "plugins.DispatchThis.passes.medium",
-):
-    sys.modules.setdefault(name, types.ModuleType(name))
-sys.modules.setdefault("plugins.DispatchThis.utils", types.ModuleType("plugins.DispatchThis.utils"))
-sys.modules.setdefault(
-    "plugins.DispatchThis.utils.log",
-    types.SimpleNamespace(
-        log_info=lambda _msg: None,
-        log_warn=lambda _msg: None,
-        log_debug=lambda _msg: None,
-    ),
-)
-
-spec = importlib.util.spec_from_file_location(
-    "plugins.DispatchThis.passes.medium.deflatten",
-    ROOT / "plugins" / "DispatchThis" / "passes" / "medium" / "deflatten.py",
-)
-deflatten = importlib.util.module_from_spec(spec)
-deflatten.__package__ = "plugins.DispatchThis.passes.medium"
-sys.modules[spec.name] = deflatten
-spec.loader.exec_module(deflatten)
+deflatten = load_plugin_module("plugins.DispatchThis.passes.medium.deflatten")
 
 compute_redirections = deflatten.compute_redirections
 apply_redirections_il = deflatten.apply_redirections_il
