@@ -6,6 +6,7 @@ from conftest import load_plugin_module
 global_constants = load_plugin_module("plugins.DispatchThis.passes.medium.global_constants")
 
 CONST_SLOT_TYPE = global_constants.CONST_SLOT_TYPE
+global_constant_cleanup_roots = global_constants.global_constant_cleanup_roots
 plan_global_constant_slots = global_constants.plan_global_constant_slots
 
 
@@ -96,8 +97,10 @@ def load(src, size=8, address=0x1000):
     return Expr("MLIL_LOAD", src=src, size=size, address=address)
 
 
-def set_var(name, src, address=0x1000):
-    return Expr("MLIL_SET_VAR", dest=name, src=src, address=address)
+def set_var(name, src, address=0x1000, instr_index=None):
+    if instr_index is None:
+        instr_index = address
+    return Expr("MLIL_SET_VAR", dest=name, src=src, address=address, instr_index=instr_index)
 
 
 def store(dest, address=0x1000):
@@ -185,7 +188,26 @@ def test_global_constant_slot_is_planned_from_call_argument_pointer():
     ]
 
 
+def test_global_constant_cleanup_roots_include_direct_slot_load_assignments():
+    dead_slot_load = set_var(
+        "x8_3168",
+        load(const(0xA3E990), address=0x8FB720),
+        address=0x8FB720,
+        instr_index=21621,
+    )
+    unrelated_slot_load = set_var(
+        "x9_1",
+        load(const(0xA3EA00), address=0x8FB724),
+        address=0x8FB724,
+        instr_index=21622,
+    )
+    mlil = FakeMlil([dead_slot_load, unrelated_slot_load])
+
+    assert global_constant_cleanup_roots(mlil, {0xA3E990}) == {21621}
+
+
 if __name__ == "__main__":
     test_global_constant_slot_is_planned_from_pointer_base_load()
     test_global_constant_slot_is_skipped_when_known_refs_store_to_it()
     test_global_constant_slot_is_planned_from_call_argument_pointer()
+    test_global_constant_cleanup_roots_include_direct_slot_load_assignments()

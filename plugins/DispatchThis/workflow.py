@@ -7,7 +7,7 @@ from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
-from .passes.medium.global_constants import CONST_SLOT_TYPE
+from .passes.medium.global_constants import CONST_SLOT_TYPE, global_constant_cleanup_roots
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -316,6 +316,20 @@ def resolve_globals_mlil(ctx: AnalysisContext):
 
     if applied:
         log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
+
+    cleanup_roots = global_constant_cleanup_roots(
+        mlil,
+        {plan["slot_addr"] for plan in plans},
+    )
+    cleanup_roots.update(
+        set_roots_before(
+            mlil,
+            {plan["use_addr"] for plan in plans if plan.get("use_addr") is not None},
+        )
+    )
+    cleaned = cleanup_decode(mlil, cleanup_roots, "global")
+    if cleaned:
+        _commit_mlil(ctx, mlil)
 
 
 def deflatten_mlil(ctx: AnalysisContext):

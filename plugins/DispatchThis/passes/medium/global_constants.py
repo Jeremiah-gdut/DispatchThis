@@ -8,6 +8,7 @@ CONST_SLOT_TYPE = "uint8_t const* const"
 
 _CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 _LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
+_SET_VAR_OPS = ("MLIL_SET_VAR", "MLIL_SET_VAR_FIELD")
 _STORE_OPS = ("MLIL_STORE", "MLIL_STORE_SSA", "MLIL_STORE_STRUCT", "MLIL_STORE_STRUCT_SSA")
 
 
@@ -234,3 +235,21 @@ def plan_global_constant_slots(bv, mlil):
     if out:
         log_info(f"[gconst] planned {len(out)} global constant slot(s)")
     return out
+
+
+def global_constant_cleanup_roots(mlil, slot_addrs):
+    """SET_VAR instruction indices for direct loads from planned const slots."""
+    slot_addrs = set(slot_addrs or ())
+    if mlil is None or not slot_addrs:
+        return set()
+
+    roots = set()
+    for ins in getattr(mlil, "instructions", ()) or ():
+        if _op(ins) not in _SET_VAR_OPS:
+            continue
+        if _slot_load_addr(mlil, getattr(ins, "src", None)) not in slot_addrs:
+            continue
+        instr_index = getattr(ins, "instr_index", None)
+        if instr_index is not None:
+            roots.add(instr_index)
+    return roots

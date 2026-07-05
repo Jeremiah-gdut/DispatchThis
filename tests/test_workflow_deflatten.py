@@ -11,12 +11,17 @@ call_plan_results = []
 call_rewrite_calls = []
 global_plan_calls = []
 global_plan_results = []
+global_cleanup_roots_calls = []
+global_cleanup_roots_results = []
 active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
 nop_state_write_results = []
 nop_state_write_calls = []
 cleanup_decode_calls = []
+cleanup_decode_results = []
+set_roots_before_calls = []
+set_roots_before_results = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -156,12 +161,19 @@ _FAKE_MODULES = {
     "plugins.DispatchThis.passes.medium.phase_cleanup": types.SimpleNamespace(
         cleanup_decode=lambda *args, **kwargs: (
             cleanup_decode_calls.append((args, kwargs)),
-            0,
+            cleanup_decode_results.pop(0) if cleanup_decode_results else 0,
         )[1],
-        set_roots_before=lambda *_args, **_kwargs: set(),
+        set_roots_before=lambda *args, **kwargs: (
+            set_roots_before_calls.append((args, kwargs)),
+            set_roots_before_results.pop(0) if set_roots_before_results else set(),
+        )[1],
     ),
     "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
         CONST_SLOT_TYPE="uint64_t",
+        global_constant_cleanup_roots=lambda *args, **kwargs: (
+            global_cleanup_roots_calls.append((args, kwargs)),
+            global_cleanup_roots_results.pop(0) if global_cleanup_roots_results else set(),
+        )[1],
         plan_global_constant_slots=forbidden_plan_global_constant_slots,
     ),
     "plugins.DispatchThis.passes.low.gadget_llil": types.SimpleNamespace(
@@ -574,6 +586,39 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     global_plan_results.clear()
+
+
+def test_global_resolver_cleans_dead_slot_loads_before_plan_uses():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    global_plan_calls.clear()
+    global_cleanup_roots_calls.clear()
+    global_cleanup_roots_results[:] = [{0x21621}]
+    cleanup_decode_calls.clear()
+    cleanup_decode_results[:] = [1]
+    set_roots_before_calls.clear()
+    set_roots_before_results[:] = [set()]
+    ctx = FakeContext()
+    global_plan_results[:] = [{
+        "slot_addr": 0xA3E990,
+        "type": "uint64_t",
+        "value": 0x1234,
+        "resolved_addr": 0x8E04F8,
+        "use_addr": 0x8FB744,
+    }]
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert set_roots_before_calls == [((ctx.mlil, {0x8FB744}), {})]
+    assert global_cleanup_roots_calls == [((ctx.mlil, {0xA3E990}), {})]
+    assert cleanup_decode_calls == [((ctx.mlil, {0x21621}, "global"), {})]
+    assert ctx.committed is True
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    global_plan_results.clear()
+    cleanup_decode_results.clear()
+    global_cleanup_roots_results.clear()
+    set_roots_before_results.clear()
 
 
 def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
