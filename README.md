@@ -77,7 +77,7 @@ For example: `~/.binaryninja/plugins/DispatchThis`
 
 ## Usage
 
-The passes are enabled per-function from the **Function Settings** context menu. With the target function open in a disassembly or graph view, **right-click anywhere inside the function** and choose **Function Settings**. Two plugin entries appear:
+The passes are enabled per-function from the **Function Settings** context menu. With the target function open in a disassembly or graph view, **right-click anywhere inside the function** and choose **Function Settings**. Three plugin entries appear:
 
 - **Indirect Jumps/Calls** - enables the indirect-jump and indirect-call resolvers for this
   function. Once enabled, reanalysis runs automatically and the Control Flow Graph will
@@ -92,6 +92,10 @@ The passes are enabled per-function from the **Function Settings** context menu.
   dispatcher overhead stripped out. If reanalysis does not trigger automatically, run it
   manually via *Analysis ▸ Reanalyze All Functions*.
 
+- **String Decrypt** - enables the resolver prerequisites for the string-decrypt workflow.
+  This activity currently waits for indirect branch, indirect call, and global constant
+  phases to stabilize; string decoding itself is not implemented in this slice.
+
 ![Function Settings Toggles](docs/assets/ENABLE_PER_FUNCTION.png)
 
 **Deflatten depends on indirect branch resolving.** The Deflatten setting also enables the
@@ -102,8 +106,8 @@ leave the deflatten workflow phase idle.
 
 ## Pipeline at a glance
 
-Seven workflow activities are inserted per function. One is the no-op
-`Indirect Jumps/Calls` setting activity; the remaining six are recovery workflow phases:
+Eight workflow activities are inserted per function. One is the no-op
+`Indirect Jumps/Calls` setting activity; the remaining seven are recovery workflow phases:
 
 1. **Indirect Jumps/Calls toggle** (LLIL insertion point) - surfaces the per-function
    resolver setting.
@@ -116,11 +120,13 @@ Seven workflow activities are inserted per function. One is the no-op
 4. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
    switches back into `if` expressions, then runs branch-target phase cleanup.
 5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
-6. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
+6. **String decrypt gate** (MLIL, *opt-in*) - waits for branch, call, and global phases to
+   stabilize for the current function.
+7. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
    original basic block's dispatcher jump into a direct `goto` to the real successor.
    Conditional transitions are reconstructed when each branch arm selects one dispatcher
    state token.
-7. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
+8. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
    recorded by deflattening.
 
 Full details, ordering rationale, and the `session_data` contract are in

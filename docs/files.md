@@ -6,8 +6,9 @@ DispatchThis/
 │                               the settings, the analysis-limit overrides, and the
 │                               Function Analysis setting activities.
 ├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
-│                               MLIL call/global resolve, branch translation, deflatten,
-│                               phase cleanup, and deflatten cleanup) and their gating.
+│                               MLIL call/global resolve, branch translation,
+│                               string-decrypt gate, deflatten, phase cleanup,
+│                               and deflatten cleanup) and their gating.
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── profiles/
 │   ├── __init__.py             Bundled resolver profile registry and contract validation.
@@ -36,9 +37,9 @@ DispatchThis/
 
 ### `__init__.py`
 Clones `core.function.metaAnalysis`, registers the activities and their insertion
-points, surfaces the `analysis.plugins.dispatchThis.indirectJumpsCalls` and
-`analysis.plugins.dispatchThis.deflatten` Function Analysis settings, and raises analysis
-limits for large flattened functions.
+points, surfaces the `analysis.plugins.dispatchThis.indirectJumpsCalls`,
+`analysis.plugins.dispatchThis.stringDecrypt`, and `analysis.plugins.dispatchThis.deflatten`
+Function Analysis settings, and raises analysis limits for large flattened functions.
 
 ### `workflow.py`
 The activity callbacks invoked by the workflow per function. Each reads the relevant IL

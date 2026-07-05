@@ -16,6 +16,7 @@ class CapturedWorkflow:
 
     def __init__(self, _name):
         self.activities = []
+        self.insertions = []
         CapturedWorkflow.last = self
 
     def clone(self):
@@ -24,8 +25,8 @@ class CapturedWorkflow:
     def register_activity(self, activity):
         self.activities.append(activity)
 
-    def insert(self, *_args, **_kwargs):
-        pass
+    def insert(self, *args, **kwargs):
+        self.insertions.append((args, kwargs))
 
     def register(self):
         pass
@@ -50,11 +51,43 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     monkeypatch.setattr(binaryninja, "Workflow", CapturedWorkflow)
     monkeypatch.setattr(binaryninja, "Settings", CapturedSettings)
 
-    load_plugin_module("plugins.DispatchThis.__init__")
+    plugin = load_plugin_module("plugins.DispatchThis.__init__")
 
-    descriptions = [
-        json.loads(activity.config)["description"]
+    configs = {
+        json.loads(activity.config)["name"]: json.loads(activity.config)
         for activity in CapturedWorkflow.last.activities
-    ]
+    }
+    descriptions = [config["description"] for config in configs.values()]
 
     assert all("OBB" not in description for description in descriptions)
+    assert configs[plugin.STRING_DECRYPT_SETTING]["title"] == "String Decrypt"
+    assert configs[plugin.STRING_DECRYPT_SETTING]["eligibility"] == {"auto": {"default": False}}
+
+    resolver_ids = [
+        "extension.DispatchThis.IndirectPatcher",
+        "extension.DispatchThis.IndirectCallPatcher",
+        "extension.DispatchThis.GlobalConstantResolver",
+    ]
+    for activity_id in resolver_ids:
+        identifiers = {
+            predicate["identifier"]
+            for predicate in configs[activity_id]["eligibility"]["predicates"]
+        }
+        assert plugin.STRING_DECRYPT_SETTING in identifiers
+    branch_translation_identifiers = {
+        predicate["identifier"]
+        for predicate in configs["extension.DispatchThis.BranchConditionTranslator"]["eligibility"]["predicates"]
+    }
+    assert plugin.STRING_DECRYPT_SETTING not in branch_translation_identifiers
+
+    high_level = next(
+        args[1]
+        for args, _kwargs in CapturedWorkflow.last.insertions
+        if args[0] == "core.function.generateHighLevelIL"
+    )
+    assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
+        plugin.STRING_DECRYPT_SETTING
+    )
+    assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(
+        plugin.DEFLATTEN_SETTING
+    )

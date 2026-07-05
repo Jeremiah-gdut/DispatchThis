@@ -342,6 +342,27 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if applied:
         log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
 
+
+def string_decrypt_gate_mlil(ctx: AnalysisContext):
+    func = ctx.function
+    bv = ctx.view
+
+    if bv.arch.name != "aarch64":
+        return False
+
+    state = FunctionWorkflowState(func)
+    if not state.branch_stable(func):
+        return False
+    if not state.call_stable():
+        return False
+    if not state.global_stable():
+        return False
+    if ctx.mlil is None:
+        return False
+
+    return True
+
+
 def deflatten_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view

@@ -708,6 +708,39 @@ def test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify():
     FakeWorkflowState.global_receipts = {}
 
 
+def test_string_decrypt_waits_for_branch_call_and_global_stability():
+    ctx = FakeContext()
+
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    assert workflow.string_decrypt_gate_mlil(ctx) is False
+
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = False
+    assert workflow.string_decrypt_gate_mlil(ctx) is False
+
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = False
+    assert workflow.string_decrypt_gate_mlil(ctx) is False
+
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+
+
+def test_string_decrypt_does_not_require_deflatten_stability():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    ctx = FakeContext()
+
+    assert workflow.string_decrypt_gate_mlil(ctx) is True
+    assert "dispatchthis_mlil_stable" not in ctx.view.session_data
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+
+
 def test_cleanup_waits_for_deflatten_stability():
     ctx = FakeContext()
     ctx.view.session_data["dispatchthis_mlil_stable"] = {}
@@ -767,6 +800,8 @@ if __name__ == "__main__":
     test_global_resolver_uses_active_profile_without_workflow_state()
     test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()
+    test_string_decrypt_waits_for_branch_call_and_global_stability()
+    test_string_decrypt_does_not_require_deflatten_stability()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()

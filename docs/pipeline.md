@@ -5,9 +5,9 @@ own activities into it. Everything is IL expression rewriting - no bytes are pat
 
 ## Registration and ordering
 
-From `__init__.py` / `workflow.py`, seven activities are inserted. The
+From `__init__.py` / `workflow.py`, eight activities are inserted. The
 `analysis.plugins.dispatchThis.indirectJumpsCalls` activity is a no-op setting activity;
-the other six are recovery workflow phases:
+the others are recovery workflow phases:
 
 | Activity ID | Stage | Inserted before |
 | --- | --- | --- |
@@ -16,13 +16,14 @@ the other six are recovery workflow phases:
 | `extension.DispatchThis.IndirectCallPatcher` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.BranchConditionTranslator` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.GlobalConstantResolver` | MLIL | `core.function.generateHighLevelIL` |
+| `analysis.plugins.dispatchThis.stringDecrypt` | MLIL | `core.function.generateHighLevelIL` |
 | `analysis.plugins.dispatchThis.deflatten` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.Cleanup` | MLIL | `core.function.generateHighLevelIL` |
 
 The indirect branch resolver runs **before MLIL is generated**, because the deflattener needs
 the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
-The other five run before HLIL generation, in the order call-resolve → branch-condition
-translation → global-constant resolving → deflatten → cleanup. The MLIL activities gate themselves on function phase
+The other six run before HLIL generation, in the order call-resolve → branch-condition
+translation → global-constant resolving → string-decrypt gate → deflatten → cleanup. The MLIL activities gate themselves on function phase
 state, so they do not submit reanalysis-triggering mutations until indirect branch
 resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja edits:
 `set_user_indirect_branches`, `set_call_type_adjustment`, global data-var typing, and
@@ -86,7 +87,13 @@ The first scope is intentionally narrow: a qword slot in `.data`, a nonzero cons
 offset chain, a valid resolved address, and no store to the slot in the known direct-ref
 functions.
 
-### 5. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
+### 5. String decrypt gate (MLIL, opt-in) - `workflow.py`
+
+Gated behind the `String Decrypt` setting. This slice only establishes ordering: the
+callback returns without work until indirect branch, indirect call, and global constant
+phases are stable. It does not require the current function to be deflattened first.
+
+### 6. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
 
 Gated behind the `Enable Deflattening` setting, and only runs once function phase state
 reports that the LLIL indirect branch resolver has drained every indirect jump (otherwise
@@ -101,7 +108,7 @@ the CFG - and the recovered state machine - would be incomplete).
 - The resolved dispatcher state values and the state variable's alias set are recorded to
   `session_data` so the cleanup can NOP the state writes precisely (by value and by var).
 
-### 6. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
+### 7. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
 
 Gated behind `Deflatten`; it only acts once deflatten has rewritten the original block exits.
 `nop_deflatten_state_writes` NOPs dispatcher state writes by the state token values and

@@ -14,6 +14,7 @@ from .workflow import (
     resolve_calls_mlil,
     translate_branches_mlil,
     resolve_globals_mlil,
+    string_decrypt_gate_mlil,
     deflatten_mlil,
     cleanup_mlil,
 )
@@ -22,8 +23,17 @@ from .workflow import (
 # generates a Function Analysis toggle whose ID is the activity name).
 RESOLVE_SETTING = "analysis.plugins.dispatchThis.indirectJumpsCalls"
 DEFLATTEN_SETTING = "analysis.plugins.dispatchThis.deflatten"
+STRING_DECRYPT_SETTING = "analysis.plugins.dispatchThis.stringDecrypt"
 
-# Resolvers run under either toggle: deflattening needs the reconnected CFG.
+# Resolvers run under any feature toggle that needs recovered targets/constants.
+_RESOLVER_ELIGIBILITY = {
+    "predicates": [
+        {"type": "setting", "identifier": RESOLVE_SETTING, "value": True},
+        {"type": "setting", "identifier": DEFLATTEN_SETTING, "value": True},
+        {"type": "setting", "identifier": STRING_DECRYPT_SETTING, "value": True},
+    ],
+    "logicalOperator": "or",
+}
 _RESOLVE_OR_DEFLATTEN = {
     "predicates": [
         {"type": "setting", "identifier": RESOLVE_SETTING, "value": True},
@@ -57,7 +67,7 @@ def register_workflows():
         "name": "extension.DispatchThis.IndirectPatcher",
         "title": "DispatchThis: Resolve Indirect Jumps",
         "description": "Rewrite decode-gadget jump(reg) into jump(const target).",
-        "eligibility": _RESOLVE_OR_DEFLATTEN,
+        "eligibility": _RESOLVER_ELIGIBILITY,
     }), action=resolve_jumps_llil))
     workflow.insert("core.function.generateMediumLevelIL", [
         RESOLVE_SETTING,
@@ -69,7 +79,7 @@ def register_workflows():
         "name": "extension.DispatchThis.IndirectCallPatcher",
         "title": "DispatchThis: Resolve Indirect Calls",
         "description": "Rewrite decode-gadget call(reg) into call(const target).",
-        "eligibility": _RESOLVE_OR_DEFLATTEN,
+        "eligibility": _RESOLVER_ELIGIBILITY,
     }), action=resolve_calls_mlil))
 
     # Recover if/else shape after indirect branches have been resolved.
@@ -85,8 +95,16 @@ def register_workflows():
         "name": "extension.DispatchThis.GlobalConstantResolver",
         "title": "DispatchThis: Resolve Global Constants",
         "description": "Type writable-section global pointer slots as constants when they are used read-only.",
-        "eligibility": _RESOLVE_OR_DEFLATTEN,
+        "eligibility": _RESOLVER_ELIGIBILITY,
     }), action=resolve_globals_mlil))
+
+    # String-decrypt gate (MLIL); auto eligibility surfaces the String Decrypt toggle.
+    workflow.register_activity(Activity(json.dumps({
+        "name": STRING_DECRYPT_SETTING,
+        "title": "String Decrypt",
+        "description": "Prepare this function for string decrypt after resolver phases stabilize.",
+        "eligibility": {"auto": {"default": False}},
+    }), action=string_decrypt_gate_mlil))
 
     # Deflattener (MLIL); auto eligibility surfaces the Deflatten toggle.
     workflow.register_activity(Activity(json.dumps({
@@ -112,6 +130,7 @@ def register_workflows():
             "extension.DispatchThis.IndirectCallPatcher",
             "extension.DispatchThis.BranchConditionTranslator",
             "extension.DispatchThis.GlobalConstantResolver",
+            STRING_DECRYPT_SETTING,
             DEFLATTEN_SETTING,
             "extension.DispatchThis.Cleanup"
     ])
