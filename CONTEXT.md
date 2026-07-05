@@ -19,6 +19,38 @@ _Avoid_: deinbr
 A focused recognizer for one sample family's decode-gadget shape.
 _Avoid_: generic rule engine
 
+**Resolver profile contract**:
+The narrow agreement a resolver profile must satisfy: recognize sample-family
+specific indirect branch, indirect call, and global constant shapes, then return
+standard recovery facts without owning workflow mutations. The first contract
+requires hooks for all three capabilities, but a profile may implement a hook as
+a no-op when its sample family does not use that capability. Deflattening is not
+part of the first contract.
+_Avoid_: middleware, adapter framework, plugin rewrite layer
+
+**Active resolver profile**:
+The resolver profile explicitly selected for a BinaryView. It chooses how enabled
+functions interpret sample-family obfuscation shapes; it does not enable the
+workflow for every function in the view.
+_Avoid_: automatic sample detection
+
+**Default resolver profile**:
+The bundled resolver profile named `default`, representing the current sample-family
+rules shipped with DispatchThis. The name does not mean generic support for every
+obfuscation family.
+_Avoid_: current_arm64, universal profile
+
+**Function workflow enablement**:
+The per-function opt-in setting that decides whether DispatchThis workflow phases
+run for that function. It is separate from the BinaryView's active resolver profile.
+_Avoid_: whole-view workflow application
+
+**Recovery fact**:
+A standard piece of recovered analysis information returned by a resolver profile,
+such as an indirect branch target, indirect call target, or global constant slot.
+Workflow callbacks decide how and when to submit recovery facts to Binary Ninja.
+_Avoid_: profile action, Binary Ninja mutation request
+
 **Indirect call resolving**:
 Recovering the concrete callee of a computed call target.
 _Avoid_: deincall

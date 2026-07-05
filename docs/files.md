@@ -9,6 +9,9 @@ DispatchThis/
 │                               MLIL call/global resolve, branch translation, deflatten,
 │                               phase cleanup, and deflatten cleanup) and their gating.
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
+├── profiles/
+│   ├── __init__.py             Bundled resolver profile registry and contract validation.
+│   └── default.py              Built-in resolver profile for the current sample family.
 ├── utils/
 │   └── log.py                  Shared "DispatchThis" logger.
 ├── passes/
@@ -46,6 +49,11 @@ Ninja edits plus the phase/session receipts that gate them.
 Owns `Function.session_data["dispatchthis_workflow_state"]`: indirect branch and indirect
 call workflow phase stability, mutation receipts, and downstream invalidation. See
 [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
+
+### `profiles/`
+Owns the bundled resolver profile registry. The built-in `default` profile exposes
+the current indirect branch, indirect call, and global constant resolver behavior
+behind the resolver profile contract.
 
 ### `passes/low/gadget_llil.py`
 Parses decode-gadget `jump(reg)` and tail-call forms, recovers table slots, table-base
