@@ -4,7 +4,9 @@ from conftest import load_plugin_module
 string_decrypt = load_plugin_module("plugins.DispatchThis.passes.medium.string_decrypt")
 
 annotate_decrypted_string_calls = string_decrypt.annotate_decrypted_string_calls
+apply_decrypted_string_comments = string_decrypt.apply_decrypted_string_comments
 decode_string_blob = string_decrypt.decode_string_blob
+plan_string_decrypt_calls = string_decrypt.plan_string_decrypt_calls
 recognize_string_decrypt_function = string_decrypt.recognize_string_decrypt_function
 _escaped = string_decrypt._escaped
 _set_decrypt_comment = string_decrypt._set_decrypt_comment
@@ -26,6 +28,9 @@ class FakeMlil:
         self.instructions = instructions
         self.source_function = source_function
         self._defs = defs or {}
+        for ins in instructions:
+            if getattr(getattr(ins, "operation", None), "name", None) == "MLIL_SET_VAR":
+                self._defs.setdefault(ins.dest, []).append(ins)
 
     def get_var_definitions(self, var):
         return self._defs.get(var, [])
@@ -87,6 +92,26 @@ def xor(left, right):
     return Expr("MLIL_XOR", left=left, right=right)
 
 
+def and_(left, right):
+    return Expr("MLIL_AND", left=left, right=right)
+
+
+def divu(left, right):
+    return Expr("MLIL_DIVU", left=left, right=right)
+
+
+def mul(left, right):
+    return Expr("MLIL_MUL", left=left, right=right)
+
+
+def sub(left, right):
+    return Expr("MLIL_SUB", left=left, right=right)
+
+
+def set_var(name, src, address=0x1000):
+    return Expr("MLIL_SET_VAR", dest=name, src=src, address=address)
+
+
 def load(src, size=1):
     return Expr("MLIL_LOAD", src=src, size=size)
 
@@ -108,20 +133,40 @@ def call(dest, params, address=0x5000):
 
 
 def encoded_blob(text, key=b"k3y!"):
-    plain = text.encode("ascii")
-    return key + bytes(ch ^ key[i % len(key)] for i, ch in enumerate(plain))
+    plain = text if isinstance(text, bytes) else text.encode("ascii")
+    out = bytearray(key)
+    prev = 0
+    for i, ch in enumerate(plain):
+        k = key[i % len(key)]
+        if (((i % len(key)) * k) & 1) == 0:
+            enc = ((((ch ^ k) ^ (~k & 0xFF)) - prev) & 0xFF)
+        else:
+            enc = (((-(ch ^ k) & 0xFF) ^ k) + prev) & 0xFF
+        out.append(enc)
+        prev = ch
+    return bytes(out)
 
 
 def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4):
     dest = "dst"
     src = "src"
     i = "i"
-    key_load = load(add(var(src), mod(var(i), const(key_modulus))))
-    payload_load = load(add(add(var(src), const(key_modulus)), var(i)))
     mlil = FakeMlil(
         [
             if_(cmp_ult(var(i), const(len(text)))),
-            store(add(var(dest), var(i)), xor(payload_load, key_load)),
+            set_var("q", divu(var(i), const(key_modulus))),
+            set_var("q_scaled", mul(var("q"), const(key_modulus))),
+            set_var("rem", sub(var(i), var("q_scaled"))),
+            set_var("key_addr", add(var(src), var("rem"))),
+            set_var("key_byte", load(var("key_addr"))),
+            set_var("payload_addr", add(var("payload_base"), var(i))),
+            set_var("enc_byte", load(var("payload_addr"))),
+            set_var("parity", and_(mul(var("rem"), var("key_byte")), const(1))),
+            if_(cmp_ult(var("parity"), const(1))),
+            set_var("tmp", xor(add(var("prev"), var("enc_byte")), var("key_byte"))),
+            set_var("tmp", xor(sub(var("enc_byte"), var("prev")), var("key_byte"))),
+            set_var("out", xor(var("tmp"), var("key_byte"))),
+            store(add(var(dest), var(i)), var("out")),
             store(const(0x9000), const(1)),
         ],
     )
@@ -129,19 +174,24 @@ def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4):
 
 
 def test_recognizer_matches_sample_family_decrypt_shape():
-    spec = recognize_string_decrypt_function(decrypt_callee("libUE4.so"))
+    spec = recognize_string_decrypt_function(decrypt_callee(b"libUE4.so\x00", key_modulus=16))
 
-    assert spec == {"key_modulus": 4, "length": 9}
+    assert spec == {"key_modulus": 16, "length": 10}
 
 
 def test_decoder_recovers_observed_strings():
     bv = FakeBv()
-    spec = {"key_modulus": 4, "length": len("libUE4.so")}
-    for text in ("libUE4.so", "libGLESv2.so", "glDrawElements", "libtersafe.so"):
-        bv.memory[0x7000] = encoded_blob(text)
-        spec["length"] = len(text)
+    samples = (
+        (b"libUE4.so\x00", b"0123456789abcdef"),
+        (b"libGLESv2.so\x00", b"0123456789abcdefghijklm"),
+        (b"glDrawElements\x00", b"ABCDEFGHIJKLMNOPQRSTUVW"),
+        (b"libtersafe.so\x00", b"ponytail-decode!!"),
+    )
+    for text, key in samples:
+        bv.memory[0x7000] = encoded_blob(text, key)
+        spec = {"key_modulus": len(key), "length": len(text)}
 
-        assert decode_string_blob(bv, 0x7000, spec) == text.encode("ascii")
+        assert decode_string_blob(bv, 0x7000, spec) == text
 
 
 def test_annotates_current_function_direct_decrypt_calls_and_preserves_comments():
@@ -154,10 +204,24 @@ def test_annotates_current_function_direct_decrypt_calls_and_preserves_comments(
     caller.mlil = FakeMlil([call(const(callee.start), [const(0x6000), const(0x7000)])], caller)
     caller.comments[0x5000] = "manual note\n[decrypt] stale, src=0x1 dst=0x2"
 
-    assert annotate_decrypted_string_calls(bv, caller, caller.mlil) == 1
+    facts = plan_string_decrypt_calls(
+        bv,
+        caller,
+        caller.mlil,
+        bv.session_data["dispatchthis_mlil_stable"],
+    )
+
+    assert facts == [{
+        "call_addr": 0x5000,
+        "src_addr": 0x7000,
+        "dst_addr": 0x6000,
+        "plaintext": b"glDrawElements",
+    }]
+    assert apply_decrypted_string_comments(caller, facts) == 1
     assert caller.comments[0x5000] == (
         "manual note\n[decrypt] glDrawElements, src=0x7000 dst=0x6000"
     )
+    assert apply_decrypted_string_comments(caller, facts) == 0
     assert annotate_decrypted_string_calls(bv, caller, caller.mlil) == 0
 
 

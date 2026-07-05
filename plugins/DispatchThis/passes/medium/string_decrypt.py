@@ -16,6 +16,8 @@ _CMP_OPS = (
     "MLIL_CMP_SLE",
 )
 _MOD_OPS = ("MLIL_MODU", "MLIL_MODS", "MLIL_REMU", "MLIL_REMS")
+_DIV_OPS = ("MLIL_DIVU", "MLIL_DIVS")
+_MUL_OPS = ("MLIL_MUL",)
 
 
 def _op(expr):
@@ -47,6 +49,35 @@ def _walk_exprs(expr, seen=None):
         yield from _walk_exprs(child, seen)
 
 
+def _walk_exprs_with_defs(mlil, expr, seen_exprs=None, seen_vars=None, depth=0):
+    if expr is None:
+        return
+    if seen_exprs is None:
+        seen_exprs = set()
+    if seen_vars is None:
+        seen_vars = set()
+    for child in _walk_exprs(expr):
+        key = id(child)
+        if key in seen_exprs:
+            continue
+        seen_exprs.add(key)
+        yield child
+        if _op(child) != "MLIL_VAR" or mlil is None or depth >= 16:
+            continue
+        var_key = repr(getattr(child, "src", None))
+        if var_key in seen_vars:
+            continue
+        seen_vars.add(var_key)
+        try:
+            defs = mlil.get_var_definitions(child.src)
+        except Exception:  # noqa: BLE001
+            continue
+        for definition in defs or ():
+            yield from _walk_exprs_with_defs(
+                mlil, getattr(definition, "src", None), seen_exprs, seen_vars, depth + 1
+            )
+
+
 def _peel_var(mlil, expr):
     for _ in range(32):
         if _op(expr) != "MLIL_VAR":
@@ -72,10 +103,6 @@ def _const(mlil, expr):
     return None
 
 
-def _contains_var(expr, var):
-    return any(_op(child) == "MLIL_VAR" and child.src == var for child in _walk_exprs(expr))
-
-
 def _loads(expr):
     return [child for child in _walk_exprs(expr) if _op(child) in _LOAD_OPS]
 
@@ -91,6 +118,23 @@ def _mod_constants(mlil):
                 if value and 0 < value <= 256:
                     out.add(value)
     return sorted(out)
+
+
+def _divisor_constants(mlil):
+    out = set()
+    for ins in getattr(mlil, "instructions", ()) or ():
+        for expr in _walk_exprs(ins):
+            if _op(expr) not in _DIV_OPS:
+                continue
+            for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
+                value = _const(mlil, side)
+                if value and 1 < value <= 256:
+                    out.add(value)
+    return sorted(out)
+
+
+def _key_modulus_constants(mlil):
+    return sorted(set(_mod_constants(mlil)) | set(_divisor_constants(mlil)))
 
 
 def _length_constants(mlil, key_modulus):
@@ -114,29 +158,49 @@ def _parameters(func, mlil):
     return []
 
 
-def _has_source_load_pair(expr, src_param, key_modulus):
+def _has_const(expr, value):
+    return any(_op(child) in _CONST_OPS and child.constant == value for child in _walk_exprs(expr))
+
+
+def _has_remainder_index(mlil, expr, key_modulus):
+    expanded = list(_walk_exprs_with_defs(mlil, expr))
+    if any(_op(child) in _MOD_OPS and _has_const(child, key_modulus) for child in expanded):
+        return True
+    return (
+        any(_op(child) == "MLIL_SUB" for child in expanded)
+        and any(_op(child) in _DIV_OPS and _has_const(child, key_modulus) for child in expanded)
+        and any(_op(child) in _MUL_OPS and _has_const(child, key_modulus) for child in expanded)
+    )
+
+
+def _has_sample_family_loads(mlil, key_modulus):
+    byte_loads = 0
     key_load = False
-    payload_load = False
-    for load in _loads(expr):
-        addr = getattr(load, "src", None)
-        if not _contains_var(addr, src_param):
-            continue
-        has_mod = any(
-            _op(child) in _MOD_OPS
-            and any(
-                _const(None, side) == key_modulus
-                for side in (getattr(child, "left", None), getattr(child, "right", None))
-            )
-            for child in _walk_exprs(addr)
-        )
-        if has_mod:
-            key_load = True
-        if any(
-            _op(child) in _CONST_OPS and child.constant == key_modulus
-            for child in _walk_exprs(addr)
-        ):
-            payload_load = True
-    return key_load and payload_load
+    for ins in getattr(mlil, "instructions", ()) or ():
+        for load in _loads(ins):
+            if getattr(load, "size", None) != 1:
+                continue
+            byte_loads += 1
+            key_load = _has_remainder_index(mlil, getattr(load, "src", None), key_modulus) or key_load
+    return key_load and byte_loads >= 2
+
+
+def _has_byte_write_from_xor(mlil):
+    for ins in getattr(mlil, "instructions", ()) or ():
+        for expr in _walk_exprs(ins):
+            if _op(expr) not in _STORE_OPS or getattr(expr, "size", None) != 1:
+                continue
+            if any(_op(child) == "MLIL_XOR" for child in _walk_exprs_with_defs(mlil, getattr(expr, "src", None))):
+                return True
+    return False
+
+
+def _has_done_flag_store(mlil):
+    for ins in getattr(mlil, "instructions", ()) or ():
+        for expr in _walk_exprs(ins):
+            if _op(expr) in _STORE_OPS and _const(mlil, getattr(expr, "src", None)) == 1:
+                return True
+    return False
 
 
 def recognize_string_decrypt_function(func, mlil=None):
@@ -147,35 +211,22 @@ def recognize_string_decrypt_function(func, mlil=None):
     params = _parameters(func, mlil)
     if len(params) < 2:
         return None
-    dest_param, src_param = params[:2]
 
-    moduli = _mod_constants(mlil)
+    moduli = _key_modulus_constants(mlil)
     if not moduli:
         return None
-    key_modulus = moduli[0]
-    lengths = _length_constants(mlil, key_modulus)
-    if not lengths:
-        return None
-    length = lengths[-1]
-
-    byte_write = False
-    done_flag = False
-    for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
-            if _op(expr) not in _STORE_OPS:
-                continue
-            dest = getattr(expr, "dest", None)
-            src = getattr(expr, "src", None)
-            if _contains_var(dest, dest_param) and _op(src) == "MLIL_XOR":
-                byte_write = _has_source_load_pair(src, src_param, key_modulus) or byte_write
-            elif not _contains_var(dest, dest_param) and _const(mlil, src) == 1:
-                done_flag = True
-
-    if not byte_write or not done_flag:
-        name = getattr(func, "name", hex(getattr(func, "start", 0)))
-        log_debug(f"[sdecrypt] {name}: shape mismatch")
-        return None
-    return {"key_modulus": key_modulus, "length": length}
+    for key_modulus in moduli:
+        lengths = _length_constants(mlil, key_modulus)
+        if (
+            lengths
+            and _has_sample_family_loads(mlil, key_modulus)
+            and _has_byte_write_from_xor(mlil)
+            and _has_done_flag_store(mlil)
+        ):
+            return {"key_modulus": key_modulus, "length": lengths[-1]}
+    name = getattr(func, "name", hex(getattr(func, "start", 0)))
+    log_debug(f"[sdecrypt] {name}: shape mismatch")
+    return None
 
 
 def decode_string_blob(bv, source_addr, spec):
@@ -186,7 +237,18 @@ def decode_string_blob(bv, source_addr, spec):
         return None
     key = data[:key_modulus]
     payload = data[key_modulus:key_modulus + length]
-    return bytes(ch ^ key[i % key_modulus] for i, ch in enumerate(payload))
+    out = bytearray()
+    prev = 0
+    for i, enc in enumerate(payload):
+        k = key[i % key_modulus]
+        if (((i % key_modulus) * k) & 1) == 0:
+            tmp = ((prev + enc) & 0xFF) ^ ((~k) & 0xFF)
+        else:
+            tmp = (-(((enc - prev) & 0xFF) ^ k)) & 0xFF
+        ch = tmp ^ k
+        out.append(ch)
+        prev = ch
+    return bytes(out)
 
 
 def _escaped(data):
@@ -244,11 +306,11 @@ def _set_decrypt_comment(func, addr, line):
     return True
 
 
-def annotate_decrypted_string_calls(bv, func, mlil):
+def plan_string_decrypt_calls(bv, _func, mlil, mlil_stable):
     if mlil is None:
-        return 0
-    mlil_stable = bv.session_data.get("dispatchthis_mlil_stable", {})
-    changed = 0
+        return []
+    mlil_stable = mlil_stable or {}
+    facts = []
     for call in _direct_calls(mlil):
         target = _const(mlil, getattr(call, "dest", None))
         if target is None:
@@ -275,8 +337,26 @@ def annotate_decrypted_string_calls(bv, func, mlil):
         if plaintext is None:
             log_warn(f"[sdecrypt] {hex(call.address)}: source blob @ {hex(source_addr)} is too short")
             continue
-        line = _comment_line(_escaped(plaintext), source_addr, dest_addr)
-        if _set_decrypt_comment(func, call.address, line):
+        facts.append({
+            "call_addr": call.address,
+            "src_addr": source_addr,
+            "dst_addr": dest_addr,
+            "plaintext": plaintext,
+        })
+    return facts
+
+
+def apply_decrypted_string_comments(func, facts):
+    changed = 0
+    for fact in facts:
+        line = _comment_line(_escaped(fact["plaintext"]), fact["src_addr"], fact["dst_addr"])
+        if _set_decrypt_comment(func, fact["call_addr"], line):
             changed += 1
-            log_info(f"[sdecrypt] {hex(call.address)}: {line}")
+            log_info(f"[sdecrypt] {hex(fact['call_addr'])}: {line}")
     return changed
+
+
+def annotate_decrypted_string_calls(bv, func, mlil):
+    mlil_stable = bv.session_data.get("dispatchthis_mlil_stable", {})
+    facts = plan_string_decrypt_calls(bv, func, mlil, mlil_stable)
+    return apply_decrypted_string_comments(func, facts)

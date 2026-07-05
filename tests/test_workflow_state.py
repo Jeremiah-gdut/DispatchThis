@@ -106,6 +106,25 @@ def test_global_phase_invalidates_on_new_phase_work():
     assert not state.global_stable()
 
 
+def test_global_slot_changes_invalidate_phase_cleanup_receipts():
+    state = FunctionWorkflowState(FakeFunction())
+
+    state.mark_branch_cleanup_done()
+    state.mark_call_cleanup_done()
+    assert not state.branch_cleanup_needed()
+    assert not state.call_cleanup_needed()
+
+    assert state.mark_global_slot(0xA43D70, "uint64_t") is True
+    assert state.branch_cleanup_needed()
+    assert state.call_cleanup_needed()
+
+    state.mark_branch_cleanup_done()
+    state.mark_call_cleanup_done()
+    assert state.mark_global_slot(0xA43D70, "uint64_t") is False
+    assert not state.branch_cleanup_needed()
+    assert not state.call_cleanup_needed()
+
+
 def test_existing_user_branch_metadata_seeds_branch_receipts():
     func = FakeFunction()
     func.indirect_branches = [
@@ -195,6 +214,7 @@ if __name__ == "__main__":
     test_call_target_receipts_feed_cleanup_without_gating_type_adjustments()
     test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint()
     test_global_phase_invalidates_on_new_phase_work()
+    test_global_slot_changes_invalidate_phase_cleanup_receipts()
     test_existing_user_branch_metadata_seeds_branch_receipts()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()

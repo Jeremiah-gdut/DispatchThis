@@ -40,6 +40,7 @@ def test_default_resolver_profile_is_registered():
     assert profile.resolve_branch_gadget is not None
     assert profile.resolve_call_gadget is not None
     assert profile.plan_global_constant_slots is not None
+    assert profile.plan_string_decrypt_calls is not None
 
 
 def test_profile_without_required_hook_is_rejected():
@@ -50,6 +51,7 @@ def test_profile_without_required_hook_is_rejected():
         PROFILE_DESCRIPTION="Missing call hook",
         resolve_branch_gadget=lambda *_args: [],
         plan_global_constant_slots=lambda *_args: [],
+        plan_string_decrypt_calls=lambda *_args: [],
     )
 
     with pytest.raises(profiles.InvalidResolverProfile):
@@ -65,6 +67,7 @@ def test_noop_required_hooks_are_valid():
         resolve_branch_gadget=lambda *_args: [],
         resolve_call_gadget=lambda *_args: [],
         plan_global_constant_slots=lambda *_args: [],
+        plan_string_decrypt_calls=lambda *_args: [],
     )
 
     profile = profiles.resolver_profile_from_module(module)
@@ -73,6 +76,7 @@ def test_noop_required_hooks_are_valid():
     assert profile.resolve_branch_gadget(None, None, None) == []
     assert profile.resolve_call_gadget(None, None, None) == []
     assert profile.plan_global_constant_slots(None, None) == []
+    assert profile.plan_string_decrypt_calls(None, None, None, {}) == []
 
 
 def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
@@ -82,6 +86,7 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     monkeypatch.setattr(default, "resolve_llil_jump_plan", lambda *args: ("branch", args))
     monkeypatch.setattr(default, "plan_indirect_calls", lambda *args: ("call", args))
     monkeypatch.setattr(default, "_plan_global_constant_slots", lambda *args: ("global", args))
+    monkeypatch.setattr(default, "_plan_string_decrypt_calls", lambda *args: ("string", args))
 
     profile = profiles.get_profile("default")
 
@@ -91,6 +96,10 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     )
     assert profile.resolve_call_gadget("bv", "mlil") == ("call", ("bv", "mlil"))
     assert profile.plan_global_constant_slots("bv", "mlil") == ("global", ("bv", "mlil"))
+    assert profile.plan_string_decrypt_calls("bv", "func", "mlil", {"stable": True}) == (
+        "string",
+        ("bv", "func", "mlil", {"stable": True}),
+    )
 
 
 def test_profile_setting_is_registered_with_default_profile():
@@ -129,6 +138,7 @@ def test_active_profile_uses_configured_profile(monkeypatch):
         resolve_branch_gadget=lambda *_args: [],
         resolve_call_gadget=lambda *_args: [],
         plan_global_constant_slots=lambda *_args: [],
+        plan_string_decrypt_calls=lambda *_args: [],
     )
     configured = profiles.resolver_profile_from_module(module)
     monkeypatch.setitem(profiles._PROFILES, configured.id, configured)

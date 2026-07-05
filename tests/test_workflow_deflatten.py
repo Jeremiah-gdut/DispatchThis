@@ -54,9 +54,13 @@ def fake_plan_global_constant_slots(bv, mlil):
     return list(global_plan_results)
 
 
-def fake_annotate_decrypted_string_calls(bv, func, mlil):
-    string_decrypt_calls.append((bv, func, mlil))
-    return string_decrypt_results.pop(0) if string_decrypt_results else 0
+def fake_plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
+    string_decrypt_calls.append((bv, func, mlil, mlil_stable))
+    return string_decrypt_results.pop(0) if string_decrypt_results else []
+
+
+def fake_apply_decrypted_string_comments(_func, facts):
+    return len(facts)
 
 
 def fake_active_profile(bv):
@@ -65,6 +69,7 @@ def fake_active_profile(bv):
         resolve_branch_gadget=fake_resolve_llil_jump_plan,
         resolve_call_gadget=fake_resolve_call_gadget,
         plan_global_constant_slots=fake_plan_global_constant_slots,
+        plan_string_decrypt_calls=fake_plan_string_decrypt_calls,
     )
 
 
@@ -87,6 +92,7 @@ class FakeWorkflowState:
     global_stable_marked = False
     globals_stable = False
     calls_stable = False
+    cleanup_invalidated = False
     branch_cleanup = True
     call_cleanup = True
 
@@ -103,6 +109,10 @@ class FakeWorkflowState:
     def branch_targets(self):
         return self.receipts
 
+    @property
+    def branch_receipts(self):
+        return FakeWorkflowState.receipts
+
     def branch_updates_for(self, _resolved_targets):
         return self.updates
 
@@ -114,6 +124,10 @@ class FakeWorkflowState:
 
     def mark_branch_cleanup_done(self):
         FakeWorkflowState.branch_cleanup_marked = True
+        FakeWorkflowState.branch_cleanup = False
+
+    def invalidate_branch_cleanup(self):
+        FakeWorkflowState.branch_cleanup = True
 
     def mark_branch_applied(self, source, targets):
         FakeWorkflowState.applied.append((source, targets))
@@ -133,6 +147,10 @@ class FakeWorkflowState:
 
     def mark_call_cleanup_done(self):
         FakeWorkflowState.call_cleanup_marked = True
+        FakeWorkflowState.call_cleanup = False
+
+    def invalidate_call_cleanup(self):
+        FakeWorkflowState.call_cleanup = True
 
     def call_stable(self):
         return FakeWorkflowState.calls_stable
@@ -159,6 +177,11 @@ class FakeWorkflowState:
 
     def invalidate_globals(self):
         FakeWorkflowState.globals_stable = False
+
+    def invalidate_cleanup(self):
+        FakeWorkflowState.cleanup_invalidated = True
+        FakeWorkflowState.branch_cleanup = True
+        FakeWorkflowState.call_cleanup = True
 
 
 def forbidden_plan_indirect_calls(*_args, **_kwargs):
@@ -202,7 +225,7 @@ _FAKE_MODULES = {
         plan_global_constant_slots=forbidden_plan_global_constant_slots,
     ),
     "plugins.DispatchThis.passes.medium.string_decrypt": types.SimpleNamespace(
-        annotate_decrypted_string_calls=fake_annotate_decrypted_string_calls,
+        apply_decrypted_string_comments=fake_apply_decrypted_string_comments,
     ),
     "plugins.DispatchThis.passes.low.gadget_llil": types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
@@ -576,6 +599,8 @@ def test_call_profile_hook_miss_does_not_fallback_to_default_resolver():
 def test_call_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.stable = True
     FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
     FakeWorkflowState.call_cleanup_marked = False
     cleanup_decode_calls.clear()
     call_plan_results.clear()
@@ -587,6 +612,30 @@ def test_call_cleanup_respects_one_shot_receipt():
     assert FakeWorkflowState.call_cleanup_marked is False
     FakeWorkflowState.stable = False
     FakeWorkflowState.call_cleanup = True
+
+
+def test_call_cleanup_replays_when_receipt_is_stale_in_current_mlil():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.call_cleanup_marked = False
+    FakeWorkflowState.call_receipts = {0x8FB744: 0x8E04F8}
+    FakeWorkflowState.call_target_receipts = {}
+    cleanup_decode_calls.clear()
+    cleanup_decode_results[:] = [1]
+    set_roots_before_results[:] = [{21621}]
+    call_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert cleanup_decode_calls == [((ctx.mlil, {21621}, "call"), {})]
+    assert ctx.committed is True
+    assert FakeWorkflowState.call_cleanup is True
+    assert FakeWorkflowState.call_cleanup_marked is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.call_receipts = {}
+    cleanup_decode_results.clear()
+    set_roots_before_results.clear()
 
 
 def test_call_cleanup_retries_after_current_mlil_was_changed():
@@ -620,6 +669,7 @@ def test_branch_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.receipts = {}
     FakeWorkflowState.branch_cleanup_marked = False
     cleanup_decode_calls.clear()
     ctx = FakeContext()
@@ -631,6 +681,30 @@ def test_branch_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.branch_cleanup = True
+
+
+def test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.branch_cleanup_marked = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    cleanup_decode_calls.clear()
+    cleanup_decode_results[:] = [1]
+    set_roots_before_results[:] = [{21621}]
+    ctx = FakeContext()
+
+    workflow.translate_branches_mlil(ctx)
+
+    assert cleanup_decode_calls == [((ctx.mlil, {21621}, "branch"), {})]
+    assert ctx.committed is True
+    assert FakeWorkflowState.branch_cleanup is True
+    assert FakeWorkflowState.branch_cleanup_marked is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.receipts = {}
+    cleanup_decode_results.clear()
+    set_roots_before_results.clear()
 
 
 def test_global_resolver_uses_active_profile_without_workflow_state():
@@ -744,13 +818,36 @@ def test_string_decrypt_does_not_require_deflatten_stability():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.cleanup_invalidated = False
+    active_profile_calls.clear()
     string_decrypt_calls.clear()
-    string_decrypt_results[:] = [2]
+    string_decrypt_results[:] = [[{"call_addr": 0x5000}, {"call_addr": 0x5010}]]
     ctx = FakeContext()
 
     assert workflow.string_decrypt_mlil(ctx) == 2
-    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil)]
+    assert active_profile_calls == [ctx.view]
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, {})]
+    assert FakeWorkflowState.cleanup_invalidated is True
     assert "dispatchthis_mlil_stable" not in ctx.view.session_data
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+
+
+def test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.cleanup_invalidated = False
+    active_profile_calls.clear()
+    string_decrypt_calls.clear()
+    string_decrypt_results[:] = [[]]
+    ctx = FakeContext()
+
+    assert workflow.string_decrypt_mlil(ctx) == 0
+    assert active_profile_calls == [ctx.view]
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, {})]
+    assert FakeWorkflowState.cleanup_invalidated is False
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
@@ -812,11 +909,17 @@ if __name__ == "__main__":
     test_call_phase_submits_pending_function_llil_branches_before_call_work()
     test_call_resolver_uses_active_profile_without_workflow_state()
     test_call_profile_hook_miss_does_not_fallback_to_default_resolver()
+    test_call_cleanup_respects_one_shot_receipt()
+    test_call_cleanup_replays_when_receipt_is_stale_in_current_mlil()
+    test_call_cleanup_retries_after_current_mlil_was_changed()
+    test_branch_cleanup_respects_one_shot_receipt()
+    test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil()
     test_global_resolver_uses_active_profile_without_workflow_state()
     test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()
     test_string_decrypt_waits_for_branch_call_and_global_stability()
     test_string_decrypt_does_not_require_deflatten_stability()
+    test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()

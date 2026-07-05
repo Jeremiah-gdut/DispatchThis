@@ -21,11 +21,10 @@ _Avoid_: generic rule engine
 
 **Resolver profile contract**:
 The narrow agreement a resolver profile must satisfy: recognize sample-family
-specific indirect branch, indirect call, and global constant shapes, then return
-standard recovery facts without owning workflow mutations. The first contract
-requires hooks for all three capabilities, but a profile may implement a hook as
-a no-op when its sample family does not use that capability. Deflattening is not
-part of the first contract.
+specific indirect branch, indirect call, global constant, and string decrypt
+shapes, then return standard recovery facts without owning workflow mutations.
+A profile may implement a hook as a no-op when its sample family does not use
+that capability. Deflattening is not part of the contract.
 _Avoid_: middleware, adapter framework, plugin rewrite layer
 
 **Active resolver profile**:
@@ -58,6 +57,24 @@ _Avoid_: deincall
 **Global constant resolving**:
 Recovering read-only semantics for global data slots that the sample family stores in writable sections but uses as constants.
 _Avoid_: global variable fixing, data constant propagation
+
+**String decrypting**:
+Recovering plaintext strings from the sample family's encoded byte blobs.
+_Avoid_: generic string deobfuscation
+
+**String decrypt function**:
+A sample-family decoder clone that writes one plaintext string to a caller-provided buffer and marks a one-shot done flag.
+_Avoid_: string helper, generic decoder
+
+**Decrypted string comment**:
+A Binary Ninja call-site comment containing the plaintext recovered for a string decrypt function invocation.
+_Avoid_: recovered string literal
+
+**String decrypt recovery fact**:
+The standard recovered information for one string decrypt call site: call address,
+source blob address, destination buffer address, and plaintext bytes. Workflow
+code owns turning it into a decrypted string comment.
+_Avoid_: comment plan, profile annotation
 
 **Dispatcher**:
 The flattened control-flow router that chooses the next original block from a state value.

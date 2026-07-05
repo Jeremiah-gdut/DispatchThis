@@ -1,6 +1,7 @@
 from ..passes.low.gadget_llil import resolve_llil_jump_plan
 from ..passes.medium.global_constants import plan_global_constant_slots as _plan_global_constant_slots
 from ..passes.medium.indirect_calls import plan_indirect_calls
+from ..passes.medium.string_decrypt import plan_string_decrypt_calls as _plan_string_decrypt_calls
 
 
 PROFILE_ID = "default"
@@ -18,3 +19,7 @@ def resolve_call_gadget(bv, mlil):
 
 def plan_global_constant_slots(bv, mlil):
     return _plan_global_constant_slots(bv, mlil)
+
+
+def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
+    return _plan_string_decrypt_calls(bv, func, mlil, mlil_stable)

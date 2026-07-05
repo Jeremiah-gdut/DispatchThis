@@ -8,7 +8,7 @@ from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
 from .passes.medium.global_constants import CONST_SLOT_TYPE
-from .passes.medium.string_decrypt import annotate_decrypted_string_calls
+from .passes.medium.string_decrypt import apply_decrypted_string_comments
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -227,16 +227,19 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     if not adjustments:
         state.mark_call_stable()
         cleaned = 0
-        if state.call_cleanup_needed():
+        call_cleanup_needed = state.call_cleanup_needed()
+        call_sites = {plan["call_addr"] for plan in plans} or (
+            set(state.call_receipts) | set(state.call_target_receipts)
+        )
+        if call_cleanup_needed or call_sites:
             cleanup_roots = set()
             for plan in plans:
                 cleanup_roots.update(plan["cleanup_roots"])
-            call_sites = {plan["call_addr"] for plan in plans} or (
-                set(state.call_receipts) | set(state.call_target_receipts)
-            )
             cleanup_roots.update(set_roots_before(mlil, call_sites))
             cleaned = cleanup_decode(mlil, cleanup_roots, "call")
-            if not cleaned:
+            if cleaned:
+                state.invalidate_call_cleanup()
+            elif call_cleanup_needed:
                 state.mark_call_cleanup_done()
         if rewrites or cleaned:
             _commit_mlil(ctx, mlil)
@@ -268,10 +271,13 @@ def translate_branches_mlil(ctx: AnalysisContext):
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
     cleaned = 0
-    if state.branch_cleanup_needed():
+    branch_cleanup_needed = state.branch_cleanup_needed()
+    if branch_cleanup_needed or state.branch_receipts:
         cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
         cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
-        if not cleaned:
+        if cleaned:
+            state.invalidate_branch_cleanup()
+        elif branch_cleanup_needed:
             state.mark_branch_cleanup_done()
     if n or cleaned:
         _commit_mlil(ctx, mlil)
@@ -359,7 +365,12 @@ def string_decrypt_mlil(ctx: AnalysisContext):
     if not state.global_stable():
         return 0
 
-    return annotate_decrypted_string_calls(bv, func, ctx.mlil)
+    mlil_stable = bv.session_data.get("dispatchthis_mlil_stable", {})
+    facts = active_profile(bv).plan_string_decrypt_calls(bv, func, ctx.mlil, mlil_stable)
+    annotated = apply_decrypted_string_comments(func, facts)
+    if annotated:
+        state.invalidate_cleanup()
+    return annotated
 
 
 def deflatten_mlil(ctx: AnalysisContext):

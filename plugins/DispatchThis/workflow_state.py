@@ -2,7 +2,7 @@
 
 
 ROOT_KEY = "dispatchthis_workflow_state"
-CLEANUP_RECEIPT_VERSION = 2
+CLEANUP_RECEIPT_VERSION = 3
 
 
 def _fresh_state():
@@ -149,6 +149,9 @@ class FunctionWorkflowState:
         self.data["branch"]["cleanup_done"] = True
         self.data["branch"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
+    def invalidate_branch_cleanup(self):
+        self.data["branch"]["cleanup_done"] = False
+
     @property
     def call_receipts(self):
         return self.data["call"]["receipts"]
@@ -193,6 +196,9 @@ class FunctionWorkflowState:
         self.data["call"]["cleanup_done"] = True
         self.data["call"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
+    def invalidate_call_cleanup(self):
+        self.data["call"]["cleanup_done"] = False
+
     @property
     def global_receipts(self):
         return self.data["global"]["receipts"]
@@ -204,6 +210,7 @@ class FunctionWorkflowState:
             return False
         self.global_receipts[slot_addr] = type_name
         self.data["global"]["stable"] = False
+        self.invalidate_cleanup()
         return True
 
     def mark_global_stable(self):
@@ -217,6 +224,10 @@ class FunctionWorkflowState:
 
     def invalidate_globals(self):
         self.data["global"]["stable"] = False
+
+    def invalidate_cleanup(self):
+        self.invalidate_branch_cleanup()
+        self.invalidate_call_cleanup()
 
     def invalidate_calls(self):
         self.data["call"]["stable"] = False
