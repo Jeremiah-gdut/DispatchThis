@@ -87,9 +87,9 @@ functions.
 
 ### 5. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
 
-Gated behind the `Enable Deflattening` setting, and only runs once the LLIL stage has
-drained every indirect jump (otherwise the CFG - and the recovered state machine - would be
-incomplete).
+Gated behind the `Enable Deflattening` setting, and only runs once function phase state
+reports that the LLIL indirect branch resolver has drained every indirect jump (otherwise
+the CFG - and the recovered state machine - would be incomplete).
 
 - `compute_redirections` identifies the dominant dispatcher comparison cluster from
   state-token compares and maps each token to its target original block.
@@ -120,7 +120,6 @@ receipt-gated and only reruns after its phase receipts change.
 
 | Key | Meaning |
 | --- | --- |
-| `dispatchthis_llil_stable` | `{start: bool}` - LLIL indirect jumps fully resolved |
 | `dispatchthis_mlil_stable` | `{start: bool}` - deflatten has rewritten exits |
 | `dispatchthis_state_consts` | `{start: set(state_value)}` - for state-write NOP |
 | `dispatchthis_state_vars` | `{start: set(var)}` - state var + aliases |

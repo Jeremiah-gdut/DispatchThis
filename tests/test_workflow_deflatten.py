@@ -16,6 +16,7 @@ branch_iter_items = []
 clear_tag_calls = []
 nop_state_write_results = []
 nop_state_write_calls = []
+cleanup_decode_calls = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -70,7 +71,10 @@ class FakeWorkflowState:
     call_target_receipts = {}
     call_stable_marked = False
     call_cleanup_marked = False
+    branch_cleanup_marked = False
     calls_stable = False
+    branch_cleanup = True
+    call_cleanup = True
 
     def __init__(self, _func):
         pass
@@ -90,6 +94,12 @@ class FakeWorkflowState:
 
     def mark_branch_stable(self):
         FakeWorkflowState.marked_stable = True
+
+    def branch_cleanup_needed(self):
+        return FakeWorkflowState.branch_cleanup
+
+    def mark_branch_cleanup_done(self):
+        FakeWorkflowState.branch_cleanup_marked = True
 
     def mark_branch_applied(self, source, targets):
         FakeWorkflowState.applied.append((source, targets))
@@ -112,6 +122,9 @@ class FakeWorkflowState:
 
     def call_stable(self):
         return FakeWorkflowState.calls_stable
+
+    def call_cleanup_needed(self):
+        return FakeWorkflowState.call_cleanup
 
 
 def forbidden_plan_indirect_calls(*_args, **_kwargs):
@@ -141,7 +154,10 @@ _FAKE_MODULES = {
         translate_indirect_branch_conditions=lambda *_args, **_kwargs: (None, 0, set()),
     ),
     "plugins.DispatchThis.passes.medium.phase_cleanup": types.SimpleNamespace(
-        cleanup_decode=lambda *_args, **_kwargs: 0,
+        cleanup_decode=lambda *args, **kwargs: (
+            cleanup_decode_calls.append((args, kwargs)),
+            0,
+        )[1],
         set_roots_before=lambda *_args, **_kwargs: set(),
     ),
     "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
@@ -181,7 +197,7 @@ class FakeContext:
         )
         self.view = types.SimpleNamespace(
             arch=types.SimpleNamespace(name="aarch64"),
-            session_data={"dispatchthis_llil_stable": {self.function.start: True}},
+            session_data={},
         )
         self.typed_globals = []
 
@@ -214,6 +230,7 @@ class FakeContext:
 
 
 def test_deflatten_workflow_runs_without_branch_mirror_state():
+    FakeWorkflowState.stable = True
     ctx = FakeContext()
 
     workflow.deflatten_mlil(ctx)
@@ -222,6 +239,8 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     assert calls[1][0] == "apply"
     assert ctx.committed is True
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
+    assert "dispatchthis_llil_stable" not in ctx.view.session_data
+    FakeWorkflowState.stable = False
 
 
 def test_branch_resolver_reuses_branch_receipts_as_known_targets():
@@ -321,6 +340,32 @@ def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     branch_plan_results.clear()
 
 
+def test_branch_profile_hook_miss_does_not_retry_context_llil():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = {0x2000}
+    FakeWorkflowState.marked_stable = False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
+    branch_plan_calls.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
+    ctx = FakeContext()
+    ctx.function.indirect_branches = [types.SimpleNamespace(source_addr=0x1000)]
+    ctx.function.low_level_il = "function-llil"
+    ctx.view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    ctx.llil = "context-llil"
+    branch_plan_results.clear()
+    branch_plan_results["context-llil"] = [{"source": 0x2000, "targets": (0x3000,)}]
+
+    workflow.resolve_jumps_llil(ctx)
+
+    assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
+    branch_iter_items.clear()
+    branch_plan_results.clear()
+
+
 def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
@@ -367,7 +412,7 @@ def test_call_phase_submits_pending_function_llil_branches_before_call_work():
     assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
     assert submitted == [(0x3000, [(ctx.view.arch, 0x4000), (ctx.view.arch, 0x5000)])]
     assert FakeWorkflowState.applied == [(0x3000, (0x4000, 0x5000))]
-    assert ctx.view.session_data["dispatchthis_llil_stable"] == {}
+    assert "dispatchthis_llil_stable" not in ctx.view.session_data
     branch_plan_results.clear()
     FakeWorkflowState.updates = {}
     FakeWorkflowState.unmapped = set()
@@ -422,6 +467,39 @@ def test_call_profile_hook_miss_does_not_fallback_to_default_resolver():
     assert call_plan_calls == [(ctx.view, ctx.mlil)]
     assert call_rewrite_calls == [(ctx.view, ctx.mlil, [])]
     FakeWorkflowState.stable = False
+
+
+def test_call_cleanup_respects_one_shot_receipt():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.call_cleanup_marked = False
+    cleanup_decode_calls.clear()
+    call_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert cleanup_decode_calls == []
+    assert FakeWorkflowState.call_cleanup_marked is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.call_cleanup = True
+
+
+def test_branch_cleanup_respects_one_shot_receipt():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.branch_cleanup_marked = False
+    cleanup_decode_calls.clear()
+    ctx = FakeContext()
+
+    workflow.translate_branches_mlil(ctx)
+
+    assert cleanup_decode_calls == []
+    assert FakeWorkflowState.branch_cleanup_marked is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.branch_cleanup = True
 
 
 def test_global_resolver_uses_active_profile_without_workflow_state():

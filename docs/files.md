@@ -19,7 +19,7 @@ DispatchThis/
 │   │   └── gadget_llil.py      LLIL decode-gadget resolver: jump(reg) -> jump(const),
 │   │                           including opaque-predicate offset selection.
 │   └── medium/
-│       ├── indirect_calls.py   MLIL indirect-call decode fold + call-type adjustment.
+│       ├── indirect_calls.py   MLIL indirect-call decode fold and current-IL rewrites.
 │       ├── global_constants.py MLIL global constant slot planner.
 │       ├── phase_cleanup.py    One-shot branch/call target-decode cleanup.
 │       ├── deflatten.py        Computes and applies dispatcher state-token redirections.
@@ -64,7 +64,7 @@ scheduling.
 ### `passes/medium/indirect_calls.py`
 Builds call-target plans, folds call-gadget decode expressions, rewrites the current MLIL
 call destination to a const pointer, and returns cleanup roots. Workflow owns call type
-adjustments and receipts.
+adjustments, receipts, and call-target phase cleanup.
 
 ### `passes/medium/global_constants.py`
 Finds `.data` qword slots that are used as read-only constant pointer bases and returns

@@ -103,13 +103,11 @@ def _resolve_pending_branches_from_function_llil(ctx, state):
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
     if mutations:
-        bv.session_data.setdefault("dispatchthis_llil_stable", {}).pop(func.start, None)
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
         return True
 
     if not FunctionWorkflowState.unmapped_unresolved_sources(func):
         state.mark_branch_stable()
-        bv.session_data.setdefault("dispatchthis_llil_stable", {})[func.start] = True
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
     return False
@@ -124,9 +122,7 @@ def resolve_jumps_llil(ctx: AnalysisContext):
         log_debug(f"[dispatchthis] {func.name}: skipping non-aarch64 view")
         return
 
-    llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
     if state.branch_stable(func):
-        llil_stable[func.start] = True
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
         return
@@ -142,22 +138,11 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     if plan_llil is llil:
         apply_llil_jump_rewrites(bv, llil, plan)
 
-    covered = {item["source"] for item in plan} | mapped
-    if jump_sources - covered and plan_llil is not llil:
-        seen_sources = {item["source"] for item in plan}
-        context_plan = profile.resolve_branch_gadget(bv, llil, state.branch_targets())
-        apply_llil_jump_rewrites(bv, llil, context_plan)
-        for item in context_plan:
-            if item["source"] not in seen_sources:
-                plan.append(item)
-                seen_sources.add(item["source"])
-
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
 
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
     if mutations:
-        llil_stable.pop(func.start, None)
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} indirect branch target update(s)")
         return
 
@@ -168,7 +153,6 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     ):
         log_info(f"All of {func.name}'s indirect jumps have been resolved")
         state.mark_branch_stable()
-        llil_stable[func.start] = True
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
 
@@ -217,15 +201,17 @@ def resolve_calls_mlil(ctx: AnalysisContext):
 
     if not adjustments:
         state.mark_call_stable()
-        cleanup_roots = set()
-        for plan in plans:
-            cleanup_roots.update(plan["cleanup_roots"])
-        call_sites = {plan["call_addr"] for plan in plans} or (
-            set(state.call_receipts) | set(state.call_target_receipts)
-        )
-        cleanup_roots.update(set_roots_before(mlil, call_sites))
-        cleaned = cleanup_decode(mlil, cleanup_roots, "call")
-        state.mark_call_cleanup_done()
+        cleaned = 0
+        if state.call_cleanup_needed():
+            cleanup_roots = set()
+            for plan in plans:
+                cleanup_roots.update(plan["cleanup_roots"])
+            call_sites = {plan["call_addr"] for plan in plans} or (
+                set(state.call_receipts) | set(state.call_target_receipts)
+            )
+            cleanup_roots.update(set_roots_before(mlil, call_sites))
+            cleaned = cleanup_decode(mlil, cleanup_roots, "call")
+            state.mark_call_cleanup_done()
         if rewrites or cleaned:
             _commit_mlil(ctx, mlil)
     if rewrites or adjustments:
@@ -255,9 +241,11 @@ def translate_branches_mlil(ctx: AnalysisContext):
     _, n, cleanup_roots = translate_indirect_branch_conditions(bv, mlil)
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
-    cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
-    cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
-    state.mark_branch_cleanup_done()
+    cleaned = 0
+    if state.branch_cleanup_needed():
+        cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
+        cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
+        state.mark_branch_cleanup_done()
     if n or cleaned:
         _commit_mlil(ctx, mlil)
 
@@ -322,8 +310,8 @@ def deflatten_mlil(ctx: AnalysisContext):
 
     # Don't deflatten until the LLIL pass has drained every indirect jump;
     # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
-    llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
-    if not llil_stable.get(func.start):
+    state = FunctionWorkflowState(func)
+    if not state.branch_stable(func):
         return
 
     redirections = compute_redirections(bv, func, mlil=mlil)
