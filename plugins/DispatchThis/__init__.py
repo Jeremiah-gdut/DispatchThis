@@ -8,6 +8,7 @@ obfuscated functions. All passes are opt-in per-function via Function Analysis s
 import json
 from binaryninja import Activity, Workflow, Settings
 from .utils.log import log_info, log_warn
+from .profiles import register_profile_settings
 from .workflow import (
     resolve_jumps_llil,
     resolve_calls_mlil,
@@ -127,4 +128,5 @@ Settings().set_integer("analysis.limits.maxFunctionUpdateCount", 0)
 # which the MLIL_STORE/SET_VAR matcher won't recognize.
 Settings().set_bool("analysis.outlining.builtins", False)
 
+register_profile_settings()
 register_workflows()

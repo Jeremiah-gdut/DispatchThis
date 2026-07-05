@@ -74,11 +74,23 @@ class FakeWorkflow:
 
 
 class FakeSettings:
+    def register_group(self, *_args, **_kwargs):
+        return True
+
+    def register_setting(self, *_args, **_kwargs):
+        return True
+
     def set_integer(self, *_args, **_kwargs):
         pass
 
     def set_bool(self, *_args, **_kwargs):
         pass
+
+    def get_string(self, *_args, **_kwargs):
+        return ""
+
+    def set_string(self, *_args, **_kwargs):
+        return True
 
 
 binaryninja = sys.modules.setdefault("binaryninja", types.SimpleNamespace())
@@ -90,6 +102,7 @@ for name, value in {
     "MediumLevelILJump": object,
     "MediumLevelILLabel": FakeMediumLevelILLabel,
     "Settings": FakeSettings,
+    "SettingsScope": types.SimpleNamespace(SettingsResourceScope="resource"),
     "Workflow": FakeWorkflow,
 }.items():
     if not hasattr(binaryninja, name):

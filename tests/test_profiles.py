@@ -1,7 +1,32 @@
+import json
 import types
 from importlib import import_module
 
 import pytest
+
+
+class FakeSettings:
+    def __init__(self, values=None):
+        self.values = values or {}
+        self.writes = []
+        self.groups = []
+        self.settings = []
+
+    def register_group(self, group, title):
+        self.groups.append((group, title))
+        return True
+
+    def register_setting(self, key, properties):
+        self.settings.append((key, json.loads(properties)))
+        return True
+
+    def get_string(self, key, resource=None):
+        return self.values.get((key, resource))
+
+    def set_string(self, key, value, resource=None, scope=None):
+        self.writes.append((key, value, resource, scope))
+        self.values[(key, resource)] = value
+        return True
 
 
 def test_default_resolver_profile_is_registered():
@@ -66,3 +91,75 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     )
     assert profile.resolve_call_gadget("bv", "mlil") == ("call", ("bv", "mlil"))
     assert profile.plan_global_constant_slots("bv", "mlil") == ("global", ("bv", "mlil"))
+
+
+def test_profile_setting_is_registered_with_default_profile():
+    profiles = import_module("plugins.DispatchThis.profiles")
+    settings = FakeSettings()
+
+    assert profiles.register_profile_settings(settings=settings)
+
+    assert settings.groups == [("analysis.plugins.dispatchThis", "DispatchThis")]
+    assert settings.settings == [(
+        profiles.ACTIVE_PROFILE_SETTING,
+        {
+            "title": "Resolver Profile",
+            "description": "Active DispatchThis resolver profile for this BinaryView.",
+            "type": "string",
+            "default": "default",
+            "enum": ["default"],
+        },
+    )]
+
+
+def test_active_profile_defaults_to_default():
+    profiles = import_module("plugins.DispatchThis.profiles")
+
+    profile = profiles.active_profile("bv", settings=FakeSettings())
+
+    assert profile.id == "default"
+
+
+def test_active_profile_uses_configured_profile(monkeypatch):
+    profiles = import_module("plugins.DispatchThis.profiles")
+    module = types.SimpleNamespace(
+        PROFILE_ID="configured",
+        PROFILE_NAME="Configured",
+        PROFILE_DESCRIPTION="Fake configured profile",
+        resolve_branch_gadget=lambda *_args: [],
+        resolve_call_gadget=lambda *_args: [],
+        plan_global_constant_slots=lambda *_args: [],
+    )
+    configured = profiles.resolver_profile_from_module(module)
+    monkeypatch.setitem(profiles._PROFILES, configured.id, configured)
+    settings = FakeSettings({(profiles.ACTIVE_PROFILE_SETTING, "bv"): "configured"})
+
+    profile = profiles.active_profile("bv", settings=settings)
+
+    assert profile is configured
+
+
+def test_active_profile_falls_back_to_default_and_warns(monkeypatch):
+    profiles = import_module("plugins.DispatchThis.profiles")
+    warnings = []
+    settings = FakeSettings({(profiles.ACTIVE_PROFILE_SETTING, "bv"): "missing"})
+    monkeypatch.setattr(profiles, "log_warn", warnings.append)
+
+    profile = profiles.active_profile("bv", settings=settings)
+
+    assert profile.id == "default"
+    assert warnings == ["[profiles] unknown resolver profile 'missing'; using default"]
+
+
+def test_setting_active_profile_only_writes_binaryview_profile_setting():
+    profiles = import_module("plugins.DispatchThis.profiles")
+    settings = FakeSettings()
+
+    assert profiles.set_active_profile("bv", "default", settings=settings)
+
+    assert settings.writes == [(
+        profiles.ACTIVE_PROFILE_SETTING,
+        "default",
+        "bv",
+        profiles.SettingsScope.SettingsResourceScope,
+    )]
