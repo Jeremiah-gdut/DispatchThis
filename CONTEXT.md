@@ -99,4 +99,4 @@ A named stage of per-function recovery work whose result controls whether later 
 A Binary Ninja function-state edit that can schedule function analysis again and therefore can re-enter the workflow.
 
 **Phase cleanup**:
-Dead IL removal that runs once after its owning workflow phase reaches stability, and runs again only if an upstream receipt change invalidates that phase.
+Dead IL removal that runs after its owning workflow phase reaches stability. Its receipt is marked done only after the current IL has no phase-owned cleanup changes left, so Binary Ninja reanalysis can replay erased cleanup overlays.

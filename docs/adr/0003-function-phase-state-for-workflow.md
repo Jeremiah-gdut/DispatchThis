@@ -21,7 +21,7 @@ Indirect branch and indirect call phase cleanup will reuse the existing decode-g
 
 Phase cleanup must be rooted in the owning phase's resolved sites rather than in all decode-gadget magic constants. Indirect branch cleanup roots from resolved branch-target decode sites. Indirect call cleanup roots from resolved call-target decode sites. This prevents branch cleanup from deleting call-target decode inputs before indirect call resolving has run.
 
-Cleanup receipts are phase-level booleans on the function, not per branch source or per call site. A phase cleanup scans the current function MLIL once for its owning phase, sets `cleanup_done`, and only runs again if an upstream receipt change invalidates that phase.
+Cleanup receipts are phase-level booleans on the function, not per branch source or per call site. A phase cleanup scans the current function MLIL for its owning phase and sets `cleanup_done` only when that scan makes no IL changes. If cleanup does NOP dead decode instructions, the receipt stays open so a later workflow run can confirm the overlay survived Binary Ninja reanalysis. Upstream receipt changes also invalidate the owning cleanup receipt.
 
 Workflow callbacks are the orchestration seam. Pass modules may produce plans and perform current-IL rewrites, but workflow callbacks own Binary Ninja reanalysis-triggering mutations such as user branch metadata, call type adjustments, and analysis completion callbacks.
 

@@ -2,6 +2,7 @@
 
 
 ROOT_KEY = "dispatchthis_workflow_state"
+CLEANUP_RECEIPT_VERSION = 2
 
 
 def _fresh_state():
@@ -10,12 +11,14 @@ def _fresh_state():
             "stable": False,
             "receipts": {},
             "cleanup_done": False,
+            "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
         "call": {
             "stable": False,
             "receipts": {},
             "targets": {},
             "cleanup_done": False,
+            "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
     }
 
@@ -46,11 +49,17 @@ def _normalize_state(data):
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
     branch.setdefault("cleanup_done", False)
+    if branch.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
+        branch["cleanup_done"] = False
+        branch["cleanup_version"] = CLEANUP_RECEIPT_VERSION
     call = data.setdefault("call", {})
     call.setdefault("stable", False)
     call.setdefault("receipts", {})
     call.setdefault("targets", {})
     call.setdefault("cleanup_done", False)
+    if call.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
+        call["cleanup_done"] = False
+        call["cleanup_version"] = CLEANUP_RECEIPT_VERSION
     return data
 
 
@@ -130,6 +139,7 @@ class FunctionWorkflowState:
 
     def mark_branch_cleanup_done(self):
         self.data["branch"]["cleanup_done"] = True
+        self.data["branch"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
     @property
     def call_receipts(self):
@@ -171,6 +181,7 @@ class FunctionWorkflowState:
 
     def mark_call_cleanup_done(self):
         self.data["call"]["cleanup_done"] = True
+        self.data["call"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
     def invalidate_calls(self):
         self.data["call"]["stable"] = False

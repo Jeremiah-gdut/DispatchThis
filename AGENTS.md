@@ -58,16 +58,17 @@ Phase cleanup is intentionally narrow. It only NOPs dead pure target-decode
 assignments rooted at the owning phase's resolved sites. It must not collapse
 control flow, NOP calls/stores, or remove deflatten state writes.
 
-Cleanup is a one-shot attempt receipt:
+Cleanup receipts mean the current IL had no remaining phase-owned cleanup
+changes, not merely that cleanup was attempted:
 
 - `branch.cleanup_done` is invalidated by branch target receipt changes.
 - `call.cleanup_done` is invalidated by call target receipt changes.
 - Branch target changes also invalidate the whole call phase.
 
 MLIL rewrites are overlays. Function reanalysis can regenerate MLIL and erase
-NOP/if/call-destination rewrites. The one-shot cleanup receipt exists to avoid
-expensive repeated scans; if a later change must replay cleanup after every
-reanalysis, update the phase-state design first.
+NOP/if/call-destination rewrites. If cleanup NOPs anything, keep the cleanup
+receipt open so the next workflow run can replay or confirm the overlay after
+reanalysis.
 
 Plugin hot reload is unreliable for workflow activity callbacks. After changing
 workflow registration or callback code, prefer a full Binary Ninja GUI restart

@@ -114,7 +114,9 @@ The indirect call, branch condition, deflatten, and final state-write cleanup ML
 derived from the (unchanged) LLIL. Each reanalysis regenerates MLIL from LLIL and reverts
 them, so these passes **re-run every pass** to keep their rewrites in place rather than
 latching off after the first apply. Phase cleanup for branch/call target decodes is
-receipt-gated and only reruns after its phase receipts change.
+receipt-gated, but the receipt is marked done only after the current IL has no cleanup
+changes left; if cleanup NOPs anything, the next workflow run can replay or confirm the
+overlay after Binary Ninja reanalysis.
 
 ## `session_data` keys
 
@@ -134,11 +136,11 @@ for the workflow coordination rules:
 | --- | --- |
 | `branch.stable` | indirect branch resolving has reached its current fixpoint |
 | `branch.receipts` | `{source_addr: (target_addr, ...)}` submitted as user branch metadata |
-| `branch.cleanup_done` | branch-target decode cleanup has run for the current branch receipts |
+| `branch.cleanup_done` | branch-target decode cleanup found no remaining changes for the current branch receipts |
 | `call.stable` | indirect call resolving has reached its current fixpoint |
 | `call.receipts` | `{call_addr: target_addr}` submitted as call type adjustments |
 | `call.targets` | `{call_addr: target_addr}` resolved as call destinations, even when no type adjustment was submitted |
-| `call.cleanup_done` | call-target decode cleanup has run for the current call receipts |
+| `call.cleanup_done` | call-target decode cleanup found no remaining changes for the current call receipts |
 
 ## Analysis limits
 

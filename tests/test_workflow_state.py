@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from plugins.DispatchThis.workflow_state import FunctionWorkflowState
+from plugins.DispatchThis.workflow_state import FunctionWorkflowState, ROOT_KEY
 
 
 class FakeBranch:
@@ -135,6 +135,28 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
     assert state.call_cleanup_needed()
 
 
+def test_old_cleanup_receipts_are_invalidated_once():
+    func = FakeFunction()
+    func.session_data[ROOT_KEY] = {
+        "branch": {
+            "stable": True,
+            "receipts": {},
+            "cleanup_done": True,
+        },
+        "call": {
+            "stable": True,
+            "receipts": {},
+            "targets": {},
+            "cleanup_done": True,
+        },
+    }
+
+    state = FunctionWorkflowState(func)
+
+    assert state.branch_cleanup_needed()
+    assert state.call_cleanup_needed()
+
+
 if __name__ == "__main__":
     test_branch_receipts_gate_repeated_mutations_and_invalidate_calls()
     test_call_receipts_gate_repeated_adjustments()
@@ -142,3 +164,4 @@ if __name__ == "__main__":
     test_existing_user_branch_metadata_seeds_branch_receipts()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()
+    test_old_cleanup_receipts_are_invalidated_once()
