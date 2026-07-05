@@ -223,10 +223,21 @@ def _set_decrypt_comment(func, addr, line):
     get_comment_at = getattr(func, "get_comment_at", None)
     set_comment_at = getattr(func, "set_comment_at", None)
     if get_comment_at is None or set_comment_at is None:
+        log_debug(f"[sdecrypt] {hex(addr)}: skipped missing function comment API")
         return False
     old = get_comment_at(addr) or ""
-    kept = [item for item in old.splitlines() if not item.startswith("[decrypt] ")]
-    new = "\n".join(kept + [line]) if kept else line
+    new_lines = []
+    replaced = False
+    for item in old.splitlines():
+        if item.startswith("[decrypt] "):
+            if not replaced:
+                new_lines.append(line)
+                replaced = True
+            continue
+        new_lines.append(item)
+    if not replaced:
+        new_lines.append(line)
+    new = "\n".join(new_lines)
     if new == old:
         return False
     set_comment_at(addr, new)
@@ -245,6 +256,7 @@ def annotate_decrypted_string_calls(bv, func, mlil):
             continue
         params = list(getattr(call, "params", ()) or ())
         if len(params) < 2:
+            log_debug(f"[sdecrypt] {hex(call.address)}: skipped fewer than two arguments")
             continue
         dest_addr = _const(mlil, params[0])
         source_addr = _const(mlil, params[1])
@@ -257,6 +269,7 @@ def annotate_decrypted_string_calls(bv, func, mlil):
             continue
         spec = recognize_string_decrypt_function(callee)
         if spec is None:
+            log_debug(f"[sdecrypt] {hex(call.address)}: skipped unrecognized callee {hex(target)}")
             continue
         plaintext = decode_string_blob(bv, source_addr, spec)
         if plaintext is None:

@@ -6,6 +6,8 @@ string_decrypt = load_plugin_module("plugins.DispatchThis.passes.medium.string_d
 annotate_decrypted_string_calls = string_decrypt.annotate_decrypted_string_calls
 decode_string_blob = string_decrypt.decode_string_blob
 recognize_string_decrypt_function = string_decrypt.recognize_string_decrypt_function
+_escaped = string_decrypt._escaped
+_set_decrypt_comment = string_decrypt._set_decrypt_comment
 
 
 class Op:
@@ -57,6 +59,12 @@ class FakeBv:
 
     def get_function_at(self, addr):
         return self.functions.get(addr)
+
+    def get_comment_at(self, *_args):
+        raise AssertionError("decrypt comments must be function-level comments")
+
+    def set_comment_at(self, *_args):
+        raise AssertionError("decrypt comments must be function-level comments")
 
 
 def const(value):
@@ -153,10 +161,50 @@ def test_annotates_current_function_direct_decrypt_calls_and_preserves_comments(
     assert annotate_decrypted_string_calls(bv, caller, caller.mlil) == 0
 
 
+def test_decrypt_comment_appends_replaces_in_place_and_deduplicates():
+    func = FakeFunc()
+    line = "[decrypt] new, src=0x7 dst=0x6"
+
+    func.comments[0x5000] = "manual note"
+    assert _set_decrypt_comment(func, 0x5000, line) is True
+    assert func.comments[0x5000] == "manual note\n[decrypt] new, src=0x7 dst=0x6"
+
+    func.comments[0x5000] = (
+        "before\n"
+        "[decrypt] stale, src=0x1 dst=0x2\n"
+        "after\n"
+        "[decrypt] duplicate, src=0x3 dst=0x4"
+    )
+    assert _set_decrypt_comment(func, 0x5000, line) is True
+    assert func.comments[0x5000] == "before\n[decrypt] new, src=0x7 dst=0x6\nafter"
+    assert _set_decrypt_comment(func, 0x5000, line) is False
+
+
+def test_decrypt_comment_escapes_single_line_unsafe_bytes():
+    expected = (
+        "A"
+        + "\\0"
+        + "\\n"
+        + "\\r"
+        + "\\t"
+        + '\\"'
+        + "\\\\"
+        + "\\x01"
+        + "\\x7f"
+        + "\\x80"
+        + "Z"
+    )
+
+    assert _escaped(b'A\x00\n\r\t"\\\x01\x7f\x80Z') == expected
+
+
 def test_skips_indirect_non_constant_and_non_stable_calls():
     bv = FakeBv()
     callee = decrypt_callee("libtersafe.so")
+    unrecognized = FakeFunc(0x3000, FakeMlil([]))
     bv.functions[callee.start] = callee
+    bv.functions[unrecognized.start] = unrecognized
+    bv.session_data["dispatchthis_mlil_stable"][unrecognized.start] = True
     bv.memory[0x7000] = encoded_blob("libtersafe.so")
     caller = FakeFunc(0x1000)
     caller.mlil = FakeMlil(
@@ -165,12 +213,22 @@ def test_skips_indirect_non_constant_and_non_stable_calls():
             call(const(callee.start), [const(0x6000), const(0x7000)], address=0x5010),
             call(const(callee.start), [var("dst"), const(0x7000)], address=0x5020),
             call(const(callee.start), [const(0x6000), var("src")], address=0x5030),
+            call(const(callee.start), [const(0x6000)], address=0x5040),
+            call(const(unrecognized.start), [const(0x6000), const(0x7000)], address=0x5050),
         ],
         caller,
     )
 
-    assert annotate_decrypted_string_calls(bv, caller, caller.mlil) == 0
+    logs = []
+    old_log_debug = string_decrypt.log_debug
+    string_decrypt.log_debug = logs.append
+    try:
+        assert annotate_decrypted_string_calls(bv, caller, caller.mlil) == 0
+    finally:
+        string_decrypt.log_debug = old_log_debug
     assert caller.comments == {}
+    assert any("skipped fewer than two arguments" in item for item in logs)
+    assert any("skipped unrecognized callee" in item for item in logs)
 
 
 def test_rejects_similar_non_matching_callee_without_done_flag():
@@ -184,5 +242,7 @@ if __name__ == "__main__":
     test_recognizer_matches_sample_family_decrypt_shape()
     test_decoder_recovers_observed_strings()
     test_annotates_current_function_direct_decrypt_calls_and_preserves_comments()
+    test_decrypt_comment_appends_replaces_in_place_and_deduplicates()
+    test_decrypt_comment_escapes_single_line_unsafe_bytes()
     test_skips_indirect_non_constant_and_non_stable_calls()
     test_rejects_similar_non_matching_callee_without_done_flag()
