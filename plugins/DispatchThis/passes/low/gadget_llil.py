@@ -291,6 +291,11 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
     if op in ("LLIL_ADD", "LLIL_SUB", "LLIL_AND", "LLIL_OR", "LLIL_XOR"):
         lefts = _reg_consts(bv, ssa, expr.left, depth + 1, seen)
         rights = _reg_consts(bv, ssa, expr.right, depth + 1, seen)
+        if op == "LLIL_AND":
+            if not lefts and len(rights) == 1:
+                return _small_mask_values(next(iter(rights)))
+            if not rights and len(lefts) == 1:
+                return _small_mask_values(next(iter(lefts)))
         out = set()
         for l in lefts:
             for r in rights:
@@ -353,6 +358,16 @@ def _reg_consts(bv, ssa, expr, depth=0, seen=None):
 
     v = _reg_const(bv, ssa, expr)
     return set() if v is None else {v}
+
+
+def _small_mask_values(mask):
+    bits = [1 << bit for bit in range(mask.bit_length()) if mask & (1 << bit)]
+    if len(bits) > 8:
+        return set()  # ponytail: bounded expansion; widen only if samples need bigger runtime indices.
+    values = {0}
+    for bit in bits:
+        values |= {value | bit for value in values}
+    return {value & U48 for value in values}
 
 
 def _diag(ssa, expr, depth=0, seen=None):

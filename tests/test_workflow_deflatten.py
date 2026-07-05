@@ -6,6 +6,7 @@ from conftest import load_plugin_module, temporary_modules
 calls = []
 branch_plan_calls = []
 branch_plan_results = {}
+active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
 nop_state_write_results = []
@@ -27,11 +28,18 @@ def fake_resolve_llil_jump_plan(_bv, llil, known_targets=None):
     return branch_plan_results.get(llil, [])
 
 
+def fake_active_profile(bv):
+    active_profile_calls.append(bv)
+    return types.SimpleNamespace(resolve_branch_gadget=fake_resolve_llil_jump_plan)
+
+
 class FakeWorkflowState:
     receipts = {}
     unmapped = set()
     marked_stable = False
     stable = False
+    updates = {}
+    applied = []
 
     def __init__(self, _func):
         pass
@@ -47,10 +55,14 @@ class FakeWorkflowState:
         return self.receipts
 
     def branch_updates_for(self, _resolved_targets):
-        return {}
+        return self.updates
 
     def mark_branch_stable(self):
         FakeWorkflowState.marked_stable = True
+
+    def mark_branch_applied(self, source, targets):
+        FakeWorkflowState.applied.append((source, targets))
+        return False
 
 
 _FAKE_MODULES = {
@@ -85,6 +97,9 @@ _FAKE_MODULES = {
         iter_llil_indirect_jumps=lambda _llil: iter(branch_iter_items),
         resolve_llil_jump_plan=fake_resolve_llil_jump_plan,
     ),
+    "plugins.DispatchThis.profiles": types.SimpleNamespace(
+        active_profile=fake_active_profile,
+    ),
     "plugins.DispatchThis.utils.log": types.SimpleNamespace(
         log_info=lambda _msg: None,
         log_warn=lambda _msg: None,
@@ -102,8 +117,15 @@ with temporary_modules(_FAKE_MODULES, clear=("plugins.DispatchThis.workflow",)):
 
 class FakeContext:
     def __init__(self):
-        self.function = types.SimpleNamespace(start=0x9556D8, name="sub_9556d8")
-        self.view = types.SimpleNamespace(session_data={"dispatchthis_llil_stable": {self.function.start: True}})
+        self.function = types.SimpleNamespace(
+            start=0x9556D8,
+            name="sub_9556d8",
+            set_user_indirect_branches=lambda *_args: None,
+        )
+        self.view = types.SimpleNamespace(
+            arch=types.SimpleNamespace(name="aarch64"),
+            session_data={"dispatchthis_llil_stable": {self.function.start: True}},
+        )
         self._mlil = object()
         self.committed = False
 
@@ -135,8 +157,10 @@ def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
     branch_plan_calls.clear()
     branch_plan_results.clear()
+    active_profile_calls.clear()
     branch_iter_items.clear()
     ctx = FakeContext()
     ctx.view = types.SimpleNamespace(
@@ -148,6 +172,7 @@ def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     workflow.resolve_jumps_llil(ctx)
 
     assert [known_targets for _llil, known_targets in branch_plan_calls] == [FakeWorkflowState.receipts]
+    assert active_profile_calls == [ctx.view]
     assert "dispatchthis_gadget_map" not in ctx.view.session_data
 
 
@@ -156,6 +181,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
     branch_plan_calls.clear()
     branch_plan_results.clear()
     branch_iter_items[:] = [types.SimpleNamespace(address=0x1000)]
@@ -178,6 +204,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_ma
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
     branch_plan_calls.clear()
     branch_plan_results.clear()
     branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
@@ -201,6 +228,7 @@ def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     FakeWorkflowState.unmapped = {0x2000}
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
     branch_plan_calls.clear()
     branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
     ctx = FakeContext()
@@ -225,6 +253,7 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.stable = True
+    FakeWorkflowState.updates = {}
     clear_tag_calls.clear()
     events = []
     ctx = FakeContext()
@@ -245,6 +274,31 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     assert clear_tag_calls[-1] is ctx.function
     assert ctx.view.session_data["dispatchthis_tag_cleanup_pending"] == set()
     FakeWorkflowState.stable = False
+
+
+def test_call_phase_submits_pending_function_llil_branches_before_call_work():
+    submitted = []
+    FakeWorkflowState.receipts = {0x1000: (0x2000,)}
+    FakeWorkflowState.unmapped = {0x3000}
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {0x3000: (0x4000, 0x5000)}
+    FakeWorkflowState.applied = []
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_plan_results["function-llil"] = [{"source": 0x3000, "targets": (0x4000, 0x5000)}]
+    ctx = FakeContext()
+    ctx.function.low_level_il = "function-llil"
+    ctx.function.set_user_indirect_branches = lambda source, targets: submitted.append((source, targets))
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
+    assert submitted == [(0x3000, [(ctx.view.arch, 0x4000), (ctx.view.arch, 0x5000)])]
+    assert FakeWorkflowState.applied == [(0x3000, (0x4000, 0x5000))]
+    assert ctx.view.session_data["dispatchthis_llil_stable"] == {}
+    branch_plan_results.clear()
+    FakeWorkflowState.updates = {}
+    FakeWorkflowState.unmapped = set()
 
 
 def test_cleanup_waits_for_deflatten_stability():
@@ -299,6 +353,7 @@ if __name__ == "__main__":
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     test_branch_resolver_schedules_tag_cleanup_once_while_pending()
+    test_call_phase_submits_pending_function_llil_branches_before_call_work()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()

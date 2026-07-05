@@ -86,6 +86,10 @@ def add(left, right):
     return Expr("LLIL_ADD", f"{left} + {right}", left=left, right=right)
 
 
+def and_expr(left, right):
+    return Expr("LLIL_AND", f"{left} & {right}", left=left, right=right)
+
+
 def load(src, instr_index):
     return Expr("LLIL_LOAD_SSA", f"[{src}]", src=src, instr_index=instr_index)
 
@@ -114,6 +118,19 @@ def test_zx_partial_copied_to_full_reg_offsets_collect_both_targets():
     assert gadget_llil._reg_consts(None, ssa, offset) == {0, 0x80}
 
 
+def test_unknown_bitmask_offsets_collect_small_mask_values():
+    x10_3 = Var("x10", 3)
+    x10_4 = Var("x10", 4)
+    x10_5 = Var("x10", 5)
+    ssa = FakeSSA({
+        x10_4: set_reg(zx(and_expr(partial(x10_3, "w10"), const(1)))),
+        x10_5: set_reg(zx(partial(x10_4, "w10"))),
+    })
+    offset = lsl(reg(x10_5), 5)
+
+    assert gadget_llil._reg_consts(None, ssa, offset) == {0, 0x20}
+
+
 def test_bool_to_int_offsets_do_not_prune_constant_state_compare():
     offset = lsl(bool_to_int_from_constant_cmp(), 4)
 
@@ -134,5 +151,6 @@ def test_stack_spill_reload_constant_is_folded_without_vsa():
 if __name__ == "__main__":
     test_bool_to_int_partial_reg_offsets_collect_both_targets()
     test_zx_partial_copied_to_full_reg_offsets_collect_both_targets()
+    test_unknown_bitmask_offsets_collect_small_mask_values()
     test_bool_to_int_offsets_do_not_prune_constant_state_compare()
     test_stack_spill_reload_constant_is_folded_without_vsa()

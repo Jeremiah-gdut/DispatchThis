@@ -12,8 +12,8 @@ from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
     iter_llil_indirect_jumps,
-    resolve_llil_jump_plan,
 )
+from .profiles import active_profile
 from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
 
@@ -79,6 +79,42 @@ def _call_has_fallthrough(mlil, call_il):
     return bool(block.outgoing_edges)
 
 
+def _submit_branch_mutations(bv, func, state, resolved_targets):
+    mutations = state.branch_updates_for(resolved_targets)
+    for source, targets in mutations.items():
+        try:
+            func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
+            changed = state.mark_branch_applied(source, targets)
+            if changed:
+                log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
+        except Exception as e:  # noqa: BLE001
+            log_warn(f"[workflow] {func.name}: failed to set branch targets @ {hex(source)}: {e}")
+    return mutations
+
+
+def _resolve_pending_branches_from_function_llil(ctx, state):
+    func = ctx.function
+    bv = ctx.view
+    llil = getattr(func, "low_level_il", None)
+    if llil is None:
+        return False
+
+    plan = active_profile(bv).resolve_branch_gadget(bv, llil, state.branch_targets())
+    resolved_targets = {item["source"]: item["targets"] for item in plan}
+    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
+    if mutations:
+        bv.session_data.setdefault("dispatchthis_llil_stable", {}).pop(func.start, None)
+        log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
+        return True
+
+    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
+        state.mark_branch_stable()
+        bv.session_data.setdefault("dispatchthis_llil_stable", {})[func.start] = True
+        clear_resolved_indirect_branch_tags(func)
+        _schedule_tag_cleanup(bv, func.start)
+    return False
+
+
 def resolve_jumps_llil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
@@ -101,14 +137,15 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
     func_llil = getattr(func, "low_level_il", None)
     plan_llil = func_llil if mapped and func_llil is not None else llil
-    plan = resolve_llil_jump_plan(bv, plan_llil, state.branch_targets())
+    profile = active_profile(bv)
+    plan = profile.resolve_branch_gadget(bv, plan_llil, state.branch_targets())
     if plan_llil is llil:
         apply_llil_jump_rewrites(bv, llil, plan)
 
     covered = {item["source"] for item in plan} | mapped
     if jump_sources - covered and plan_llil is not llil:
         seen_sources = {item["source"] for item in plan}
-        context_plan = resolve_llil_jump_plan(bv, llil, state.branch_targets())
+        context_plan = profile.resolve_branch_gadget(bv, llil, state.branch_targets())
         apply_llil_jump_rewrites(bv, llil, context_plan)
         for item in context_plan:
             if item["source"] not in seen_sources:
@@ -116,15 +153,7 @@ def resolve_jumps_llil(ctx: AnalysisContext):
                 seen_sources.add(item["source"])
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    mutations = state.branch_updates_for(resolved_targets)
-    for source, targets in mutations.items():
-        try:
-            func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
-            changed = state.mark_branch_applied(source, targets)
-            if changed:
-                log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
-        except Exception as e:  # noqa: BLE001
-            log_warn(f"[workflow] {func.name}: failed to set branch targets @ {hex(source)}: {e}")
+    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
 
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
     if mutations:
@@ -150,6 +179,8 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     state = FunctionWorkflowState(func)
 
     if not state.branch_stable(func):
+        if bv.arch.name == "aarch64":
+            _resolve_pending_branches_from_function_llil(ctx, state)
         return
 
     mlil = ctx.mlil
