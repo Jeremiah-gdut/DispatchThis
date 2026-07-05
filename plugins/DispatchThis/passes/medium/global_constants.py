@@ -83,11 +83,11 @@ def _walk_exprs(expr, seen=None):
                 yield from _walk_exprs(child, seen)
 
 
-def _iter_loads(mlil):
+def _iter_slot_use_exprs(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
+        ins_addr = getattr(ins, "address", 0)
         for expr in _walk_exprs(ins):
-            if _op(expr) in _LOAD_OPS:
-                yield expr
+            yield expr, getattr(expr, "address", ins_addr)
 
 
 def _slot_load_addr(mlil, expr):
@@ -222,11 +222,11 @@ def plan_global_constant_slots(bv, mlil):
         return []
 
     plans = {}
-    for load in _iter_loads(mlil):
-        for slot_addr, offset in _slot_offsets(mlil, load.src):
+    for expr, use_addr in _iter_slot_use_exprs(mlil):
+        for slot_addr, offset in _slot_offsets(mlil, expr):
             if slot_addr in plans:
                 continue
-            plan = _plan_for_slot(bv, mlil, slot_addr, offset, getattr(load, "address", 0))
+            plan = _plan_for_slot(bv, mlil, slot_addr, offset, use_addr)
             if plan is not None:
                 plans[slot_addr] = plan
 

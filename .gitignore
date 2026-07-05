@@ -1,4 +1,7 @@
 *.pyc
+__pycache__/
+.pytest_cache/
 *.swp
 .codegraph/
 test/
+docs/research/

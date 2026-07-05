@@ -87,6 +87,17 @@ def _cmp_e_parts(cond):
     return _cmp_parts(cond, equality_only=True)
 
 
+def _cmp_eq_ne_parts(cond):
+    cond = _resolve_cond(cond)
+    op = _op(cond)
+    if op not in ("MLIL_CMP_E", "MLIL_CMP_NE"):
+        return None
+    parts = _cmp_parts(cond)
+    if parts is None:
+        return None
+    return op, parts[0], parts[1]
+
+
 def _trace_var_roots(mlil, var, seen=None, depth=0):
     if seen is None:
         seen = set()
@@ -113,10 +124,10 @@ def _dispatcher_rows(mlil):
         last = _last(mlil, bb)
         if _op(last) != "MLIL_IF":
             continue
-        parts = _cmp_e_parts(last.condition)
+        parts = _cmp_eq_ne_parts(last.condition)
         if parts is None:
             continue
-        var, token = parts
+        cmp_op, var, token = parts
         roots = _trace_var_roots(mlil, var)
         if len(roots) != 1:
             continue
@@ -127,6 +138,7 @@ def _dispatcher_rows(mlil):
                 "var": var,
                 "root": next(iter(roots)),
                 "token": token,
+                "target": last.false if cmp_op == "MLIL_CMP_NE" else last.true,
             }
         )
     return rows
@@ -196,7 +208,7 @@ def _analyze_dispatcher(mlil):
 
     token_targets = {}
     for row in rows:
-        token_targets[row["token"]] = _block_at(mlil, row["if_il"].true)
+        token_targets[row["token"]] = _block_at(mlil, row["target"])
 
     dispatcher_starts = {row["bb"].start for row in rows}
     for bb in mlil.basic_blocks:

@@ -104,6 +104,10 @@ def store(dest, address=0x1000):
     return Expr("MLIL_STORE", dest=dest, address=address)
 
 
+def call(dest, params=(), address=0x1000):
+    return Expr("MLIL_CALL", dest=dest, params=list(params), address=address)
+
+
 def test_global_constant_slot_is_planned_from_pointer_base_load():
     bv = FakeBv()
     bv.data_vars[0xA43D70] = DataVar("void*")
@@ -151,6 +155,37 @@ def test_global_constant_slot_is_skipped_when_known_refs_store_to_it():
     assert plan_global_constant_slots(bv, current_mlil) == []
 
 
+def test_global_constant_slot_is_planned_from_call_argument_pointer():
+    bv = FakeBv()
+    bv.data_vars[0xA45660] = DataVar("void*")
+    bv.sections[0xA45660] = [Section(".data")]
+    bv.memory[0xA45660] = 0x4A6309F1F5DCFBC9
+    bv.valid_offsets.add(0xA20C2A)
+
+    slot_load = set_var("x9_38", load(const(0xA45660), address=0x925364), address=0x925364)
+    base_add = set_var(
+        "x1_1",
+        add(var("x9_38"), const(-0x4A6309F1F53AEF9F)),
+        address=0x925378,
+    )
+    use_call = call(const(0x9D4164), [const(0xA6A590), var("x1_1")], address=0x925388)
+    mlil = FakeMlil(
+        [slot_load, base_add, use_call],
+        {"x9_38": [slot_load], "x1_1": [base_add]},
+    )
+
+    assert plan_global_constant_slots(bv, mlil) == [
+        {
+            "slot_addr": 0xA45660,
+            "type": CONST_SLOT_TYPE,
+            "value": 0x4A6309F1F5DCFBC9,
+            "resolved_addr": 0xA20C2A,
+            "use_addr": 0x925378,
+        }
+    ]
+
+
 if __name__ == "__main__":
     test_global_constant_slot_is_planned_from_pointer_base_load()
     test_global_constant_slot_is_skipped_when_known_refs_store_to_it()
+    test_global_constant_slot_is_planned_from_call_argument_pointer()

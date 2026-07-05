@@ -121,6 +121,10 @@ def cmp_e(name, value, size=8):
     return Expr("MLIL_CMP_E", left=var(name), right=const(value, size), size=1)
 
 
+def cmp_ne(name, value, size=8):
+    return Expr("MLIL_CMP_NE", left=var(name), right=const(value, size), size=1)
+
+
 def set_var(name, src, index):
     ins = Expr("MLIL_SET_VAR", dest=name, src=src, instr_index=index)
     ins.vars_written = [name]
@@ -152,6 +156,30 @@ def build_uncond_function():
     exit_bb = Block(99, goto(99))
     link(d1, obb1, d2)
     link(d2, obb2, d3)
+    link(d3, obb3, exit_bb)
+    link(obb1, d1)
+    link(obb2, d1)
+    link(obb3, d1)
+    defs = {
+        "t1": [set_var("t1", var("state"), 100)],
+        "t2": [set_var("t2", var("state"), 101)],
+        "t3": [set_var("t3", var("state"), 102)],
+        "state": [obb1[10], obb2[20], obb3[30]],
+    }
+    mlil = FakeMlil([d1, d2, d3, obb1, obb2, obb3, exit_bb], defs)
+    return FakeFunc(mlil), obb1, obb2
+
+
+def build_ne_leaf_function():
+    d1 = Block(0, if_instr(cmp_e("t1", 0x1111000011110001), 10, 1, 0))
+    d2 = Block(1, if_instr(cmp_ne("t2", 0x2222000022220002), 2, 20, 1))
+    d3 = Block(2, if_instr(cmp_e("t3", 0x3333000033330003), 30, 99, 2))
+    obb1 = Block(10, set_var("state", const(0x2222000022220002), 10), goto(11))
+    obb2 = Block(20, set_var("state", const(0x3333000033330003), 20), goto(21))
+    obb3 = Block(30, set_var("state", const(0x1111000011110001), 30), goto(31))
+    exit_bb = Block(99, goto(99))
+    link(d1, obb1, d2)
+    link(d2, d3, obb2)
     link(d3, obb3, exit_bb)
     link(obb1, d1)
     link(obb2, d1)
@@ -302,6 +330,20 @@ def test_compute_redirections_recovers_unconditional_transition_from_dispatcher_
     )
 
 
+def test_dispatcher_ne_leaf_uses_false_branch_as_token_target():
+    func, obb1, obb2 = build_ne_leaf_function()
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert any(
+        r["kind"] == "uncond"
+        and r["obb"] is obb1
+        and r["target_bb"] is obb2
+        and r["state_token"] == (0x2222000022220002, 8)
+        for r in redirections
+    )
+
+
 def test_compute_redirections_ignores_stray_equality_compare():
     func, obb1, obb2 = build_uncond_function()
     stray = Block(80, if_instr(cmp_e("arg0", 0, size=4), 99, 99, 80))
@@ -409,6 +451,7 @@ def test_apply_redirections_rewrites_unconditional_and_conditional_transitions()
 
 if __name__ == "__main__":
     test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster()
+    test_dispatcher_ne_leaf_uses_false_branch_as_token_target()
     test_compute_redirections_ignores_stray_equality_compare()
     test_dispatcher_analysis_ignores_much_smaller_candidate_group()
     test_dispatcher_analysis_rejects_close_candidate_groups()
