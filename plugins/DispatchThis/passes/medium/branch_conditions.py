@@ -115,7 +115,7 @@ def _find_bool_to_int(mlil, expr, seen=None, depth=0):
     return None
 
 
-def _target_idx_for_value(bv, mlil, jump_il, var, value):
+def _target_for_value(bv, mlil, jump_il, var, value):
     target = _eval_const(bv, mlil, jump_il.dest, {var: value})
     if target is None:
         return None
@@ -126,7 +126,7 @@ def _target_idx_for_value(bv, mlil, jump_il, var, value):
     return None
 
 
-def _target_idx_for_bool(bv, mlil, jump_il, bool_expr, value):
+def _target_for_bool(bv, mlil, jump_il, bool_expr, value):
     target = _eval_const(bv, mlil, jump_il.dest, {"__bool_to_int__": (bool_expr, value)})
     if target is None:
         return None
@@ -168,7 +168,7 @@ def _condition_expr(mlil, if_il):
     return d.src if d is not None else cond
 
 
-def _bool_condition_expr(mlil, bool_expr):
+def _bool_cond(mlil, bool_expr):
     cond = bool_expr.src
     if cond.operation.name != "MLIL_VAR":
         return cond
@@ -182,11 +182,11 @@ def _plan_for_jump(bv, mlil, jump_il):
 
     bool_expr = _find_bool_to_int(mlil, jump_il.dest)
     if bool_expr is not None:
-        true_idx = _target_idx_for_bool(bv, mlil, jump_il, bool_expr, 1)
-        false_idx = _target_idx_for_bool(bv, mlil, jump_il, bool_expr, 0)
+        true_idx = _target_for_bool(bv, mlil, jump_il, bool_expr, 1)
+        false_idx = _target_for_bool(bv, mlil, jump_il, bool_expr, 0)
         if true_idx is not None and false_idx is not None and true_idx != false_idx:
             return {
-                "condition": _bool_condition_expr(mlil, bool_expr),
+                "condition": _bool_cond(mlil, bool_expr),
                 "true": true_idx,
                 "false": false_idx,
                 "cleanup_roots": mlil_def_roots(mlil, jump_il.dest),
@@ -213,8 +213,8 @@ def _plan_for_jump(bv, mlil, jump_il):
     for var in set(true_assigns) & set(false_assigns):
         true_value, true_assign = true_assigns[var]
         false_value, false_assign = false_assigns[var]
-        true_idx = _target_idx_for_value(bv, mlil, jump_il, var, true_value)
-        false_idx = _target_idx_for_value(bv, mlil, jump_il, var, false_value)
+        true_idx = _target_for_value(bv, mlil, jump_il, var, true_value)
+        false_idx = _target_for_value(bv, mlil, jump_il, var, false_value)
         if true_idx is None or false_idx is None or true_idx == false_idx:
             continue
         return {

@@ -83,7 +83,7 @@ def _walk_exprs(expr, seen=None):
                 yield from _walk_exprs(child, seen)
 
 
-def _iter_slot_use_exprs(mlil):
+def _slot_uses(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
         ins_addr = getattr(ins, "address", 0)
         for expr in _walk_exprs(ins):
@@ -143,7 +143,7 @@ def _in_data_section(bv, addr):
         return False
 
 
-def _is_plain_pointer_data_var(bv, addr):
+def _plain_ptr_var(bv, addr):
     data_var = bv.get_data_var_at(addr)
     return data_var is not None and str(data_var.type).replace(" ", "") == "void*"
 
@@ -168,7 +168,7 @@ def _ref_functions(bv, data_var):
             yield func
 
 
-def _mlil_has_store_to_slot(mlil, slot_addr):
+def _mlil_stores_slot(mlil, slot_addr):
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in _walk_exprs(ins):
             if _op(expr) not in _STORE_OPS:
@@ -178,16 +178,16 @@ def _mlil_has_store_to_slot(mlil, slot_addr):
     return False
 
 
-def _known_refs_store_to_slot(bv, current_mlil, slot_addr):
+def _refs_store_slot(bv, current_mlil, slot_addr):
     data_var = bv.get_data_var_at(slot_addr)
-    if _mlil_has_store_to_slot(current_mlil, slot_addr):
+    if _mlil_stores_slot(current_mlil, slot_addr):
         return True
     for func in _ref_functions(bv, data_var):
         mlil = getattr(func, "mlil", None)
         if (
             mlil is not None
             and mlil is not current_mlil
-            and _mlil_has_store_to_slot(mlil, slot_addr)
+            and _mlil_stores_slot(mlil, slot_addr)
         ):
             return True
     return False
@@ -196,7 +196,7 @@ def _known_refs_store_to_slot(bv, current_mlil, slot_addr):
 def _plan_for_slot(bv, mlil, slot_addr, offset, use_addr):
     if offset == 0:
         return None
-    if not _is_plain_pointer_data_var(bv, slot_addr) or not _in_data_section(bv, slot_addr):
+    if not _plain_ptr_var(bv, slot_addr) or not _in_data_section(bv, slot_addr):
         return None
     value = _qword_at(bv, slot_addr)
     if value is None:
@@ -204,7 +204,7 @@ def _plan_for_slot(bv, mlil, slot_addr, offset, use_addr):
     resolved_addr = (value + offset) & U48
     if not bv.is_valid_offset(resolved_addr):
         return None
-    if _known_refs_store_to_slot(bv, mlil, slot_addr):
+    if _refs_store_slot(bv, mlil, slot_addr):
         log_warn(f"[gconst] {hex(slot_addr)}: skipped, known reference writes to slot")
         return None
     return {
@@ -222,7 +222,7 @@ def plan_global_constant_slots(bv, mlil):
         return []
 
     plans = {}
-    for expr, use_addr in _iter_slot_use_exprs(mlil):
+    for expr, use_addr in _slot_uses(mlil):
         for slot_addr, offset in _slot_offsets(mlil, expr):
             if slot_addr in plans:
                 continue

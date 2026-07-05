@@ -30,7 +30,7 @@ def mlil_def_roots(mlil, expr):
     return roots
 
 
-def mlil_set_var_roots_before_sites(mlil, site_addrs):
+def set_roots_before(mlil, site_addrs):
     """Contiguous pure assignments immediately before each phase-owned site."""
     site_addrs = set(site_addrs or ())
     roots = set()
@@ -141,7 +141,7 @@ def _drop_live_escapes(ssa, candidates, by_index):
     return candidates
 
 
-def cleanup_phase_decode(mlil, root_indices, phase_name):
+def cleanup_decode(mlil, root_indices, phase_name):
     """NOP dead pure assignments in the decode slice rooted at ``root_indices``."""
     root_indices = set(root_indices or ())
     if mlil is None or not root_indices:

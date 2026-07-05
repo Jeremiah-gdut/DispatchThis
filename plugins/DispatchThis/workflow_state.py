@@ -60,7 +60,7 @@ class FunctionWorkflowState:
     def __init__(self, func):
         self.func = func
         self.data = _normalize_state(func.session_data.setdefault(ROOT_KEY, _fresh_state()))
-        self.seed_branch_receipts_from_user_metadata()
+        self.seed_branch_receipts()
 
     @staticmethod
     def unmapped_unresolved_sources(func):
@@ -72,10 +72,10 @@ class FunctionWorkflowState:
     def branch_receipts(self):
         return self.data["branch"]["receipts"]
 
-    def branch_target_receipts(self):
+    def branch_targets(self):
         return {source: _targets_tuple(targets) for source, targets in self.branch_receipts.items()}
 
-    def seed_branch_receipts_from_user_metadata(self, func=None):
+    def seed_branch_receipts(self, func=None):
         """Import existing user indirect-branch metadata as branch receipts.
 
         This keeps hot-reload or reopened BNDB sessions from resubmitting the
@@ -93,7 +93,7 @@ class FunctionWorkflowState:
             seeded += 1
         return seeded
 
-    def branch_mutations_for(self, resolved_targets):
+    def branch_updates_for(self, resolved_targets):
         mutations = {}
         applied_targets = _user_branch_targets(self.func)
         for source, targets in resolved_targets.items():
@@ -104,7 +104,7 @@ class FunctionWorkflowState:
                 mutations[source] = targets
         return mutations
 
-    def mark_branch_mutation_applied(self, source, targets):
+    def mark_branch_applied(self, source, targets):
         targets = _targets_tuple(targets)
         previous = self.branch_receipts.get(source)
         if previous == targets:
@@ -112,18 +112,18 @@ class FunctionWorkflowState:
         self.branch_receipts[source] = targets
         self.data["branch"]["stable"] = False
         self.data["branch"]["cleanup_done"] = False
-        self.invalidate_indirect_call_resolving()
+        self.invalidate_calls()
         return previous is not None
 
-    def mark_branch_resolving_stable(self):
+    def mark_branch_stable(self):
         self.data["branch"]["stable"] = True
 
-    def branch_resolving_is_stable(self, func=None):
+    def branch_stable(self, func=None):
         func = func or self.func
         if not self.data["branch"]["stable"] or self.unmapped_unresolved_sources(func):
             return False
         applied_targets = _user_branch_targets(func)
-        return all(applied_targets.get(source) == targets for source, targets in self.branch_target_receipts().items())
+        return all(applied_targets.get(source) == targets for source, targets in self.branch_targets().items())
 
     def branch_cleanup_needed(self):
         return not self.data["branch"]["cleanup_done"]
@@ -142,7 +142,7 @@ class FunctionWorkflowState:
     def call_adjustment_needed(self, call_addr, target):
         return self.call_receipts.get(call_addr) != target
 
-    def mark_call_target_resolved(self, call_addr, target):
+    def mark_call_target(self, call_addr, target):
         previous = self.call_target_receipts.get(call_addr)
         if previous == target:
             return False
@@ -151,7 +151,7 @@ class FunctionWorkflowState:
         self.data["call"]["cleanup_done"] = False
         return previous is not None
 
-    def mark_call_adjustment_applied(self, call_addr, target):
+    def mark_call_adjusted(self, call_addr, target):
         previous = self.call_receipts.get(call_addr)
         if previous == target:
             return False
@@ -160,10 +160,10 @@ class FunctionWorkflowState:
         self.data["call"]["cleanup_done"] = False
         return previous is not None
 
-    def mark_indirect_call_resolving_stable(self):
+    def mark_call_stable(self):
         self.data["call"]["stable"] = True
 
-    def indirect_call_resolving_is_stable(self):
+    def call_stable(self):
         return self.data["call"]["stable"]
 
     def call_cleanup_needed(self):
@@ -172,7 +172,7 @@ class FunctionWorkflowState:
     def mark_call_cleanup_done(self):
         self.data["call"]["cleanup_done"] = True
 
-    def invalidate_indirect_call_resolving(self):
+    def invalidate_calls(self):
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
         self.call_receipts.clear()

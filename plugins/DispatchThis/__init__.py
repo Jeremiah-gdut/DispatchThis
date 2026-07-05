@@ -9,12 +9,12 @@ import json
 from binaryninja import Activity, Workflow, Settings
 from .utils.log import log_info, log_warn
 from .workflow import (
-    workflow_resolve_jumps_llil,
-    workflow_resolve_calls_mlil,
-    workflow_translate_branches_mlil,
-    workflow_resolve_global_constants_mlil,
-    workflow_deflatten_mlil,
-    workflow_cleanup
+    resolve_jumps_llil,
+    resolve_calls_mlil,
+    translate_branches_mlil,
+    resolve_globals_mlil,
+    deflatten_mlil,
+    cleanup_mlil,
 )
 
 # Activity names double as per-function setting identifiers (BN ``eligibility.auto``
@@ -49,7 +49,7 @@ def register_workflows():
             "(leaves the flattened dispatcher intact)."
         ),
         "eligibility": {"auto": {"default": False}},
-    }), action=lambda analysis_context: None))
+    }), action=lambda _ctx: None))
 
     # Indirect-jump resolver (LLIL), gated on either toggle.
     workflow.register_activity(Activity(json.dumps({
@@ -57,7 +57,7 @@ def register_workflows():
         "title": "DispatchThis: Resolve Indirect Jumps",
         "description": "Rewrite decode-gadget jump(reg) into jump(const target).",
         "eligibility": _RESOLVE_OR_DEFLATTEN,
-    }), action=workflow_resolve_jumps_llil))
+    }), action=resolve_jumps_llil))
     workflow.insert("core.function.generateMediumLevelIL", [
         RESOLVE_SETTING,
         "extension.DispatchThis.IndirectPatcher",
@@ -69,7 +69,7 @@ def register_workflows():
         "title": "DispatchThis: Resolve Indirect Calls",
         "description": "Rewrite decode-gadget call(reg) into call(const target).",
         "eligibility": _RESOLVE_OR_DEFLATTEN,
-    }), action=workflow_resolve_calls_mlil))
+    }), action=resolve_calls_mlil))
 
     # Recover if/else shape after indirect branches have been resolved.
     workflow.register_activity(Activity(json.dumps({
@@ -77,7 +77,7 @@ def register_workflows():
         "title": "DispatchThis: Translate Indirect Branch Conditions",
         "description": "Translate resolved two-target indirect branch switches into if/else branches.",
         "eligibility": _RESOLVE_OR_DEFLATTEN,
-    }), action=workflow_translate_branches_mlil))
+    }), action=translate_branches_mlil))
 
     # Recover read-only semantics for narrow global constant slots before deflattening.
     workflow.register_activity(Activity(json.dumps({
@@ -85,7 +85,7 @@ def register_workflows():
         "title": "DispatchThis: Resolve Global Constants",
         "description": "Type writable-section global pointer slots as constants when they are used read-only.",
         "eligibility": _RESOLVE_OR_DEFLATTEN,
-    }), action=workflow_resolve_global_constants_mlil))
+    }), action=resolve_globals_mlil))
 
     # Deflattener (MLIL); auto eligibility surfaces the Deflatten toggle.
     workflow.register_activity(Activity(json.dumps({
@@ -96,7 +96,7 @@ def register_workflows():
             "jumps into direct gotos. Implies indirect jump/call resolution."
         ),
         "eligibility": {"auto": {"default": False}},
-    }), action=workflow_deflatten_mlil))
+    }), action=deflatten_mlil))
 
     # Cleanup (MLIL), gated on the Deflatten toggle only.
     workflow.register_activity(Activity(json.dumps({
@@ -104,7 +104,7 @@ def register_workflows():
         "title": "DispatchThis: Cleanup",
         "description": "NOP dispatcher state writes recorded by deflattening.",
         "eligibility": _DEFLATTEN_ONLY,
-    }), action=workflow_cleanup))
+    }), action=cleanup_mlil))
 
     workflow.insert("core.function.generateHighLevelIL", [
             "extension.DispatchThis.IndirectCallPatcher",

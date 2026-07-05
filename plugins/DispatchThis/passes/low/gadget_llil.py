@@ -620,7 +620,7 @@ def _live_phi_operand(bv, ssa, phi):
 # gadget parse + drive
 # --------------------------------------------------------------------------- #
 
-def _consts_preferring_live_path(bv, ssa, expr):
+def _live_consts(bv, ssa, expr):
     value = _reg_const(bv, ssa, expr)
     return {value} if value is not None else _reg_consts(bv, ssa, expr)
 
@@ -643,12 +643,12 @@ def _slot_add_const_candidates(bv, ssa, expr):
         slot = _slot_from_load(bv, ssa, _def_src(ssa, sload_expr))
         if slot is None:
             continue
-        for value in _consts_preferring_live_path(bv, ssa, const_expr):
+        for value in _live_consts(bv, ssa, const_expr):
             candidates.append((slot, value & U48))
     return candidates
 
 
-def _valid_offsets_for_candidate(bv, slot, table_base_key, key, offsets):
+def _valid_offsets(bv, slot, table_base_key, key, offsets):
     valid = set()
     for offset in offsets:
         target = resolve_indirect_jump_addr(bv, slot, offset, table_base_key, key)
@@ -662,7 +662,7 @@ def _is_index_offset(ssa, expr):
     return expr is not None and expr.operation.name in ("LLIL_LSL", "LLIL_LSR")
 
 
-def _parse_jump_gadget_parts(bv, ssa, jump_il):
+def _jump_parts(bv, ssa, jump_il):
     """
     
     Walk the decode gadget feeding ``jump_il`` backwards through LLIL SSA.
@@ -710,7 +710,7 @@ def _parse_jump_gadget_parts(bv, ssa, jump_il):
             continue
         for slot, table_base_key in _slot_add_const_candidates(bv, ssa, tb):
             offsets = {o & U48 for o in _reg_consts(bv, ssa, disp_expr)}
-            offsets = _valid_offsets_for_candidate(bv, slot, table_base_key, key, offsets)
+            offsets = _valid_offsets(bv, slot, table_base_key, key, offsets)
             if offsets:
                 return (slot, table_base_key, key & U48, offsets)
 
@@ -752,7 +752,7 @@ def _parse_jump_gadget_parts(bv, ssa, jump_il):
 
 def parse_jump_gadget(bv, ssa, jump_il):
     """Return one decoded gadget tuple for compatibility with single-target callers."""
-    parsed = _parse_jump_gadget_parts(bv, ssa, jump_il)
+    parsed = _jump_parts(bv, ssa, jump_il)
     if parsed is None:
         return None
     slot, table_base_key, key, offsets = parsed
@@ -762,7 +762,7 @@ def parse_jump_gadget(bv, ssa, jump_il):
 
 def parse_jump_gadget_targets(bv, ssa, jump_il):
     """Return every decoded table target tuple for this branch gadget."""
-    parsed = _parse_jump_gadget_parts(bv, ssa, jump_il)
+    parsed = _jump_parts(bv, ssa, jump_il)
     if parsed is None:
         return None
     slot, table_base_key, key, offsets = parsed

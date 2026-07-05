@@ -40,16 +40,16 @@ class FakeWorkflowState:
     def unmapped_unresolved_sources(_func):
         return FakeWorkflowState.unmapped
 
-    def branch_resolving_is_stable(self, _func):
+    def branch_stable(self, _func):
         return self.stable
 
-    def branch_target_receipts(self):
+    def branch_targets(self):
         return self.receipts
 
-    def branch_mutations_for(self, _resolved_targets):
+    def branch_updates_for(self, _resolved_targets):
         return {}
 
-    def mark_branch_resolving_stable(self):
+    def mark_branch_stable(self):
         FakeWorkflowState.marked_stable = True
 
 
@@ -72,8 +72,8 @@ _FAKE_MODULES = {
         translate_indirect_branch_conditions=lambda *_args, **_kwargs: (None, 0, set()),
     ),
     "plugins.DispatchThis.passes.medium.phase_cleanup": types.SimpleNamespace(
-        cleanup_phase_decode=lambda *_args, **_kwargs: 0,
-        mlil_set_var_roots_before_sites=lambda *_args, **_kwargs: set(),
+        cleanup_decode=lambda *_args, **_kwargs: 0,
+        set_roots_before=lambda *_args, **_kwargs: set(),
     ),
     "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
         CONST_SLOT_TYPE="uint64_t",
@@ -122,7 +122,7 @@ class FakeContext:
 def test_deflatten_workflow_runs_without_branch_mirror_state():
     ctx = FakeContext()
 
-    workflow.workflow_deflatten_mlil(ctx)
+    workflow.deflatten_mlil(ctx)
 
     assert calls[0] == ("compute", ctx.function.start, ctx.mlil)
     assert calls[1][0] == "apply"
@@ -145,7 +145,7 @@ def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     )
     ctx.llil = object()
 
-    workflow.workflow_resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
 
     assert [known_targets for _llil, known_targets in branch_plan_calls] == [FakeWorkflowState.receipts]
     assert "dispatchthis_gadget_map" not in ctx.view.session_data
@@ -166,7 +166,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
     )
     ctx.llil = object()
 
-    workflow.workflow_resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
 
     assert [known_targets for _llil, known_targets in branch_plan_calls] == [{}]
     assert FakeWorkflowState.marked_stable is False
@@ -189,7 +189,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_ma
     )
     ctx.llil = object()
 
-    workflow.workflow_resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
 
     assert [known_targets for _llil, known_targets in branch_plan_calls] == [{}]
     assert FakeWorkflowState.marked_stable is False
@@ -214,7 +214,7 @@ def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     branch_plan_results.clear()
     branch_plan_results["function-llil"] = [{"source": 0x2000, "targets": (0x3000,)}]
 
-    workflow.workflow_resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
 
     assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
     branch_iter_items.clear()
@@ -235,8 +235,8 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
         get_function_at=lambda start: ctx.function if start == ctx.function.start else None,
     )
 
-    workflow.workflow_resolve_jumps_llil(ctx)
-    workflow.workflow_resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
 
     assert len(events) == 1
     assert "dispatchthis_gadget_map" not in ctx.view.session_data
@@ -252,7 +252,7 @@ def test_cleanup_waits_for_deflatten_stability():
     ctx.view.session_data["dispatchthis_mlil_stable"] = {}
     nop_state_write_calls.clear()
 
-    workflow.workflow_cleanup(ctx)
+    workflow.cleanup_mlil(ctx)
 
     assert nop_state_write_calls == []
     assert ctx.committed is False
@@ -264,7 +264,7 @@ def test_cleanup_commits_when_deflatten_state_writes_are_nopped():
     nop_state_write_calls.clear()
     nop_state_write_results[:] = [1]
 
-    workflow.workflow_cleanup(ctx)
+    workflow.cleanup_mlil(ctx)
 
     assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
     assert ctx.committed is True
@@ -276,7 +276,7 @@ def test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped():
     nop_state_write_calls.clear()
     nop_state_write_results[:] = [0]
 
-    workflow.workflow_cleanup(ctx)
+    workflow.cleanup_mlil(ctx)
 
     assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
     assert ctx.committed is False

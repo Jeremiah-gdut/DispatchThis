@@ -18,6 +18,12 @@ Workflow callbacks are the orchestration boundary. Pass modules may build plans
 and rewrite the current IL, but Binary Ninja reanalysis-triggering edits belong
 in `plugins/DispatchThis/workflow.py`.
 
+Naming should keep domain terms complete at module boundaries, but internal
+workflow callbacks and state helpers should stay short. Prefer names like
+`resolve_calls_mlil`, `branch_stable`, and `cleanup_decode`; avoid redundant
+prefixes such as `workflow_` or long predicate phrases such as
+`indirect_call_resolving_is_stable`.
+
 Treat these APIs as reanalysis triggers:
 
 - `Function.set_user_indirect_branches`
