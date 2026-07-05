@@ -4,7 +4,7 @@ from binaryninja import AnalysisContext
 
 from .passes.medium.deflatten import apply_redirections_il, compute_redirections
 from .passes.medium.nop_pass import nop_deflatten_state_writes
-from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
+from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
 from .passes.medium.global_constants import CONST_SLOT_TYPE, plan_global_constant_slots
@@ -187,7 +187,7 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    plans = plan_indirect_calls(bv, mlil)
+    plans = active_profile(bv).resolve_call_gadget(bv, mlil)
     rewrites = apply_indirect_call_rewrites(bv, mlil, plans)
     adjustments = 0
     for plan in plans:

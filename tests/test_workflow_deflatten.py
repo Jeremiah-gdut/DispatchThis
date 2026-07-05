@@ -6,6 +6,9 @@ from conftest import load_plugin_module, temporary_modules
 calls = []
 branch_plan_calls = []
 branch_plan_results = {}
+call_plan_calls = []
+call_plan_results = []
+call_rewrite_calls = []
 active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
@@ -28,9 +31,22 @@ def fake_resolve_llil_jump_plan(_bv, llil, known_targets=None):
     return branch_plan_results.get(llil, [])
 
 
+def fake_resolve_call_gadget(bv, mlil):
+    call_plan_calls.append((bv, mlil))
+    return list(call_plan_results)
+
+
+def fake_apply_indirect_call_rewrites(bv, mlil, plans):
+    call_rewrite_calls.append((bv, mlil, plans))
+    return 0
+
+
 def fake_active_profile(bv):
     active_profile_calls.append(bv)
-    return types.SimpleNamespace(resolve_branch_gadget=fake_resolve_llil_jump_plan)
+    return types.SimpleNamespace(
+        resolve_branch_gadget=fake_resolve_llil_jump_plan,
+        resolve_call_gadget=fake_resolve_call_gadget,
+    )
 
 
 class FakeWorkflowState:
@@ -40,6 +56,12 @@ class FakeWorkflowState:
     stable = False
     updates = {}
     applied = []
+    call_targets = []
+    call_adjustment_checks = []
+    call_receipts = {}
+    call_target_receipts = {}
+    call_stable_marked = False
+    call_cleanup_marked = False
 
     def __init__(self, _func):
         pass
@@ -64,6 +86,25 @@ class FakeWorkflowState:
         FakeWorkflowState.applied.append((source, targets))
         return False
 
+    def mark_call_target(self, call_addr, target):
+        FakeWorkflowState.call_targets.append((call_addr, target))
+        FakeWorkflowState.call_target_receipts[call_addr] = target
+        return False
+
+    def call_adjustment_needed(self, call_addr, target):
+        FakeWorkflowState.call_adjustment_checks.append((call_addr, target))
+        return False
+
+    def mark_call_stable(self):
+        FakeWorkflowState.call_stable_marked = True
+
+    def mark_call_cleanup_done(self):
+        FakeWorkflowState.call_cleanup_marked = True
+
+
+def forbidden_plan_indirect_calls(*_args, **_kwargs):
+    raise AssertionError("workflow call planning must go through the active profile")
+
 
 _FAKE_MODULES = {
     "plugins.DispatchThis.passes.medium.deflatten": types.SimpleNamespace(
@@ -77,8 +118,8 @@ _FAKE_MODULES = {
         )[1],
     ),
     "plugins.DispatchThis.passes.medium.indirect_calls": types.SimpleNamespace(
-        apply_indirect_call_rewrites=lambda *_args, **_kwargs: 0,
-        plan_indirect_calls=lambda *_args, **_kwargs: [],
+        apply_indirect_call_rewrites=fake_apply_indirect_call_rewrites,
+        plan_indirect_calls=forbidden_plan_indirect_calls,
     ),
     "plugins.DispatchThis.passes.medium.branch_conditions": types.SimpleNamespace(
         translate_indirect_branch_conditions=lambda *_args, **_kwargs: (None, 0, set()),
@@ -301,6 +342,57 @@ def test_call_phase_submits_pending_function_llil_branches_before_call_work():
     FakeWorkflowState.unmapped = set()
 
 
+def test_call_resolver_uses_active_profile_without_workflow_state():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_targets = []
+    FakeWorkflowState.call_adjustment_checks = []
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
+    FakeWorkflowState.call_stable_marked = False
+    FakeWorkflowState.call_cleanup_marked = False
+    active_profile_calls.clear()
+    call_plan_calls.clear()
+    call_rewrite_calls.clear()
+    ctx = FakeContext()
+    plan = {
+        "call_il": types.SimpleNamespace(address=0x4000),
+        "call_addr": 0x4000,
+        "target": 0x5000,
+        "cleanup_roots": {7},
+    }
+    call_plan_results[:] = [plan]
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert call_plan_calls == [(ctx.view, ctx.mlil)]
+    assert call_rewrite_calls == [(ctx.view, ctx.mlil, [plan])]
+    assert FakeWorkflowState.call_targets == [(0x4000, 0x5000)]
+    assert FakeWorkflowState.call_adjustment_checks == [(0x4000, 0x5000)]
+    assert FakeWorkflowState.call_stable_marked is True
+    assert FakeWorkflowState.call_cleanup_marked is True
+    FakeWorkflowState.stable = False
+    call_plan_results.clear()
+
+
+def test_call_profile_hook_miss_does_not_fallback_to_default_resolver():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
+    active_profile_calls.clear()
+    call_plan_calls.clear()
+    call_rewrite_calls.clear()
+    call_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert call_plan_calls == [(ctx.view, ctx.mlil)]
+    assert call_rewrite_calls == [(ctx.view, ctx.mlil, [])]
+    FakeWorkflowState.stable = False
+
+
 def test_cleanup_waits_for_deflatten_stability():
     ctx = FakeContext()
     ctx.view.session_data["dispatchthis_mlil_stable"] = {}
@@ -354,6 +446,8 @@ if __name__ == "__main__":
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     test_branch_resolver_schedules_tag_cleanup_once_while_pending()
     test_call_phase_submits_pending_function_llil_branches_before_call_work()
+    test_call_resolver_uses_active_profile_without_workflow_state()
+    test_call_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()
