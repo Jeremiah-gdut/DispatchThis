@@ -3,7 +3,7 @@
 from binaryninja import AnalysisContext
 
 from .passes.medium.deflatten import apply_redirections_il, compute_redirections
-from .passes.medium.nop_pass import clean_deflatten_state_writes
+from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites, plan_indirect_calls
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_phase_decode, mlil_set_var_roots_before_sites
@@ -334,7 +334,7 @@ def workflow_cleanup(analysis_context: AnalysisContext):
         log_debug(f"[workflow] {func.name}: deflattener has not run yet, skipping cleanup")
         return
 
-    state_writes = clean_deflatten_state_writes(bv, func, mlil=mlil)
+    state_writes = nop_deflatten_state_writes(bv, func, mlil=mlil)
     if state_writes:
         _commit_mlil(analysis_context, mlil)
 

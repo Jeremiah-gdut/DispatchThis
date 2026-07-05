@@ -98,7 +98,7 @@ incomplete).
 ### 6. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
 
 Gated behind `Deflatten`; it only acts once deflatten has rewritten the OBB exits.
-`clean_deflatten_state_writes` NOPs dispatcher state writes by the state token values and
+`nop_deflatten_state_writes` NOPs dispatcher state writes by the state token values and
 state variables recorded by the deflatten workflow. Branch-target and call-target decode
 cleanup are separate phase cleanup attempts owned by the workflow callbacks for those
 phases.

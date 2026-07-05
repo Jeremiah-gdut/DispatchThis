@@ -8,6 +8,8 @@ branch_plan_calls = []
 branch_plan_results = {}
 branch_iter_items = []
 clear_tag_calls = []
+nop_state_write_results = []
+nop_state_write_calls = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -57,7 +59,10 @@ _FAKE_MODULES = {
         apply_redirections_il=fake_apply,
     ),
     "plugins.DispatchThis.passes.medium.nop_pass": types.SimpleNamespace(
-        clean_deflatten_state_writes=lambda *_args, **_kwargs: 0,
+        nop_deflatten_state_writes=lambda *args, **kwargs: (
+            nop_state_write_calls.append((args, kwargs)),
+            nop_state_write_results.pop(0) if nop_state_write_results else 0,
+        )[1],
     ),
     "plugins.DispatchThis.passes.medium.indirect_calls": types.SimpleNamespace(
         apply_indirect_call_rewrites=lambda *_args, **_kwargs: 0,
@@ -242,6 +247,41 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     FakeWorkflowState.stable = False
 
 
+def test_cleanup_waits_for_deflatten_stability():
+    ctx = FakeContext()
+    ctx.view.session_data["dispatchthis_mlil_stable"] = {}
+    nop_state_write_calls.clear()
+
+    workflow.workflow_cleanup(ctx)
+
+    assert nop_state_write_calls == []
+    assert ctx.committed is False
+
+
+def test_cleanup_commits_when_deflatten_state_writes_are_nopped():
+    ctx = FakeContext()
+    ctx.view.session_data["dispatchthis_mlil_stable"] = {ctx.function.start: True}
+    nop_state_write_calls.clear()
+    nop_state_write_results[:] = [1]
+
+    workflow.workflow_cleanup(ctx)
+
+    assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
+    assert ctx.committed is True
+
+
+def test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped():
+    ctx = FakeContext()
+    ctx.view.session_data["dispatchthis_mlil_stable"] = {ctx.function.start: True}
+    nop_state_write_calls.clear()
+    nop_state_write_results[:] = [0]
+
+    workflow.workflow_cleanup(ctx)
+
+    assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
+    assert ctx.committed is False
+
+
 def test_noreturn_type_detection_and_fallthrough_callsite():
     block = types.SimpleNamespace(start=0, end=2, outgoing_edges=[])
     first = types.SimpleNamespace(instr_index=10, il_basic_block=block)
@@ -259,4 +299,7 @@ if __name__ == "__main__":
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
     test_branch_resolver_schedules_tag_cleanup_once_while_pending()
+    test_cleanup_waits_for_deflatten_stability()
+    test_cleanup_commits_when_deflatten_state_writes_are_nopped()
+    test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()
     test_noreturn_type_detection_and_fallthrough_callsite()

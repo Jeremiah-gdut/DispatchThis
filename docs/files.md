@@ -60,5 +60,5 @@ rewrites the terminators. Handles unconditional and simple conditional transitio
 [`conditional-deflattening.md`](conditional-deflattening.md).
 
 ### `passes/medium/nop_pass.py`
-`clean_deflatten_state_writes` runs after the deflattener and NOPs dispatcher state writes
+`nop_deflatten_state_writes` runs after the deflattener and NOPs dispatcher state writes
 using the state tokens and variables recorded by the workflow.

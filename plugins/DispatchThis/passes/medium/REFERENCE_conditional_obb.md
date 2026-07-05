@@ -312,7 +312,7 @@ only the program's own predicates.
 ## NOP-pass diagnostics added
 
 `nop_pass.py` now logs, at info level, every state-write it NOPs in
-`nop_state_writes` (with `value=`/`dest=` match reason), and flags any NOP inside the
+`_nop_state_writes` (with `value=`/`dest=` match reason), and flags any NOP inside the
 gadget-taint / dead-decode rounds that references a recorded state constant
 (`_cleanup_round` takes `state_consts`, helper `_ref_consts`). Grep the log for a
 state const (e.g. `0x9e454962`) to see exactly where/why a write was pruned.

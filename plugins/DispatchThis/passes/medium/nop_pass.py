@@ -37,7 +37,7 @@ def _has_var(var, vars_):
     return any(_same_var(var, candidate) for candidate in vars_)
 
 
-def nop_state_writes(mlil, state_consts, state_vars):
+def _nop_state_writes(mlil, state_consts, state_vars):
     """NOP writes that only exist to feed the flattened dispatcher."""
     state_consts = state_consts or set()
     state_vars = state_vars or set()
@@ -75,7 +75,7 @@ def nop_state_writes(mlil, state_consts, state_vars):
     return len(seen)
 
 
-def clean_deflatten_state_writes(bv, func, mlil=None):
+def nop_deflatten_state_writes(bv, func, mlil=None):
     """NOP dispatcher state writes recorded by the deflatten workflow."""
     mlil = mlil or func.medium_level_il
     if mlil is None:
@@ -83,4 +83,4 @@ def clean_deflatten_state_writes(bv, func, mlil=None):
 
     state_consts = bv.session_data.get("dispatchthis_state_consts", {}).get(func.start, set())
     state_vars = bv.session_data.get("dispatchthis_state_vars", {}).get(func.start, set())
-    return nop_state_writes(mlil, state_consts, state_vars)
+    return _nop_state_writes(mlil, state_consts, state_vars)

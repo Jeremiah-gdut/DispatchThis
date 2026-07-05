@@ -66,7 +66,7 @@ def test_nop_state_writes_matches_full_width_state_constants():
     ins = set_var("tmp", 0x6C5B6887819676A8)
     mlil = FakeMlil([ins])
 
-    count = nop_pass.nop_state_writes(mlil, {0x6C5B6887819676A8}, set())
+    count = nop_pass._nop_state_writes(mlil, {0x6C5B6887819676A8}, set())
 
     assert count == 1
     assert mlil.replacements == [(ins.expr_index, ("nop", ("loc", ins.expr_index)))]
@@ -78,7 +78,7 @@ def test_nop_state_writes_keeps_legacy_low32_state_constant_match():
     ins = set_var("tmp", 0x6C5B6887819676A8)
     mlil = FakeMlil([ins])
 
-    count = nop_pass.nop_state_writes(mlil, {0x819676A8}, set())
+    count = nop_pass._nop_state_writes(mlil, {0x819676A8}, set())
 
     assert count == 1
 
