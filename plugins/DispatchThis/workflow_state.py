@@ -20,6 +20,10 @@ def _fresh_state():
             "cleanup_done": False,
             "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
+        "global": {
+            "stable": False,
+            "receipts": {},
+        },
     }
 
 
@@ -60,6 +64,10 @@ def _normalize_state(data):
     if call.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
         call["cleanup_done"] = False
         call["cleanup_version"] = CLEANUP_RECEIPT_VERSION
+    global_ = data.setdefault("global", {})
+    global_.setdefault("stable", False)
+    receipts = global_.setdefault("receipts", {})
+    global_["receipts"] = {slot: str(type_name) for slot, type_name in receipts.items()}
     return data
 
 
@@ -159,6 +167,7 @@ class FunctionWorkflowState:
         self.call_target_receipts[call_addr] = target
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
+        self.invalidate_globals()
         return previous is not None
 
     def mark_call_adjusted(self, call_addr, target):
@@ -168,6 +177,7 @@ class FunctionWorkflowState:
         self.call_receipts[call_addr] = target
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
+        self.invalidate_globals()
         return previous is not None
 
     def mark_call_stable(self):
@@ -183,8 +193,34 @@ class FunctionWorkflowState:
         self.data["call"]["cleanup_done"] = True
         self.data["call"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
+    @property
+    def global_receipts(self):
+        return self.data["global"]["receipts"]
+
+    def mark_global_slot(self, slot_addr, type_name):
+        type_name = str(type_name)
+        previous = self.global_receipts.get(slot_addr)
+        if previous == type_name:
+            return False
+        self.global_receipts[slot_addr] = type_name
+        self.data["global"]["stable"] = False
+        return True
+
+    def mark_global_stable(self):
+        self.data["global"]["stable"] = True
+
+    def global_stable(self):
+        return self.data["global"]["stable"]
+
+    def global_receipts_verified(self, verifier):
+        return all(verifier(slot_addr, type_name) for slot_addr, type_name in self.global_receipts.items())
+
+    def invalidate_globals(self):
+        self.data["global"]["stable"] = False
+
     def invalidate_calls(self):
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
         self.call_receipts.clear()
         self.call_target_receipts.clear()
+        self.invalidate_globals()

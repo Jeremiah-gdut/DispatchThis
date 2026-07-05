@@ -76,6 +76,36 @@ def test_call_target_receipts_feed_cleanup_without_gating_type_adjustments():
     assert state.call_cleanup_needed()
 
 
+def test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint():
+    state = FunctionWorkflowState(FakeFunction())
+
+    assert not state.global_stable()
+    assert state.global_receipts == {}
+    assert state.global_receipts_verified(lambda *_args: False)
+
+    assert state.mark_global_slot(0xA43D70, "uint64_t") is True
+    assert state.global_receipts == {0xA43D70: "uint64_t"}
+    assert not state.global_stable()
+    assert state.mark_global_slot(0xA43D70, "uint64_t") is False
+    assert state.global_receipts_verified(lambda addr, type_name: (addr, type_name) == (0xA43D70, "uint64_t"))
+
+    state.mark_global_stable()
+    assert state.global_stable()
+
+
+def test_global_phase_invalidates_on_new_phase_work():
+    state = FunctionWorkflowState(FakeFunction())
+    state.mark_global_slot(0xA43D70, "uint64_t")
+    state.mark_global_stable()
+
+    state.mark_call_target(0x4000, 0x5000)
+    assert not state.global_stable()
+
+    state.mark_global_stable()
+    state.mark_branch_applied(0x1000, (0x2000,))
+    assert not state.global_stable()
+
+
 def test_existing_user_branch_metadata_seeds_branch_receipts():
     func = FakeFunction()
     func.indirect_branches = [
@@ -155,12 +185,16 @@ def test_old_cleanup_receipts_are_invalidated_once():
 
     assert state.branch_cleanup_needed()
     assert state.call_cleanup_needed()
+    assert state.global_receipts == {}
+    assert not state.global_stable()
 
 
 if __name__ == "__main__":
     test_branch_receipts_gate_repeated_mutations_and_invalidate_calls()
     test_call_receipts_gate_repeated_adjustments()
     test_call_target_receipts_feed_cleanup_without_gating_type_adjustments()
+    test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint()
+    test_global_phase_invalidates_on_new_phase_work()
     test_existing_user_branch_metadata_seeds_branch_receipts()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()

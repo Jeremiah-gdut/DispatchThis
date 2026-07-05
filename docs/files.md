@@ -46,8 +46,8 @@ off the `AnalysisContext`, calls into a pass module, and owns reanalysis-trigger
 Ninja edits plus the phase/session receipts that gate them.
 
 ### `workflow_state.py`
-Owns `Function.session_data["dispatchthis_workflow_state"]`: indirect branch and indirect
-call workflow phase stability, mutation receipts, and downstream invalidation. See
+Owns `Function.session_data["dispatchthis_workflow_state"]`: indirect branch, indirect
+call, and global constant workflow phase stability, mutation receipts, and downstream invalidation. See
 [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
 
 ### `profiles/`

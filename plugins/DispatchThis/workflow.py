@@ -62,9 +62,13 @@ def _global_slot_type(bv):
     return parsed
 
 
-def _global_type_applied(bv, slot_addr):
+def _global_type_applied(bv, slot_addr, type_name=CONST_SLOT_TYPE):
     data_var = bv.get_data_var_at(slot_addr)
-    return data_var is not None and _normalized_type_name(data_var.type) == _normalized_type_name(CONST_SLOT_TYPE)
+    return data_var is not None and _normalized_type_name(data_var.type) == _normalized_type_name(type_name)
+
+
+def _global_receipts_verified(bv, state):
+    return state.global_receipts_verified(lambda slot_addr, type_name: _global_type_applied(bv, slot_addr, type_name))
 
 
 def _type_is_noreturn(type_):
@@ -291,31 +295,50 @@ def resolve_globals_mlil(ctx: AnalysisContext):
 
     plans = active_profile(bv).plan_global_constant_slots(bv, mlil)
     if not plans:
+        if _global_receipts_verified(bv, state):
+            state.mark_global_stable()
+        else:
+            state.invalidate_globals()
         return
 
     receipts = bv.session_data.setdefault(GLOBAL_CONSTANT_RECEIPTS, {})
     slot_type = None
     applied = 0
+    changed = False
+    failed = False
     for plan in plans:
         slot_addr = plan["slot_addr"]
         type_name = plan["type"]
-        if receipts.get(slot_addr) == type_name and _global_type_applied(bv, slot_addr):
+        if (
+            receipts.get(slot_addr) == type_name
+            and state.global_receipts.get(slot_addr) == type_name
+            and _global_type_applied(bv, slot_addr, type_name)
+        ):
             continue
-        if _global_type_applied(bv, slot_addr):
+        if _global_type_applied(bv, slot_addr, type_name):
             receipts[slot_addr] = type_name
+            changed = state.mark_global_slot(slot_addr, type_name) or changed
             continue
         try:
             if slot_type is None:
                 slot_type = _global_slot_type(bv)
             bv.define_user_data_var(slot_addr, slot_type)
-            if not _global_type_applied(bv, slot_addr):
+            if not _global_type_applied(bv, slot_addr, type_name):
                 log_warn(f"[workflow] {func.name}: failed to verify global const slot @ {hex(slot_addr)}")
+                failed = True
                 continue
             receipts[slot_addr] = type_name
+            state.mark_global_slot(slot_addr, type_name)
             applied += 1
         except Exception as e:  # noqa: BLE001
+            failed = True
             log_warn(f"[workflow] {func.name}: global const slot @ {hex(slot_addr)} failed: {e}")
 
+    if _global_receipts_verified(bv, state):
+        if not changed and not applied and not failed:
+            state.mark_global_stable()
+    else:
+        state.invalidate_globals()
     if applied:
         log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
 
@@ -333,6 +356,8 @@ def deflatten_mlil(ctx: AnalysisContext):
     # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
     state = FunctionWorkflowState(func)
     if not state.branch_stable(func):
+        return
+    if not state.global_stable():
         return
 
     redirections = compute_redirections(bv, func, mlil=mlil)

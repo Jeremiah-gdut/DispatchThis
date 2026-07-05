@@ -78,8 +78,9 @@ cleanup rooted at the resolved branch sites.
 
 `plan_global_constant_slots` recognizes narrow writable-section global pointer slots that
 are only used as read-only constant bases. The workflow callback applies the
-BinaryView-level `define_user_data_var` mutation with a `uint8_t const* const` type and
-records a view-level receipt so several functions do not retype the same slot.
+BinaryView-level `define_user_data_var` mutation with a `uint8_t const* const` type,
+records a view-level receipt so several functions do not retype the same slot, and marks
+the current function's global phase stable only after its slot receipts still verify.
 
 The first scope is intentionally narrow: a qword slot in `.data`, a nonzero constant
 offset chain, a valid resolved address, and no store to the slot in the known direct-ref
@@ -141,6 +142,8 @@ for the workflow coordination rules:
 | `call.receipts` | `{call_addr: target_addr}` submitted as call type adjustments |
 | `call.targets` | `{call_addr: target_addr}` resolved as call destinations, even when no type adjustment was submitted |
 | `call.cleanup_done` | call-target decode cleanup found no remaining changes for the current call receipts |
+| `global.stable` | global constant resolving has reached its current fixpoint for this function |
+| `global.receipts` | `{slot_addr: type_string}` verified as global constant data-var types for this function |
 
 ## Analysis limits
 

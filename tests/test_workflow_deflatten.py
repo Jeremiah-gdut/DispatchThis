@@ -75,6 +75,10 @@ class FakeWorkflowState:
     call_stable_marked = False
     call_cleanup_marked = False
     branch_cleanup_marked = False
+    global_receipts = {}
+    global_slots = []
+    global_stable_marked = False
+    globals_stable = False
     calls_stable = False
     branch_cleanup = True
     call_cleanup = True
@@ -128,6 +132,26 @@ class FakeWorkflowState:
 
     def call_cleanup_needed(self):
         return FakeWorkflowState.call_cleanup
+
+    def mark_global_slot(self, slot_addr, type_name):
+        FakeWorkflowState.global_slots.append((slot_addr, type_name))
+        previous = FakeWorkflowState.global_receipts.get(slot_addr)
+        FakeWorkflowState.global_receipts[slot_addr] = type_name
+        FakeWorkflowState.globals_stable = False
+        return previous != type_name
+
+    def mark_global_stable(self):
+        FakeWorkflowState.global_stable_marked = True
+        FakeWorkflowState.globals_stable = True
+
+    def global_stable(self):
+        return FakeWorkflowState.globals_stable
+
+    def global_receipts_verified(self, verifier):
+        return all(verifier(slot_addr, type_name) for slot_addr, type_name in FakeWorkflowState.global_receipts.items())
+
+    def invalidate_globals(self):
+        FakeWorkflowState.globals_stable = False
 
 
 def forbidden_plan_indirect_calls(*_args, **_kwargs):
@@ -237,6 +261,8 @@ class FakeContext:
 
 def test_deflatten_workflow_runs_without_branch_mirror_state():
     FakeWorkflowState.stable = True
+    FakeWorkflowState.globals_stable = True
+    calls.clear()
     ctx = FakeContext()
 
     workflow.deflatten_mlil(ctx)
@@ -246,6 +272,19 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     assert ctx.committed is True
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     assert "dispatchthis_llil_stable" not in ctx.view.session_data
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.globals_stable = False
+
+
+def test_deflatten_waits_for_global_phase_stability():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.globals_stable = False
+    calls.clear()
+    ctx = FakeContext()
+
+    workflow.deflatten_mlil(ctx)
+
+    assert calls == []
     FakeWorkflowState.stable = False
 
 
@@ -587,6 +626,10 @@ def test_branch_cleanup_respects_one_shot_receipt():
 def test_global_resolver_uses_active_profile_without_workflow_state():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.global_receipts = {}
+    FakeWorkflowState.global_slots = []
+    FakeWorkflowState.global_stable_marked = False
+    FakeWorkflowState.globals_stable = False
     active_profile_calls.clear()
     global_plan_calls.clear()
     ctx = FakeContext()
@@ -604,14 +647,28 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     assert global_plan_calls == [(ctx.view, ctx.mlil)]
     assert ctx.typed_globals == [(0xA43D70, "uint64_t")]
     assert ctx.view.session_data[workflow.GLOBAL_CONSTANT_RECEIPTS] == {0xA43D70: "uint64_t"}
+    assert FakeWorkflowState.global_slots == [(0xA43D70, "uint64_t")]
+    assert FakeWorkflowState.global_stable_marked is False
+
+    ctx.typed_globals.clear()
+    FakeWorkflowState.global_slots.clear()
+    workflow.resolve_globals_mlil(ctx)
+
+    assert ctx.typed_globals == []
+    assert FakeWorkflowState.global_slots == []
+    assert FakeWorkflowState.global_stable_marked is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
     global_plan_results.clear()
 
 
 def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.global_receipts = {}
+    FakeWorkflowState.global_stable_marked = False
+    FakeWorkflowState.globals_stable = False
     active_profile_calls.clear()
     global_plan_calls.clear()
     global_plan_results.clear()
@@ -623,8 +680,32 @@ def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
     assert global_plan_calls == [(ctx.view, ctx.mlil)]
     assert ctx.typed_globals == []
     assert workflow.GLOBAL_CONSTANT_RECEIPTS not in ctx.view.session_data
+    assert FakeWorkflowState.global_stable_marked is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+
+
+def test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.global_receipts = {0xA43D70: "uint64_t"}
+    FakeWorkflowState.global_stable_marked = False
+    FakeWorkflowState.globals_stable = True
+    active_profile_calls.clear()
+    global_plan_calls.clear()
+    global_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert global_plan_calls == [(ctx.view, ctx.mlil)]
+    assert FakeWorkflowState.global_stable_marked is False
+    assert FakeWorkflowState.globals_stable is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.global_receipts = {}
 
 
 def test_cleanup_waits_for_deflatten_stability():
@@ -674,6 +755,7 @@ def test_noreturn_type_detection_and_fallthrough_callsite():
 
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_branch_mirror_state()
+    test_deflatten_waits_for_global_phase_stability()
     test_branch_resolver_reuses_branch_receipts_as_known_targets()
     test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
@@ -684,6 +766,7 @@ if __name__ == "__main__":
     test_call_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_global_resolver_uses_active_profile_without_workflow_state()
     test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
+    test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()
