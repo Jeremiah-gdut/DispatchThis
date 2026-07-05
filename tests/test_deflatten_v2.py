@@ -291,7 +291,7 @@ def build_competing_groups_function(main_count=7, small_count=3):
 def test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster():
     func, obb1, obb2 = build_uncond_function()
 
-    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+    redirections = compute_redirections(FakeBv(), func)
 
     assert any(
         r["kind"] == "uncond"
@@ -311,7 +311,7 @@ def test_compute_redirections_ignores_stray_equality_compare():
         func.mlil._by_index[instr.instr_index] = instr
     func.mlil.basic_blocks.append(stray)
 
-    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+    redirections = compute_redirections(FakeBv(), func)
 
     assert any(r["kind"] == "uncond" and r["obb"] is obb1 and r["target_bb"] is obb2 for r in redirections)
 
@@ -334,7 +334,7 @@ def test_dispatcher_analysis_rejects_close_candidate_groups():
 def test_compute_redirections_recovers_entry_state_transition():
     func, entry, obb1 = build_entry_function()
 
-    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+    redirections = compute_redirections(FakeBv(), func)
 
     assert any(
         r["kind"] == "uncond"
@@ -350,7 +350,7 @@ def test_compute_redirections_recovers_entry_state_transition():
 def test_compute_redirections_recovers_conditional_two_branch_transition():
     func, chooser, obb2, obb3 = build_cond_function()
 
-    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+    redirections = compute_redirections(FakeBv(), func)
     cond = next(r for r in redirections if r["kind"] == "if_else")
 
     assert cond["obb"] is chooser
@@ -364,7 +364,7 @@ def test_compute_redirections_recovers_conditional_two_branch_transition():
 def test_compute_redirections_allows_nested_pure_condition_in_branch_tail():
     func, chooser, obb2, obb3 = build_nested_cond_function()
 
-    redirections = compute_redirections(FakeBv(), func, gadget_map={})
+    redirections = compute_redirections(FakeBv(), func)
     cond = next(r for r in redirections if r["kind"] == "if_else")
 
     assert cond["obb"] is chooser

@@ -21,17 +21,6 @@ from .workflow_state import FunctionWorkflowState
 GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
 
 
-def _legacy_gadget_value(targets):
-    return targets[0] if len(targets) == 1 else tuple(targets)
-
-
-def _mirror_branch_state_for_legacy_passes(bv, func, state):
-    gadget_map = bv.session_data.setdefault("dispatchthis_gadget_map", {}).setdefault(func.start, {})
-    gadget_map.clear()
-    for source, targets in state.branch_target_receipts().items():
-        gadget_map[source] = _legacy_gadget_value(targets)
-
-
 def _commit_mlil(analysis_context, mlil):
     try:
         analysis_context.mlil = mlil
@@ -102,7 +91,6 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
     llil_stable = bv.session_data.setdefault("dispatchthis_llil_stable", {})
     if state.branch_resolving_is_stable(func):
         llil_stable[func.start] = True
-        _mirror_branch_state_for_legacy_passes(bv, func, state)
         clear_resolved_indirect_branch_tags(func)
         _schedule_resolved_indirect_branch_tag_cleanup(bv, func.start)
         return
@@ -138,7 +126,6 @@ def workflow_resolve_jumps_llil(analysis_context: AnalysisContext):
         except Exception as e:  # noqa: BLE001
             log_warn(f"[workflow] {func.name}: failed to set branch targets @ {hex(source)}: {e}")
 
-    _mirror_branch_state_for_legacy_passes(bv, func, state)
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
     if mutations:
         llil_stable.pop(func.start, None)

@@ -826,12 +826,12 @@ def resolve_llil_jump_targets(bv, ssa, jump_il):
     return sorted(set(targets))
 
 
-def resolve_llil_jump_plan(bv, llil, gadget_map=None):
+def resolve_llil_jump_plan(bv, llil, known_targets=None):
     """Resolve decode-gadget branches to a plan without mutating BN state."""
     if not llil:
         return []
-    if gadget_map is None:
-        gadget_map = {}
+    if known_targets is None:
+        known_targets = {}
     _warned_phi.clear()
     
 
@@ -842,9 +842,9 @@ def resolve_llil_jump_plan(bv, llil, gadget_map=None):
     pending = []
     for jump_il in iter_llil_indirect_jumps(llil):
         try:
-            newly_resolved = jump_il.address not in gadget_map
-            if jump_il.address in gadget_map:
-                cached = gadget_map[jump_il.address]
+            newly_resolved = jump_il.address not in known_targets
+            if jump_il.address in known_targets:
+                cached = known_targets[jump_il.address]
                 if isinstance(cached, (list, tuple, set)):
                     targets = list(cached)
                 else:
@@ -900,9 +900,9 @@ def apply_llil_jump_rewrites(bv, llil, plan):
     return applied
 
 
-def resolve_and_rewrite_llil_jumps(bv, llil, gadget_map=None):
+def resolve_and_rewrite_llil_jumps(bv, llil, known_targets=None):
     """Compatibility wrapper: resolve and apply current-LLIL rewrites only."""
-    plan = resolve_llil_jump_plan(bv, llil, gadget_map)
+    plan = resolve_llil_jump_plan(bv, llil, known_targets)
     apply_llil_jump_rewrites(bv, llil, plan)
     resolved = {}
     for item in plan:

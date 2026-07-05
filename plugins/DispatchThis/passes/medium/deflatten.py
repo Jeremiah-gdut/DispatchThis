@@ -437,7 +437,7 @@ def _plan_entry_transition(mlil, analysis):
     }
 
 
-def compute_redirections(bv, func, gadget_map=None, mlil=None):
+def compute_redirections(bv, func, mlil=None):
     """Read-only: determine which terminating jumps to re-point and where. Returns a list of redirection dicts."""
     mlil = mlil or func.medium_level_il
     analysis = _analyze_dispatcher(mlil)

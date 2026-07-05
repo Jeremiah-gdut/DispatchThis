@@ -116,7 +116,6 @@ receipt-gated and only reruns after its phase receipts change.
 | Key | Meaning |
 | --- | --- |
 | `dispatchthis_llil_stable` | `{start: bool}` - LLIL indirect jumps fully resolved |
-| `dispatchthis_gadget_map` | `{start: {jump_addr: target}}` - resolved jump targets |
 | `dispatchthis_mlil_stable` | `{start: bool}` - deflatten has rewritten exits |
 | `dispatchthis_state_consts` | `{start: set(state_value)}` - for state-write NOP |
 | `dispatchthis_state_vars` | `{start: set(var)}` - state var + aliases |

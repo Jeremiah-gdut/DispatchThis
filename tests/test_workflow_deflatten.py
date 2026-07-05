@@ -20,8 +20,8 @@ def fake_apply(mlil, plans):
     return 1
 
 
-def fake_resolve_llil_jump_plan(_bv, llil, gadget_map=None):
-    branch_plan_calls.append((llil, gadget_map))
+def fake_resolve_llil_jump_plan(_bv, llil, known_targets=None):
+    branch_plan_calls.append((llil, known_targets))
     return branch_plan_results.get(llil, [])
 
 
@@ -114,7 +114,7 @@ class FakeContext:
         self.committed = mlil is self._mlil
 
 
-def test_deflatten_workflow_runs_without_resolved_gadget_map():
+def test_deflatten_workflow_runs_without_branch_mirror_state():
     ctx = FakeContext()
 
     workflow.workflow_deflatten_mlil(ctx)
@@ -125,7 +125,7 @@ def test_deflatten_workflow_runs_without_resolved_gadget_map():
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
 
 
-def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
+def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
@@ -142,7 +142,8 @@ def test_branch_resolver_reuses_branch_receipts_as_gadget_cache():
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [FakeWorkflowState.receipts]
+    assert [known_targets for _llil, known_targets in branch_plan_calls] == [FakeWorkflowState.receipts]
+    assert "dispatchthis_gadget_map" not in ctx.view.session_data
 
 
 def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
@@ -162,7 +163,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [{}]
+    assert [known_targets for _llil, known_targets in branch_plan_calls] == [{}]
     assert FakeWorkflowState.marked_stable is False
     branch_iter_items.clear()
 
@@ -185,7 +186,7 @@ def test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_ma
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert [gadget_map for _llil, gadget_map in branch_plan_calls] == [{}]
+    assert [known_targets for _llil, known_targets in branch_plan_calls] == [{}]
     assert FakeWorkflowState.marked_stable is False
     branch_iter_items.clear()
 
@@ -210,7 +211,7 @@ def test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
 
     workflow.workflow_resolve_jumps_llil(ctx)
 
-    assert [llil for llil, _gadget_map in branch_plan_calls] == ["function-llil"]
+    assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
     branch_iter_items.clear()
     branch_plan_results.clear()
 
@@ -233,6 +234,7 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     workflow.workflow_resolve_jumps_llil(ctx)
 
     assert len(events) == 1
+    assert "dispatchthis_gadget_map" not in ctx.view.session_data
     assert ctx.view.session_data["dispatchthis_tag_cleanup_pending"] == {ctx.function.start}
     events[0]()
     assert clear_tag_calls[-1] is ctx.function
@@ -251,8 +253,8 @@ def test_noreturn_type_detection_and_fallthrough_callsite():
     assert not workflow._call_has_fallthrough(mlil, call)
 
 if __name__ == "__main__":
-    test_deflatten_workflow_runs_without_resolved_gadget_map()
-    test_branch_resolver_reuses_branch_receipts_as_gadget_cache()
+    test_deflatten_workflow_runs_without_branch_mirror_state()
+    test_branch_resolver_reuses_branch_receipts_as_known_targets()
     test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
