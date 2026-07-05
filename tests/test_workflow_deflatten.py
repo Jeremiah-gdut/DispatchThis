@@ -9,6 +9,8 @@ branch_plan_results = {}
 call_plan_calls = []
 call_plan_results = []
 call_rewrite_calls = []
+global_plan_calls = []
+global_plan_results = []
 active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
@@ -41,11 +43,17 @@ def fake_apply_indirect_call_rewrites(bv, mlil, plans):
     return 0
 
 
+def fake_plan_global_constant_slots(bv, mlil):
+    global_plan_calls.append((bv, mlil))
+    return list(global_plan_results)
+
+
 def fake_active_profile(bv):
     active_profile_calls.append(bv)
     return types.SimpleNamespace(
         resolve_branch_gadget=fake_resolve_llil_jump_plan,
         resolve_call_gadget=fake_resolve_call_gadget,
+        plan_global_constant_slots=fake_plan_global_constant_slots,
     )
 
 
@@ -62,6 +70,7 @@ class FakeWorkflowState:
     call_target_receipts = {}
     call_stable_marked = False
     call_cleanup_marked = False
+    calls_stable = False
 
     def __init__(self, _func):
         pass
@@ -101,9 +110,16 @@ class FakeWorkflowState:
     def mark_call_cleanup_done(self):
         FakeWorkflowState.call_cleanup_marked = True
 
+    def call_stable(self):
+        return FakeWorkflowState.calls_stable
+
 
 def forbidden_plan_indirect_calls(*_args, **_kwargs):
     raise AssertionError("workflow call planning must go through the active profile")
+
+
+def forbidden_plan_global_constant_slots(*_args, **_kwargs):
+    raise AssertionError("workflow global planning must go through the active profile")
 
 
 _FAKE_MODULES = {
@@ -130,7 +146,7 @@ _FAKE_MODULES = {
     ),
     "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
         CONST_SLOT_TYPE="uint64_t",
-        plan_global_constant_slots=lambda *_args, **_kwargs: [],
+        plan_global_constant_slots=forbidden_plan_global_constant_slots,
     ),
     "plugins.DispatchThis.passes.low.gadget_llil": types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
@@ -167,6 +183,21 @@ class FakeContext:
             arch=types.SimpleNamespace(name="aarch64"),
             session_data={"dispatchthis_llil_stable": {self.function.start: True}},
         )
+        self.typed_globals = []
+
+        def parse_type_string(_decl):
+            return ("uint64_t", None)
+
+        def get_data_var_at(addr):
+            return self.view.session_data.setdefault("data_vars", {}).get(addr)
+
+        def define_user_data_var(addr, type_):
+            self.typed_globals.append((addr, type_))
+            self.view.session_data.setdefault("data_vars", {})[addr] = types.SimpleNamespace(type=type_)
+
+        self.view.parse_type_string = parse_type_string
+        self.view.get_data_var_at = get_data_var_at
+        self.view.define_user_data_var = define_user_data_var
         self._mlil = object()
         self.committed = False
 
@@ -393,6 +424,49 @@ def test_call_profile_hook_miss_does_not_fallback_to_default_resolver():
     FakeWorkflowState.stable = False
 
 
+def test_global_resolver_uses_active_profile_without_workflow_state():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    active_profile_calls.clear()
+    global_plan_calls.clear()
+    ctx = FakeContext()
+    global_plan_results[:] = [{
+        "slot_addr": 0xA43D70,
+        "type": "uint64_t",
+        "value": 0x1234,
+        "resolved_addr": 0x5000,
+        "use_addr": 0x4000,
+    }]
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert global_plan_calls == [(ctx.view, ctx.mlil)]
+    assert ctx.typed_globals == [(0xA43D70, "uint64_t")]
+    assert ctx.view.session_data[workflow.GLOBAL_CONSTANT_RECEIPTS] == {0xA43D70: "uint64_t"}
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    global_plan_results.clear()
+
+
+def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    active_profile_calls.clear()
+    global_plan_calls.clear()
+    global_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert global_plan_calls == [(ctx.view, ctx.mlil)]
+    assert ctx.typed_globals == []
+    assert workflow.GLOBAL_CONSTANT_RECEIPTS not in ctx.view.session_data
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+
+
 def test_cleanup_waits_for_deflatten_stability():
     ctx = FakeContext()
     ctx.view.session_data["dispatchthis_mlil_stable"] = {}
@@ -448,6 +522,8 @@ if __name__ == "__main__":
     test_call_phase_submits_pending_function_llil_branches_before_call_work()
     test_call_resolver_uses_active_profile_without_workflow_state()
     test_call_profile_hook_miss_does_not_fallback_to_default_resolver()
+    test_global_resolver_uses_active_profile_without_workflow_state()
+    test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_cleanup_waits_for_deflatten_stability()
     test_cleanup_commits_when_deflatten_state_writes_are_nopped()
     test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()

@@ -7,7 +7,7 @@ from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
-from .passes.medium.global_constants import CONST_SLOT_TYPE, plan_global_constant_slots
+from .passes.medium.global_constants import CONST_SLOT_TYPE
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -279,7 +279,7 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    plans = plan_global_constant_slots(bv, mlil)
+    plans = active_profile(bv).plan_global_constant_slots(bv, mlil)
     if not plans:
         return
 
