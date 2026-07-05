@@ -485,20 +485,6 @@ def _def_src(ssa, expr, depth=0):
 # opaque-predicate resolution (offset selection)
 # --------------------------------------------------------------------------- #
 
-# Constant-truth evaluators for the LLIL comparison ops the predicates use.
-_CMP = {
-    "LLIL_CMP_E": lambda a, b: a == b,
-    "LLIL_CMP_NE": lambda a, b: a != b,
-    "LLIL_CMP_SLT": lambda a, b: a < b,
-    "LLIL_CMP_ULT": lambda a, b: a < b,
-    "LLIL_CMP_SLE": lambda a, b: a <= b,
-    "LLIL_CMP_ULE": lambda a, b: a <= b,
-    "LLIL_CMP_SGE": lambda a, b: a >= b,
-    "LLIL_CMP_UGE": lambda a, b: a >= b,
-    "LLIL_CMP_SGT": lambda a, b: a > b,
-    "LLIL_CMP_UGT": lambda a, b: a > b,
-}
-
 def _define_cond(ssa, cond):
     """
     Resolve an ``if`` condition through a temp register/flag to the
