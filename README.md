@@ -92,9 +92,9 @@ The passes are enabled per-function from the **Function Settings** context menu.
   dispatcher overhead stripped out. If reanalysis does not trigger automatically, run it
   manually via *Analysis ▸ Reanalyze All Functions*.
 
-- **String Decrypt** - enables the resolver prerequisites for the string-decrypt workflow.
-  This activity currently waits for indirect branch, indirect call, and global constant
-  phases to stabilize; string decoding itself is not implemented in this slice.
+- **String Decrypt** - enables the resolver prerequisites for the string-decrypt workflow,
+  then annotates direct calls to recognized, deflattened string decrypt functions with
+  recovered plaintext comments.
 
 ![Function Settings Toggles](docs/assets/ENABLE_PER_FUNCTION.png)
 
@@ -120,8 +120,8 @@ Eight workflow activities are inserted per function. One is the no-op
 4. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
    switches back into `if` expressions, then runs branch-target phase cleanup.
 5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
-6. **String decrypt gate** (MLIL, *opt-in*) - waits for branch, call, and global phases to
-   stabilize for the current function.
+6. **String decrypt** (MLIL, *opt-in*) - waits for branch, call, and global phases to
+   stabilize for the current function, then annotates recognized direct decrypt calls.
 7. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
    original basic block's dispatcher jump into a direct `goto` to the real successor.
    Conditional transitions are reconstructed when each branch arm selects one dispatcher

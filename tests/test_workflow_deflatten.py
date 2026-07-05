@@ -20,6 +20,8 @@ cleanup_decode_calls = []
 cleanup_decode_results = []
 set_roots_before_calls = []
 set_roots_before_results = []
+string_decrypt_calls = []
+string_decrypt_results = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -50,6 +52,11 @@ def fake_apply_indirect_call_rewrites(bv, mlil, plans):
 def fake_plan_global_constant_slots(bv, mlil):
     global_plan_calls.append((bv, mlil))
     return list(global_plan_results)
+
+
+def fake_annotate_decrypted_string_calls(bv, func, mlil):
+    string_decrypt_calls.append((bv, func, mlil))
+    return string_decrypt_results.pop(0) if string_decrypt_results else 0
 
 
 def fake_active_profile(bv):
@@ -193,6 +200,9 @@ _FAKE_MODULES = {
     "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
         CONST_SLOT_TYPE="uint64_t",
         plan_global_constant_slots=forbidden_plan_global_constant_slots,
+    ),
+    "plugins.DispatchThis.passes.medium.string_decrypt": types.SimpleNamespace(
+        annotate_decrypted_string_calls=fake_annotate_decrypted_string_calls,
     ),
     "plugins.DispatchThis.passes.low.gadget_llil": types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
@@ -710,20 +720,22 @@ def test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify():
 
 def test_string_decrypt_waits_for_branch_call_and_global_stability():
     ctx = FakeContext()
+    string_decrypt_calls.clear()
 
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
-    assert workflow.string_decrypt_gate_mlil(ctx) is False
+    assert workflow.string_decrypt_mlil(ctx) == 0
 
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = False
-    assert workflow.string_decrypt_gate_mlil(ctx) is False
+    assert workflow.string_decrypt_mlil(ctx) == 0
 
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = False
-    assert workflow.string_decrypt_gate_mlil(ctx) is False
+    assert workflow.string_decrypt_mlil(ctx) == 0
 
+    assert string_decrypt_calls == []
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
 
@@ -732,9 +744,12 @@ def test_string_decrypt_does_not_require_deflatten_stability():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
+    string_decrypt_calls.clear()
+    string_decrypt_results[:] = [2]
     ctx = FakeContext()
 
-    assert workflow.string_decrypt_gate_mlil(ctx) is True
+    assert workflow.string_decrypt_mlil(ctx) == 2
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil)]
     assert "dispatchthis_mlil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False

@@ -8,6 +8,7 @@ from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
 from .passes.medium.global_constants import CONST_SLOT_TYPE
+from .passes.medium.string_decrypt import annotate_decrypted_string_calls
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -343,24 +344,22 @@ def resolve_globals_mlil(ctx: AnalysisContext):
         log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
 
 
-def string_decrypt_gate_mlil(ctx: AnalysisContext):
+def string_decrypt_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
 
     if bv.arch.name != "aarch64":
-        return False
+        return 0
 
     state = FunctionWorkflowState(func)
     if not state.branch_stable(func):
-        return False
+        return 0
     if not state.call_stable():
-        return False
+        return 0
     if not state.global_stable():
-        return False
-    if ctx.mlil is None:
-        return False
+        return 0
 
-    return True
+    return annotate_decrypted_string_calls(bv, func, ctx.mlil)
 
 
 def deflatten_mlil(ctx: AnalysisContext):

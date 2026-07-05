@@ -7,7 +7,7 @@ DispatchThis/
 │                               Function Analysis setting activities.
 ├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
 │                               MLIL call/global resolve, branch translation,
-│                               string-decrypt gate, deflatten, phase cleanup,
+│                               string decrypt, deflatten, phase cleanup,
 │                               and deflatten cleanup) and their gating.
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── profiles/
@@ -22,6 +22,7 @@ DispatchThis/
 │   └── medium/
 │       ├── indirect_calls.py   MLIL indirect-call decode fold and current-IL rewrites.
 │       ├── global_constants.py MLIL global constant slot planner.
+│       ├── string_decrypt.py   MLIL direct-call string decrypt recognizer/commenter.
 │       ├── phase_cleanup.py    One-shot branch/call target-decode cleanup.
 │       ├── deflatten.py        Computes and applies dispatcher state-token redirections.
 │       ├── nop_pass.py         Deflatten state-write NOPing.
@@ -70,6 +71,11 @@ adjustments, receipts, and call-target phase cleanup.
 ### `passes/medium/global_constants.py`
 Finds `.data` qword slots that are used as read-only constant pointer bases and returns
 type-mutation plans for the workflow callback.
+
+### `passes/medium/string_decrypt.py`
+Scans the current function's MLIL direct calls, recognizes calls to deflattened
+sample-family string decrypt functions, decodes the source blob, and writes function-level
+call-site comments while preserving manual comment lines.
 
 ### `passes/medium/phase_cleanup.py`
 Runs branch-target and call-target phase cleanup. It NOPs dead pure target-decode

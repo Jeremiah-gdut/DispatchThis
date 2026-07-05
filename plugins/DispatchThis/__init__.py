@@ -14,7 +14,7 @@ from .workflow import (
     resolve_calls_mlil,
     translate_branches_mlil,
     resolve_globals_mlil,
-    string_decrypt_gate_mlil,
+    string_decrypt_mlil,
     deflatten_mlil,
     cleanup_mlil,
 )
@@ -98,13 +98,13 @@ def register_workflows():
         "eligibility": _RESOLVER_ELIGIBILITY,
     }), action=resolve_globals_mlil))
 
-    # String-decrypt gate (MLIL); auto eligibility surfaces the String Decrypt toggle.
+    # String decrypt (MLIL); auto eligibility surfaces the String Decrypt toggle.
     workflow.register_activity(Activity(json.dumps({
         "name": STRING_DECRYPT_SETTING,
         "title": "String Decrypt",
         "description": "Prepare this function for string decrypt after resolver phases stabilize.",
         "eligibility": {"auto": {"default": False}},
-    }), action=string_decrypt_gate_mlil))
+    }), action=string_decrypt_mlil))
 
     # Deflattener (MLIL); auto eligibility surfaces the Deflatten toggle.
     workflow.register_activity(Activity(json.dumps({

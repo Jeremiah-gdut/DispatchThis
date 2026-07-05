@@ -23,7 +23,7 @@ the others are recovery workflow phases:
 The indirect branch resolver runs **before MLIL is generated**, because the deflattener needs
 the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
 The other six run before HLIL generation, in the order call-resolve → branch-condition
-translation → global-constant resolving → string-decrypt gate → deflatten → cleanup. The MLIL activities gate themselves on function phase
+translation → global-constant resolving → string decrypt → deflatten → cleanup. The MLIL activities gate themselves on function phase
 state, so they do not submit reanalysis-triggering mutations until indirect branch
 resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja edits:
 `set_user_indirect_branches`, `set_call_type_adjustment`, global data-var typing, and
@@ -87,11 +87,20 @@ The first scope is intentionally narrow: a qword slot in `.data`, a nonzero cons
 offset chain, a valid resolved address, and no store to the slot in the known direct-ref
 functions.
 
-### 5. String decrypt gate (MLIL, opt-in) - `workflow.py`
+### 5. String decrypt (MLIL, opt-in) - `passes/medium/string_decrypt.py`
 
-Gated behind the `String Decrypt` setting. This slice only establishes ordering: the
-callback returns without work until indirect branch, indirect call, and global constant
-phases are stable. It does not require the current function to be deflattened first.
+Gated behind the `String Decrypt` setting. The workflow callback returns without work
+until indirect branch, indirect call, and global constant phases are stable. It does not
+require the current function to be deflattened first.
+
+`annotate_decrypted_string_calls` scans only direct MLIL calls in the current workflow
+function. A candidate callee must already be marked deflattened in
+`dispatchthis_mlil_stable` and match the sample-family decrypt-function shape: two
+arguments, key-prefix reads, encrypted payload reads, a fixed key modulus, fixed output
+length, byte writes to the destination buffer, and a one-shot done flag write. Matching
+calls get function-level comments in the form
+`[decrypt] <escaped-string>, src=0x... dst=0x...`; existing manual comment lines are
+preserved.
 
 ### 6. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
 
