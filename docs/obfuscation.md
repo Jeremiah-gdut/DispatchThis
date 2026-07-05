@@ -6,37 +6,36 @@ targets. All the run-time addresses and constants below are from the sample
 
 ## High-level shape
 
-Control flow is **flattened**: the original basic blocks (referred to here as **OBBs** -
-original basic blocks) no longer branch to one another directly. Instead a single
-**dispatcher** decides which block runs next, based on a 32-bit **state variable**. Each
-OBB ends by setting the state to the value of its real successor and then jumping back into
-the dispatcher.
+Control flow is **flattened**: the original basic blocks no longer branch to one another
+directly. Instead a single **dispatcher** decides which block runs next, based on a
+**state variable**. Each original basic block ends by setting the state to its real
+successor's **state token** and then jumping back into the dispatcher.
 
 Run-time flow for a single transition:
 
 ```
-OBB body  ->  set state = <next>  ->  decode gadget  ->  jump to dispatcher
-          ->  compare tree (dispatcher)  ->  next OBB
+original block  ->  set state = <next token>  ->  decode gadget  ->  jump to dispatcher
+                ->  compare tree (dispatcher)  ->  next original block
 ```
 
 ## The state variable and dispatcher
 
-The **state variable** is a 32-bit value. The dispatcher is a **compare tree**: a chain of
-comparisons of the state variable against constants. Each leaf is a comparator of the form
-`if (state == K) goto real_block_for_K`. The set of `(K -> comparator block)` pairs is the
-**backbone** - one entry per reachable original block.
+The **state variable** is compared against opaque **state tokens**. The dispatcher is a
+**compare tree**: a chain of comparisons of the state variable against constants. Each
+leaf is a comparator of the form `if (state == K) goto real_block_for_K`. State tokens may
+be wider than 32 bits, so the token's bit width is part of its identity.
 
 The plugin recovers the state variable heuristically as *the variable that appears in the
 most equality comparisons* across the function (the dispatcher compares it far more than
-anything else). From there it builds the backbone and, for each place an OBB writes the
-state (directly or through an alias/pointer store), resolves the real successor(s) the
-dispatcher would route to.
+anything else). From there it builds the backbone and, for each place an original basic
+block writes the state (directly or through an alias/pointer store), resolves the real
+successor(s) the dispatcher would route to.
 
 ## Decode-gadget indirect jumps
 
-OBBs do not jump to the dispatcher with a direct branch. They jump through a **decode
-gadget** that recovers the destination from a **relocated jump table** at run time, so the
-target is opaque to static analysis (`jump(reg)`):
+Original basic blocks do not jump to the dispatcher with a direct branch. They jump
+through a **decode gadget** that recovers the destination from a **relocated jump table**
+at run time, so the target is opaque to static analysis (`jump(reg)`):
 
 ```
 rax = OFFSET + [&SLOT]        ; table_base   = entry_offset + *slot
@@ -83,11 +82,11 @@ decode add in an outer load.
 
 ## Conditional transitions
 
-Some OBBs do not pick a single next state - they select the next state from a small set of
-constants via one or more `cmov`s (compound `||` / `&&` conditions). The dispatcher then
-routes each chosen state to its own successor, which is how the original conditional branch
-was flattened. Reconstructing these back into real `if`/branch control flow is handled by
-the conditional path of the deflattener; see
+Some original basic blocks do not pick a single next state - they select the next state
+from a small set of constants via one or more `cmov`s (compound `||` / `&&` conditions).
+The dispatcher then routes each chosen state to its own successor, which is how the
+original conditional branch was flattened. Reconstructing these back into real `if`/branch
+control flow is handled by the conditional path of the deflattener; see
 [`conditional-deflattening.md`](conditional-deflattening.md).
 
 ## Concrete signature constants (sample)
@@ -101,6 +100,8 @@ From function `0x140088ad0` (`reg_read_str`):
 - **Resolved import IAT targets**: `0x1402ea290` (RegQueryValueExA), `0x1402ea298`
   (RegOpenKeyExA), `0x1402ea2a8` (RegCloseKey).
 
-The cleanup pass keys off these signatures - the 64-bit decode keys (constants `> 2^32`
-that are not valid mapped addresses) and the repeatedly-loaded table-slot pointers - to
-identify and erase gadget code, since real code never references them.
+The decode-gadget resolvers key off these signatures - the 64-bit decode keys and the
+repeatedly loaded table-slot pointers - to recover concrete branch and call targets. Later
+phase cleanup is narrower: branch/call phase cleanup NOPs dead pure target-decode
+assignments rooted at resolved sites, while deflatten cleanup NOPs dispatcher state writes
+recorded from recovered state tokens and state variables.

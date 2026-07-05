@@ -4,9 +4,11 @@
 DispatchThis/
 ├── __init__.py                 Plugin entry point: registers the workflow + activities,
 │                               the settings, the analysis-limit overrides, and the
-│                               Plugins-menu Enable/Disable toggles.
+│                               Function Analysis setting activities.
 ├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
-│                               MLIL call/global resolve, deflatten, cleanup) and their gating.
+│                               MLIL call/global resolve, branch translation, deflatten,
+│                               phase cleanup, and deflatten cleanup) and their gating.
+├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── utils/
 │   └── log.py                  Shared "DispatchThis" logger.
 ├── passes/
@@ -21,8 +23,8 @@ DispatchThis/
 │       ├── nop_pass.py         Deflatten state-write NOPing.
 │       └── REFERENCE_conditional_obb.md   Annotated reference example for the
 │                                          conditional transition handling.
-├── assets/                     README screenshots.
 ├── docs/                       This documentation.
+│   └── assets/                 README screenshots.
 ├── README.md
 └── LICENSE
 ```
@@ -31,18 +33,25 @@ DispatchThis/
 
 ### `__init__.py`
 Clones `core.function.metaAnalysis`, registers the activities and their insertion
-points, registers the boolean setting (`dispatchthis.enableDeflatten`, raises analysis limits, and wires up the `Enable`/`Disable` menu pair for each pass.
+points, surfaces the `analysis.plugins.dispatchThis.indirectJumpsCalls` and
+`analysis.plugins.dispatchThis.deflatten` Function Analysis settings, and raises analysis
+limits for large flattened functions.
 
 ### `workflow.py`
 The activity callbacks invoked by the workflow per function. Each reads the relevant IL
 off the `AnalysisContext`, calls into a pass module, and owns reanalysis-triggering Binary
 Ninja edits plus the phase/session receipts that gate them.
 
+### `workflow_state.py`
+Owns `Function.session_data["dispatchthis_workflow_state"]`: indirect branch and indirect
+call workflow phase stability, mutation receipts, and downstream invalidation. See
+[`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
+
 ### `passes/low/gadget_llil.py`
-Parses the three-step decode gadget backwards (`parse_jump_gadget`), recovers
-`(slot, displacement, key, offset)`, decodes the jump target via a per-function key, and
-returns a branch plan. It may rewrite the current LLIL, but workflow owns user branch
-metadata and analysis-completion callback scheduling.
+Parses decode-gadget `jump(reg)` and tail-call forms, recovers table slots, table-base
+keys, decode keys, and entry offsets, then returns a branch plan. It may rewrite the
+current LLIL, but workflow owns user branch metadata and analysis-completion callback
+scheduling.
 
 ### `passes/medium/indirect_calls.py`
 Builds call-target plans, folds call-gadget decode expressions, rewrites the current MLIL
@@ -52,6 +61,11 @@ adjustments and receipts.
 ### `passes/medium/global_constants.py`
 Finds `.data` qword slots that are used as read-only constant pointer bases and returns
 type-mutation plans for the workflow callback.
+
+### `passes/medium/phase_cleanup.py`
+Runs branch-target and call-target phase cleanup. It NOPs dead pure target-decode
+assignments rooted at the owning workflow phase's resolved sites; it does not collapse
+control flow or remove deflatten state writes.
 
 ### `passes/medium/deflatten.py`
 `compute_redirections` identifies the dominant dispatcher comparison cluster, maps state

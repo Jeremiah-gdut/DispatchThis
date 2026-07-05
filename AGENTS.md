@@ -28,7 +28,7 @@ Do not call those APIs from low/medium pass modules. Repeating the same mutation
 on every workflow run can keep function analysis looping.
 
 Use `Function.session_data["dispatchthis_workflow_state"]` for function-scoped
-phase state. Do not use `BinaryView.session_data` for deinbr/deincall receipts.
+phase state. Do not use `BinaryView.session_data` for indirect branch/call receipts.
 `BinaryView.session_data` is only appropriate for view-level timing/state such as
 the pending tag-cleanup completion callback.
 
@@ -40,8 +40,8 @@ Current phase order constraints:
 - Branch-target cleanup runs after branch condition translation.
 - Call-target cleanup runs after indirect call resolving is stable and no new
   call type adjustment was submitted in that run.
-- Deflatten/legacy cleanup still use older view-level stable maps; do not migrate
-  them into the new phase state unless that work is explicitly in scope.
+- Deflatten cleanup still uses view-level deflatten state maps; do not migrate
+  them into function phase state unless that work is explicitly in scope.
 
 `set_user_indirect_branches` uses Binary Ninja user-informed dataflow behavior and
 can make resolved branches appear as `MLIL_JUMP_TO`/switch-like shapes. Preserve
@@ -99,10 +99,10 @@ BNIL level choice matters:
 - LLIL is closest to lifted machine semantics and is the right place to recover
   indirect branch targets early enough to rebuild CFG.
 - MLIL has variables, dataflow, propagated constants, call-site information, and
-  useful `PossibleValueSet` results; use it for deincall, condition translation,
+  useful `PossibleValueSet` results; use it for indirect call resolving, condition translation,
   and target-decode cleanup.
 - HLIL is presentation/structuring oriented. Avoid using HLIL as the source of
-  truth for deinbr/deincall decisions.
+  truth for indirect branch/call resolving decisions.
 - SSA forms are generated analysis products. Use SSA for def-use reasoning, but
   rewrite the corresponding non-SSA IL expression/instruction.
 

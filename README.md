@@ -53,7 +53,7 @@ past the first jump gadget, and most of the function is never recovered:
 
 ![Recovered control-flow graph](docs/assets/RESOLVED_INDIRECT_JUMPS.png)
 
-**Recovered pseudocode.** With the jumps resolved, control flow deflattened, jump gadgets cleaned up, state write instructions NOP'd, and indirect calls resolved, the function decompiles to readable pseudocode:
+**Recovered pseudocode.** With decode-gadget branch and call targets resolved, phase cleanup removing dead target-decode assignments, deflattening reconnecting the dispatcher exits, and deflatten cleanup NOPing dispatcher state writes, the function decompiles to readable pseudocode:
 
 ![Fully recovered pseudocode](docs/assets/RECOVERED_PSEUDOCODE.png)
 
@@ -94,34 +94,39 @@ The passes are enabled per-function from the **Function Settings** context menu.
 
 ![Function Settings Toggles](docs/assets/ENABLE_PER_FUNCTION.png)
 
-**Deflatten depends on Indirect Jumps/Calls.** Run the resolver first (or together) so the
-full CFG is visible before the deflattener tries to reconstruct state-machine edges. The NOP
-cleanup only fires after the deflattener has rewritten the dispatcher exits, so enabling
-Deflatten alone without first resolving the indirect jumps is a no-op on most flattened
-functions.
+**Deflatten depends on indirect branch resolving.** The Deflatten setting also enables the
+indirect branch and indirect call resolvers, so the full CFG can become visible before the
+deflattener reconstructs dispatcher edges. Deflatten cleanup only runs after the
+deflattener has rewritten the dispatcher exits, so unresolved indirect branches usually
+leave the deflatten workflow phase idle.
 
 ## Pipeline at a glance
 
-Six workflow activities run per function, in order. The first resolves indirect jumps at
-**LLIL**; the rest run at **MLIL**:
+Seven workflow activities are inserted per function. One is the no-op
+`Indirect Jumps/Calls` setting activity; the remaining six are recovery workflow phases:
 
-1. **Indirect jump resolver** (LLIL) - rewrites each decode-gadget `jump(reg)` into
+1. **Indirect Jumps/Calls toggle** (LLIL insertion point) - surfaces the per-function
+   resolver setting.
+2. **Indirect branch resolver** (LLIL) - rewrites each decode-gadget `jump(reg)` into
    `jump(const)` in the current IL. The workflow callback owns user branch metadata and
    analysis-completion tag cleanup scheduling. Re-runs to a fixpoint as the function grows.
-2. **Indirect call resolver** (MLIL) - folds each import call's decode and rewrites the
+3. **Indirect call resolver** (MLIL) - folds each import call's decode and rewrites the
    call destination to a constant pointer. The workflow callback owns call type adjustments
    and call-target phase cleanup.
-3. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
+4. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
    switches back into `if` expressions, then runs branch-target phase cleanup.
-4. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
-5. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
-   `OBB → dispatcher` jump into a direct `goto` to the real successor. Conditional
-   transitions are reconstructed when each branch arm selects one dispatcher state token.
-6. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
+5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
+6. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
+   original basic block's dispatcher jump into a direct `goto` to the real successor.
+   Conditional transitions are reconstructed when each branch arm selects one dispatcher
+   state token.
+7. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
    recorded by deflattening.
 
 Full details, ordering rationale, and the `session_data` contract are in
-[`docs/pipeline.md`](docs/pipeline.md). Conditional deflattening has its own write-up in
+[`docs/pipeline.md`](docs/pipeline.md); workflow phase coordination rules live in
+[`docs/adr/0003-function-phase-state-for-workflow.md`](docs/adr/0003-function-phase-state-for-workflow.md).
+Conditional deflattening has its own write-up in
 [`docs/conditional-deflattening.md`](docs/conditional-deflattening.md). A file-by-file map
 of the source is in [`docs/files.md`](docs/files.md).
 

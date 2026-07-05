@@ -5,7 +5,9 @@ own activities into it. Everything is IL expression rewriting - no bytes are pat
 
 ## Registration and ordering
 
-From `__init__.py` / `workflow.py`, these activities are inserted:
+From `__init__.py` / `workflow.py`, seven activities are inserted. The
+`analysis.plugins.dispatchThis.indirectJumpsCalls` activity is a no-op setting activity;
+the other six are recovery workflow phases:
 
 | Activity ID | Stage | Inserted before |
 | --- | --- | --- |
@@ -17,7 +19,7 @@ From `__init__.py` / `workflow.py`, these activities are inserted:
 | `analysis.plugins.dispatchThis.deflatten` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.Cleanup` | MLIL | `core.function.generateHighLevelIL` |
 
-The indirect-jump resolver runs **before MLIL is generated**, because the deflattener needs
+The indirect branch resolver runs **before MLIL is generated**, because the deflattener needs
 the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
 The other five run before HLIL generation, in the order call-resolve → branch-condition
 translation → global-constant resolving → deflatten → cleanup. The MLIL activities gate themselves on function phase
@@ -25,10 +27,12 @@ state, so they do not submit reanalysis-triggering mutations until indirect bran
 resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja edits:
 `set_user_indirect_branches`, `set_call_type_adjustment`, global data-var typing, and
 analysis-completion callback scheduling.
+The coordination rules are captured in
+[`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
 
 ## The activities
 
-### 1. Indirect jump resolver (LLIL) - `passes/low/gadget_llil.py`
+### 1. Indirect branch resolver (LLIL) - `passes/low/gadget_llil.py`
 
 `resolve_llil_jump_plan` parses each decode-gadget `jump(reg)` (and tail-call form),
 decodes its target(s) from the relocated jump table, and returns a read-only plan.
@@ -67,7 +71,8 @@ and no prototype, so HLIL would render arguments as `/* nop */`. The workflow fi
 two-target indirect branches can appear as resolved `switch`/`MLIL_JUMP_TO` shapes.
 After indirect branch resolving is stable, the translator rewrites those two-target
 switches back into `MLIL_IF` expressions. This is a repeatable presentation rewrite and
-does not own mutation receipts.
+does not own mutation receipts. After translation, workflow runs branch-target phase
+cleanup rooted at the resolved branch sites.
 
 ### 4. Global constant resolver (MLIL) - `passes/medium/global_constants.py`
 
@@ -88,8 +93,8 @@ incomplete).
 
 - `compute_redirections` identifies the dominant dispatcher comparison cluster from
   state-token compares and maps each token to its target original block.
-- `apply_redirections_il` rewrites each `OBB → dispatcher` terminator into a direct
-  `goto` to the real successor. Conditional transitions are reconstructed when each
+- `apply_redirections_il` rewrites each original basic block's dispatcher terminator into
+  a direct `goto` to the real successor. Conditional transitions are reconstructed when each
   branch arm selects exactly one known state token - see
   [`conditional-deflattening.md`](conditional-deflattening.md).
 - The resolved dispatcher state values and the state variable's alias set are recorded to
@@ -97,7 +102,7 @@ incomplete).
 
 ### 6. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
 
-Gated behind `Deflatten`; it only acts once deflatten has rewritten the OBB exits.
+Gated behind `Deflatten`; it only acts once deflatten has rewritten the original block exits.
 `nop_deflatten_state_writes` NOPs dispatcher state writes by the state token values and
 state variables recorded by the deflatten workflow. Branch-target and call-target decode
 cleanup are separate phase cleanup attempts owned by the workflow callbacks for those
@@ -122,7 +127,9 @@ receipt-gated and only reruns after its phase receipts change.
 | `dispatchthis_tag_cleanup_pending` | `set(start)` - view-level analysis-completion callbacks pending |
 | `dispatchthis_global_constant_slots` | `{slot_addr: type_string}` - view-level global constant type receipts |
 
-Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`:
+Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`;
+see [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md)
+for the workflow coordination rules:
 
 | Field | Meaning |
 | --- | --- |
