@@ -148,9 +148,44 @@ def test_stack_spill_reload_constant_is_folded_without_vsa():
     assert gadget_llil._reg_const(None, ssa, add(reg(x8_23), const(8))) == 0xA456F8
 
 
+def test_llil_rewrite_does_not_remove_user_functions_from_low_pass():
+    removed = []
+    target_func = type("Func", (), {"start": 0x3000})()
+    bv = type("BV", (), {
+        "arch": type("Arch", (), {"address_size": 8})(),
+        "get_function_at": lambda _self, _target: target_func,
+        "remove_user_function": lambda _self, func: removed.append(func),
+    })()
+
+    class FakeLLIL:
+        source_function = type("Func", (), {"start": 0x1000})()
+
+        def const_pointer(self, _size, target):
+            return ("const", target)
+
+        def replace_expr(self, _expr_index, _dest):
+            pass
+
+        def finalize(self):
+            pass
+
+        def generate_ssa_form(self):
+            pass
+
+    plan = [{
+        "source": 0x2000,
+        "targets": (0x3000,),
+        "dest_expr_index": 7,
+    }]
+
+    assert gadget_llil.apply_llil_jump_rewrites(bv, FakeLLIL(), plan) == 1
+    assert removed == []
+
+
 if __name__ == "__main__":
     test_bool_to_int_partial_reg_offsets_collect_both_targets()
     test_zx_partial_copied_to_full_reg_offsets_collect_both_targets()
     test_unknown_bitmask_offsets_collect_small_mask_values()
     test_bool_to_int_offsets_do_not_prune_constant_state_compare()
     test_stack_spill_reload_constant_is_folded_without_vsa()
+    test_llil_rewrite_does_not_remove_user_functions_from_low_pass()

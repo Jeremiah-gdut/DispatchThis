@@ -267,6 +267,35 @@ def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     assert "dispatchthis_gadget_map" not in ctx.view.session_data
 
 
+def test_branch_resolver_removes_target_user_functions_from_workflow_layer():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x2000)]
+    ctx = FakeContext()
+    ctx.llil = "context-llil"
+    target_func = types.SimpleNamespace(start=0x3000)
+    removed = []
+    ctx.view.get_function_at = lambda target: target_func if target == 0x3000 else None
+    ctx.view.remove_user_function = removed.append
+    ctx.view.add_analysis_completion_event = lambda _callback: None
+    branch_plan_results["context-llil"] = [{
+        "source": 0x2000,
+        "targets": (0x3000,),
+        "dest_expr_index": 7,
+    }]
+
+    workflow.resolve_jumps_llil(ctx)
+
+    assert removed == [target_func]
+    branch_iter_items.clear()
+    branch_plan_results.clear()
+
+
 def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
@@ -416,6 +445,26 @@ def test_call_phase_submits_pending_function_llil_branches_before_call_work():
     branch_plan_results.clear()
     FakeWorkflowState.updates = {}
     FakeWorkflowState.unmapped = set()
+
+
+def test_call_phase_does_not_mark_branch_stable_when_pending_function_llil_has_uncovered_jump():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x3000)]
+    ctx = FakeContext()
+    ctx.function.low_level_il = "function-llil"
+    ctx.view.add_analysis_completion_event = lambda _callback: None
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert [llil for llil, _known_targets in branch_plan_calls] == ["function-llil"]
+    assert FakeWorkflowState.marked_stable is False
+    branch_iter_items.clear()
 
 
 def test_call_resolver_uses_active_profile_without_workflow_state():

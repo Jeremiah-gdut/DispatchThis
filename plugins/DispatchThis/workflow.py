@@ -92,6 +92,21 @@ def _submit_branch_mutations(bv, func, state, resolved_targets):
     return mutations
 
 
+def _remove_plan_target_user_functions(bv, func, plan):
+    get_function_at = getattr(bv, "get_function_at", None)
+    remove_user_function = getattr(bv, "remove_user_function", None)
+    if get_function_at is None or remove_user_function is None:
+        return
+    for item in plan:
+        for target in item["targets"]:
+            try:
+                existing = get_function_at(target)
+                if existing is not None and existing.start != func.start:
+                    remove_user_function(existing)
+            except Exception as e:  # noqa: BLE001
+                log_warn(f"[workflow] {func.name}: failed to remove target function @ {hex(target)}: {e}")
+
+
 def _resolve_pending_branches_from_function_llil(ctx, state):
     func = ctx.function
     bv = ctx.view
@@ -100,13 +115,17 @@ def _resolve_pending_branches_from_function_llil(ctx, state):
         return False
 
     plan = active_profile(bv).resolve_branch_gadget(bv, llil, state.branch_targets())
+    _remove_plan_target_user_functions(bv, func, plan)
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
     if mutations:
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
         return True
 
-    if not FunctionWorkflowState.unmapped_unresolved_sources(func):
+    jump_sources = {jump.address for jump in iter_llil_indirect_jumps(llil)}
+    mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
+    covered = set(resolved_targets) | mapped
+    if not FunctionWorkflowState.unmapped_unresolved_sources(func) and jump_sources <= covered:
         state.mark_branch_stable()
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
@@ -137,6 +156,7 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     plan = profile.resolve_branch_gadget(bv, plan_llil, state.branch_targets())
     if plan_llil is llil:
         apply_llil_jump_rewrites(bv, llil, plan)
+    _remove_plan_target_user_functions(bv, func, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     mutations = _submit_branch_mutations(bv, func, state, resolved_targets)

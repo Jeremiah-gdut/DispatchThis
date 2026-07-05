@@ -93,8 +93,9 @@ def register_workflows():
         "name": DEFLATTEN_SETTING,
         "title": "Deflatten",
         "description": (
-            "Unflatten this function's control flow by rewriting OBB->dispatcher "
-            "jumps into direct gotos. Implies indirect jump/call resolution."
+            "Unflatten this function's control flow by rewriting original basic "
+            "block dispatcher jumps into direct gotos. Implies indirect "
+            "jump/call resolution."
         ),
         "eligibility": {"auto": {"default": False}},
     }), action=deflatten_mlil))

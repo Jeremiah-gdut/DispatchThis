@@ -887,10 +887,6 @@ def apply_llil_jump_rewrites(bv, llil, plan):
                 f"[gadget-llil] {hex(jump_addr)} -> "
                 f"{', '.join(hex(t) for t in targets)}"
             )
-            for target in targets:
-                existing = bv.get_function_at(target)
-                if existing is not None and existing.start != llil.source_function.start:
-                    bv.remove_user_function(existing)
         except Exception as e:  # noqa: BLE001
             log_error(f"[gadget-llil] {hex(jump_addr)}: {e}")
             continue
