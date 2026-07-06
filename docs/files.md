@@ -29,6 +29,7 @@ DispatchThis/
 │       └── REFERENCE_conditional_obb.md   Annotated reference example for the
 │                                          conditional transition handling.
 ├── docs/                       This documentation.
+│   ├── resolver-profiles.md     How to adapt new sample families with profiles.
 │   └── assets/                 README screenshots.
 ├── README.md
 └── LICENSE
@@ -54,8 +55,10 @@ call, and global constant workflow phase stability, mutation receipts, and downs
 
 ### `profiles/`
 Owns the bundled resolver profile registry. The built-in `default` profile exposes
-the current indirect branch, indirect call, and global constant resolver behavior
-behind the resolver profile contract.
+the current indirect branch, indirect call, global constant, and string decrypt
+resolver behavior behind the resolver profile contract. See
+[`resolver-profiles.md`](resolver-profiles.md) before adding a new sample-family
+profile.
 
 ### `passes/low/gadget_llil.py`
 Parses decode-gadget `jump(reg)` and tail-call forms, recovers table slots, table-base
