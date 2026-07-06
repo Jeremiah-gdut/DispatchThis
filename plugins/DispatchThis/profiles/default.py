@@ -6,7 +6,7 @@ from ..passes.medium.string_decrypt import plan_string_decrypt_calls as _plan_st
 
 PROFILE_ID = "default"
 PROFILE_NAME = "Default"
-PROFILE_DESCRIPTION = "Built-in rules for the current DispatchThis sample family."
+PROFILE_DESCRIPTION = "Built-in rules for the current DispatchThis binary."
 
 
 def resolve_branch_gadget(bv, llil, known_targets=None):

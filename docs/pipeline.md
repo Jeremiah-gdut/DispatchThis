@@ -30,7 +30,7 @@ resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja e
 analysis-completion callback scheduling.
 The coordination rules are captured in
 [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
-New sample-family recognizers should be added as bundled resolver profiles; see
+New binary recognizers should be added as bundled resolver profiles; see
 [`resolver-profiles.md`](resolver-profiles.md).
 
 ## The activities

@@ -5,7 +5,8 @@ DispatchThis is a Binary Ninja workflow plugin for recovering readable control f
 ## Language
 
 **Sample family**:
-A set of obfuscated ARM64 ELF binaries that share enough transformation patterns for one plugin profile to handle.
+A set of obfuscated ARM64 ELF binaries that share enough transformation patterns
+to reuse profile helpers or implementation patterns.
 _Avoid_: generic target
 
 **Decode gadget**:
@@ -16,27 +17,40 @@ Recovering the concrete target of a computed jump so analysis can discover the n
 _Avoid_: deinbr
 
 **Resolver profile**:
-A focused recognizer for one sample family's decode-gadget shape.
+A focused recognizer for one specific binary's obfuscation shapes. Multiple
+binary profiles may share helpers when their sample family behavior overlaps.
 _Avoid_: generic rule engine
 
 **Resolver profile contract**:
-The narrow agreement a resolver profile must satisfy: recognize sample-family
-specific indirect branch, indirect call, global constant, and string decrypt
-shapes, then return standard recovery facts without owning workflow mutations.
-A profile may implement a hook as a no-op when its sample family does not use
-that capability. Deflattening is not part of the contract.
+The narrow agreement a resolver profile must satisfy: recognize one binary's
+indirect branch, indirect call, global constant, and string decrypt shapes, then
+return standard recovery facts without owning workflow mutations. A profile may
+implement a hook as a no-op when that binary does not use the capability.
+Deflattening is not part of the contract.
 _Avoid_: middleware, adapter framework, plugin rewrite layer
+
+**Binary profile**:
+A resolver profile whose default ownership boundary is one concrete binary or
+BNDB. It may delegate shared behavior to helpers, but profile selection remains
+explicit per BinaryView.
+_Avoid_: per-family profile, automatic detector
+
+**Profile ID**:
+A stable lowercase snake_case identifier for a binary profile. It should be
+traceable to the binary without exposing local paths, usernames, customer names,
+or other sensitive project labels.
+_Avoid_: sample1, current, default2, full local paths
 
 **Active resolver profile**:
 The resolver profile explicitly selected for a BinaryView. It chooses how enabled
-functions interpret sample-family obfuscation shapes; it does not enable the
+functions interpret that binary's obfuscation shapes; it does not enable the
 workflow for every function in the view.
 _Avoid_: automatic sample detection
 
 **Default resolver profile**:
-The bundled resolver profile named `default`, representing the current sample-family
+The bundled resolver profile named `default`, representing the current binary
 rules shipped with DispatchThis. The name does not mean generic support for every
-obfuscation family.
+binary or obfuscation family.
 _Avoid_: current_arm64, universal profile
 
 **Function workflow enablement**:

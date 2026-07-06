@@ -12,7 +12,7 @@ DispatchThis/
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── profiles/
 │   ├── __init__.py             Bundled resolver profile registry and contract validation.
-│   └── default.py              Built-in resolver profile for the current sample family.
+│   └── default.py              Built-in resolver profile for the current binary.
 ├── utils/
 │   └── log.py                  Shared "DispatchThis" logger.
 ├── passes/
@@ -57,7 +57,7 @@ call, and global constant workflow phase stability, mutation receipts, and downs
 Owns the bundled resolver profile registry. The built-in `default` profile exposes
 the current indirect branch, indirect call, global constant, and string decrypt
 resolver behavior behind the resolver profile contract. See
-[`resolver-profiles.md`](resolver-profiles.md) before adding a new sample-family
+[`resolver-profiles.md`](resolver-profiles.md) before adding a new binary
 profile.
 
 ### `passes/low/gadget_llil.py`
