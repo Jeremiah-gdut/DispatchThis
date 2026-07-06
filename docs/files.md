@@ -29,7 +29,7 @@ DispatchThis/
 │       └── REFERENCE_conditional_obb.md   Annotated reference example for the
 │                                          conditional transition handling.
 ├── docs/                       This documentation.
-│   ├── resolver-profiles.md     How to adapt new sample families with profiles.
+│   ├── resolver-profiles.md     How to add bundled binary resolver profiles.
 │   └── assets/                 README screenshots.
 ├── README.md
 └── LICENSE

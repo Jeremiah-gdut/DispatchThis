@@ -1,7 +1,7 @@
 # Resolver profiles
 
 Resolver profiles adapt DispatchThis to one binary without moving workflow
-ownership into sample-specific code.
+ownership into profile-specific code.
 
 A profile is selected per BinaryView with
 `analysis.plugins.dispatchThis.resolverProfile`. Function workflow enablement is
@@ -10,11 +10,11 @@ function in the view.
 
 ## Agent workflow
 
-Do not start by editing code. First collect the sample facts below. If a field is
-not used by the sample, write `none`.
+Do not start by editing code. First collect the binary facts below. If a field is
+not used by the binary, write `none`.
 
 ```text
-sample:
+binary:
   file:
   architecture:
   platform:
@@ -62,13 +62,9 @@ Then implement the smallest profile that satisfies those facts:
 
 1. Add `plugins/DispatchThis/profiles/<profile_id>.py`.
 2. Define the metadata and every required hook.
-3. Return `[]` from hooks the sample does not need.
+3. Return `[]` from hooks the binary does not need.
 4. Register the module in `plugins/DispatchThis/profiles/__init__.py`.
-5. Add one focused test for each non-no-op hook.
-6. Run `pytest -q`.
-7. Record manual BNDB validation steps and results.
-8. Restart Binary Ninja before GUI validation; workflow callback hot reload is
-   unreliable.
+5. Complete the definition of done below.
 
 `llil_excerpt` and `mlil_excerpt` must be raw Binary Ninja IL copied from the
 target. Notes may explain the interpretation, but they do not replace the raw
@@ -141,7 +137,7 @@ existing default binary.
 
 Escalate in this order:
 
-1. Recheck the sample facts. Missing or summarized IL is not enough to implement
+1. Recheck the binary facts. Missing or summarized IL is not enough to implement
    a shape safely.
 2. Add or tighten one failing test for the hook that misses the shape.
 3. Extend the binary profile's private helper.
@@ -159,9 +155,9 @@ a deliberate general contract change.
 Each profile module must expose:
 
 ```python
-PROFILE_ID = "sample_x"
-PROFILE_NAME = "Sample X"
-PROFILE_DESCRIPTION = "Rules for the Sample X family."
+PROFILE_ID = "dyzznb_main_202607"
+PROFILE_NAME = "DYZZNB main 2026-07"
+PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals and strings."
 
 def resolve_branch_gadget(bv, llil, known_targets=None):
     return []
@@ -252,36 +248,15 @@ Profiles are pure recognizers. They must not call:
 Those mutations stay in workflow callbacks or existing apply functions so phase
 receipts, reanalysis gates, and cleanup invalidation remain centralized.
 
-Profiles must not auto-detect and switch the active profile. If a sample needs a
+Profiles must not auto-detect and switch the active profile. If a binary needs a
 different profile, set `analysis.plugins.dispatchThis.resolverProfile` explicitly.
-
-## Human checklist
-
-Before accepting a new profile:
-
-- The profile has a stable `PROFILE_ID`, name, and description.
-- Every required hook exists.
-- Unused capabilities return `[]`.
-- Every non-no-op hook has a focused test.
-- The profile is registered explicitly in `_PROFILES`.
-- The sample's supported and unsupported capabilities are listed in the profile
-  docstring or module comments.
-- `pytest -q` passes.
-- Manual BNDB validation checks at least one enabled function after workflow
-  completion.
-- GUI validation used a full Binary Ninja restart after workflow/profile edits.
-
-Manual BNDB validation does not need to run in CI, but it must be written down
-for the profile change. Check the capabilities that profile claims: branch
-targets submitted, indirect calls rewritten to direct calls, phase cleanup
-residue removed, global slots typed, string decrypt comments written, or no-op
-hooks leaving analysis untouched.
 
 ## Definition of done
 
-- The sample facts template is complete; unused capabilities are marked `none`.
+- The binary facts template is complete; unused capabilities are marked `none`.
 - The profile has a stable non-sensitive ID, name, and description.
 - The capability matrix identifies real hooks and intentional no-ops.
+- Every required hook exists, and unused capabilities return `[]`.
 - The profile is registered and passes resolver contract validation.
 - Every real hook has a focused test.
 - `pytest -q` passes.
