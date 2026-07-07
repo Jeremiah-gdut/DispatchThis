@@ -145,7 +145,7 @@ def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
     monkeypatch.setitem(sys.modules, "PySide6.QtGui", qtgui)
 
     assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
-    assert FakeUIAction.registered["Selection Target\\DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+J"
+    assert FakeUIAction.registered["Selection Target\\DispatchThis\\Toggle Resolver"] == "Alt+Q"
     assert FakeUIAction.unregistered == ["DispatchThis\\Shortcuts\\Toggle Resolver"]
 
 
