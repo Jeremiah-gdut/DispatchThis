@@ -5,48 +5,8 @@ from binaryninja import ILSourceLocation
 from ...utils.log import log_info
 
 
-_SET_VAR_OPS = ("MLIL_SET_VAR", "MLIL_SET_VAR_FIELD")
 _SSA_SET_VAR_OPS = ("MLIL_SET_VAR_SSA", "MLIL_SET_VAR_SSA_FIELD")
 _SSA_CLEANUP_OPS = _SSA_SET_VAR_OPS + ("MLIL_VAR_PHI",)
-
-
-def _walk(expr):
-    return list(expr.traverse(lambda node: node))
-
-
-def mlil_def_roots(mlil, expr):
-    """Instruction indices defining MLIL vars read by ``expr``."""
-    roots = set()
-    for node in _walk(expr):
-        if node.operation.name != "MLIL_VAR":
-            continue
-        try:
-            defs = mlil.get_var_definitions(node.src)
-        except Exception:  # noqa: BLE001
-            continue
-        for definition in defs:
-            if definition.operation.name in _SET_VAR_OPS:
-                roots.add(definition.instr_index)
-    return roots
-
-
-def set_roots_before(mlil, site_addrs):
-    """Contiguous pure assignments immediately before each phase-owned site."""
-    site_addrs = set(site_addrs or ())
-    roots = set()
-    if mlil is None or not site_addrs:
-        return roots
-
-    for block in mlil.basic_blocks:
-        block_instrs = [mlil[i] for i in range(block.start, block.end)]
-        for pos, ins in enumerate(block_instrs):
-            if ins.address not in site_addrs:
-                continue
-            for prev in reversed(block_instrs[:pos]):
-                if prev.operation.name not in _SET_VAR_OPS:
-                    break
-                roots.add(prev.instr_index)
-    return roots
 
 
 def _ssa_def(ssa, var):

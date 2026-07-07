@@ -6,9 +6,10 @@ from .passes.medium.deflatten import apply_redirections_il, compute_redirections
 from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
-from .passes.medium.phase_cleanup import cleanup_decode, set_roots_before
+from .passes.medium.phase_cleanup import cleanup_decode
 from .passes.medium.global_constants import CONST_SLOT_TYPE
 from .passes.medium.string_decrypt import apply_decrypted_string_comments
+from .helpers.mlil import set_roots_before
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,

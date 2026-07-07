@@ -215,6 +215,8 @@ _FAKE_MODULES = {
             cleanup_decode_calls.append((args, kwargs)),
             cleanup_decode_results.pop(0) if cleanup_decode_results else 0,
         )[1],
+    ),
+    "plugins.DispatchThis.helpers.mlil": types.SimpleNamespace(
         set_roots_before=lambda *args, **kwargs: (
             set_roots_before_calls.append((args, kwargs)),
             set_roots_before_results.pop(0) if set_roots_before_results else set(),

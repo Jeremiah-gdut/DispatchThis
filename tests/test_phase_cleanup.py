@@ -31,8 +31,9 @@ class Ins:
 
 
 class NonSSA:
-    def __init__(self, idx):
+    def __init__(self, idx, expr_index=None):
         self.instr_index = idx
+        self.expr_index = expr_index if expr_index is not None else idx
 
 
 class FakeSSA:
@@ -42,6 +43,26 @@ class FakeSSA:
 
     def get_ssa_var_uses(self, var):
         return self.uses.get(var, [])
+
+
+class FakeMLIL:
+    def __init__(self, ssa):
+        self.ssa_form = ssa
+        self.replaced = []
+        self.finalized = False
+
+    def replace_expr(self, expr_index, replacement):
+        self.replaced.append((expr_index, replacement))
+
+    @staticmethod
+    def nop(location):
+        return ("nop", location)
+
+    def finalize(self):
+        self.finalized = True
+
+    def generate_ssa_form(self):
+        pass
 
 
 def test_phi_only_use_does_not_keep_decode_candidate_live():
@@ -94,8 +115,22 @@ def test_stack_var_state_write_keeps_source_live():
     assert kept == set()
 
 
+def test_cleanup_decode_uses_phi_as_connector_but_never_nops_phi():
+    a = Var("a", 1)
+    b = Var("b", 1)
+
+    decode = Ins(10, "MLIL_SET_VAR_SSA", writes=[a], non_ssa=NonSSA(1, 101))
+    phi = Ins(20, "MLIL_VAR_PHI", reads=[a], writes=[b])
+    mlil = FakeMLIL(FakeSSA({a: [phi], b: []}, [decode, phi]))
+
+    assert phase_cleanup.cleanup_decode(mlil, {1, 20}, "call") == 1
+    assert mlil.replaced == [(101, ("nop", ("loc", 101)))]
+    assert mlil.finalized is True
+
+
 if __name__ == "__main__":
     test_phi_only_use_does_not_keep_decode_candidate_live()
     test_phi_chain_with_real_use_keeps_decode_candidate_live()
     test_non_ssa_root_does_not_pull_unrelated_same_index_ssa_instruction()
     test_stack_var_state_write_keeps_source_live()
+    test_cleanup_decode_uses_phi_as_connector_but_never_nops_phi()

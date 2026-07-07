@@ -2,7 +2,7 @@
 
 from binaryninja import ILSourceLocation, MediumLevelILLabel
 
-from .phase_cleanup import mlil_def_roots
+from ...helpers.mlil import cleanup_roots_for_expr, walk_expr
 from ...utils.log import log_info, log_warn
 
 
@@ -10,10 +10,6 @@ U48 = 0xFFFFFFFFFFFF
 U64 = 0xFFFFFFFFFFFFFFFF
 _CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 _LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
-
-
-def _walk(expr):
-    return list(expr.traverse(lambda node: node))
 
 
 def _label(idx):
@@ -101,7 +97,7 @@ def _find_bool_to_int(mlil, expr, seen=None, depth=0):
         return None
     if seen is None:
         seen = set()
-    for node in _walk(expr):
+    for node in walk_expr(expr):
         if node.operation.name == "MLIL_BOOL_TO_INT":
             return node
         var = _var_from_expr(node)
@@ -189,7 +185,7 @@ def _plan_for_jump(bv, mlil, jump_il):
                 "condition": _bool_cond(mlil, bool_expr),
                 "true": true_idx,
                 "false": false_idx,
-                "cleanup_roots": mlil_def_roots(mlil, jump_il.dest),
+                "cleanup_roots": cleanup_roots_for_expr(mlil, jump_il.dest),
             }
 
     join = jump_il.il_basic_block
@@ -222,7 +218,7 @@ def _plan_for_jump(bv, mlil, jump_il):
             "true": true_idx,
             "false": false_idx,
             "cleanup_roots": (
-                mlil_def_roots(mlil, jump_il.dest)
+                cleanup_roots_for_expr(mlil, jump_il.dest)
                 | {true_assign.instr_index, false_assign.instr_index}
             ),
         }
