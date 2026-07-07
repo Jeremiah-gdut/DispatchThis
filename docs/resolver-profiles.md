@@ -151,6 +151,7 @@ from ..helpers import facts, llil, memory, mlil
 This is the stable import surface. Do not import private helper implementation
 details, and do not build profile base classes, pattern DSLs, automatic resolver
 engines, or external profile loaders around the helpers.
+For detailed helper API signatures and behavior, see [`API.md`](API.md).
 
 Use the helper modules by IL level and purpose:
 

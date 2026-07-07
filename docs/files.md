@@ -35,6 +35,7 @@ DispatchThis/
 │       └── REFERENCE_conditional_obb.md   Annotated reference example for the
 │                                          conditional transition handling.
 ├── docs/                       This documentation.
+│   ├── API.md                   Helper API reference for resolver profiles.
 │   ├── resolver-profiles.md     How to add bundled binary resolver profiles.
 │   └── assets/                 README screenshots.
 ├── README.md
