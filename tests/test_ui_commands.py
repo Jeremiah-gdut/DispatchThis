@@ -109,6 +109,38 @@ def test_context_function_uses_plural_containing_function_lookup():
     assert ui._context_function(ctx) == (ctx.binaryView, func)
 
 
+def test_ui_action_falls_back_to_active_ui_context(monkeypatch):
+    bv = FakeBv()
+    func = FakeFunc()
+    action_context = type("ActionContext", (), {"binaryView": bv, "function": func})()
+    empty_context = type("EmptyContext", (), {"binaryView": None, "function": None, "address": 0})()
+
+    class FakeHandler:
+        def actionContext(self):
+            return action_context
+
+    class FakeFrame:
+        def actionHandler(self):
+            return FakeHandler()
+
+    class FakeUIContext:
+        @staticmethod
+        def activeContext():
+            return FakeUIContext()
+
+        def getCurrentViewFrame(self):
+            return FakeFrame()
+
+    binaryninjaui = types.ModuleType("binaryninjaui")
+    binaryninjaui.UIContext = FakeUIContext
+    monkeypatch.setitem(sys.modules, "binaryninjaui", binaryninjaui)
+
+    calls = []
+    ui._ui_action(lambda got_bv, got_func: calls.append((got_bv, got_func)))(empty_context)
+
+    assert calls == [(bv, func)]
+
+
 def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypatch):
     FakePluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)

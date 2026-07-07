@@ -72,7 +72,7 @@ def _register_function_command(name, description, action):
     return True
 
 
-def _context_function(ctx):
+def _context_function_from(ctx):
     bv = getattr(ctx, "binaryView", None)
     func = getattr(ctx, "function", None)
     if func is None and bv is not None:
@@ -85,6 +85,29 @@ def _context_function(ctx):
                 funcs = bv.get_functions_containing(addr)
                 func = funcs[0] if funcs else None
     return bv, func
+
+
+def _current_ui_context_function():
+    try:
+        from binaryninjaui import UIContext
+    except Exception:  # noqa: BLE001
+        return None, None
+    try:
+        context = UIContext.activeContext()
+        frame = context.getCurrentViewFrame() if context is not None else None
+        handler = frame.actionHandler() if frame is not None else None
+        action_context = handler.actionContext() if handler is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log_warn(f"[ui] failed to read active UI context: {exc}")
+        return None, None
+    return _context_function_from(action_context)
+
+
+def _context_function(ctx):
+    bv, func = _context_function_from(ctx)
+    if _valid_function(bv, func):
+        return bv, func
+    return _current_ui_context_function()
 
 
 def _ui_action(action):
