@@ -12,6 +12,11 @@ SHORTCUTS = {
     "DispatchThis\\Disable All": "Ctrl+Alt+X",
 }
 
+SHORTCUT_ACTIONS = {
+    name: name.replace("DispatchThis\\", "DispatchThis\\Shortcuts\\", 1)
+    for name in SHORTCUTS
+}
+
 
 def _settings(settings):
     return settings or Settings()
@@ -134,10 +139,11 @@ def _register_shortcuts(actions):
         shortcut = SHORTCUTS.get(name)
         if shortcut is None:
             continue
+        shortcut_action = SHORTCUT_ACTIONS[name]
         try:
-            UIAction.registerAction(name, QKeySequence(shortcut))
-            handler.bindAction(name, UIAction(_ui_action(action)))
-            registered = bool(UIAction.getKeyBinding(name)) and registered
+            UIAction.registerAction(shortcut_action, QKeySequence(shortcut))
+            handler.bindAction(shortcut_action, UIAction(_ui_action(action)))
+            registered = bool(UIAction.getKeyBinding(shortcut_action)) and registered
         except Exception as exc:  # noqa: BLE001
             log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
             registered = False
@@ -158,13 +164,19 @@ def _retry_shortcuts_on_main_thread(actions):
 
 def _retry_shortcuts_when_ui_ready(actions):
     try:
-        import binaryninjaui  # noqa: F401
         from PySide6.QtCore import QTimer
     except Exception:  # noqa: BLE001
         return False
-    try:
+    execute_on_main_thread = getattr(binaryninja, "execute_on_main_thread", None)
+    if execute_on_main_thread is None:
+        return False
+
+    def schedule():
         for delay in (250, 1000, 3000):
             QTimer.singleShot(delay, lambda actions=actions: _register_shortcuts(actions))
+
+    try:
+        execute_on_main_thread(schedule)
         return True
     except Exception as exc:  # noqa: BLE001
         log_warn(f"[ui] failed to schedule delayed shortcut registration: {exc}")
@@ -210,6 +222,5 @@ def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
         _register_function_command(name, description, action)
         actions[name] = action
 
-    if not _register_shortcuts(actions):
-        _retry_shortcuts_on_main_thread(actions)
-        _retry_shortcuts_when_ui_ready(actions)
+    _retry_shortcuts_on_main_thread(actions)
+    _retry_shortcuts_when_ui_ready(actions)
