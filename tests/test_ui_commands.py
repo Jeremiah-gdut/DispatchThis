@@ -94,53 +94,6 @@ def test_use_profile_updates_view_profile_without_function_settings(monkeypatch)
     assert bv.updated == 1
 
 
-def test_context_function_uses_plural_containing_function_lookup():
-    func = FakeFunc()
-
-    class BvWithContainingList(FakeBv):
-        def get_function_at(self, _addr):
-            return None
-
-        def get_functions_containing(self, addr):
-            return [func] if addr == 0x1001 else []
-
-    ctx = type("Ctx", (), {"binaryView": BvWithContainingList(), "address": 0x1001})()
-
-    assert ui._context_function(ctx) == (ctx.binaryView, func)
-
-
-def test_ui_action_falls_back_to_active_ui_context(monkeypatch):
-    bv = FakeBv()
-    func = FakeFunc()
-    action_context = type("ActionContext", (), {"binaryView": bv, "function": func})()
-    empty_context = type("EmptyContext", (), {"binaryView": None, "function": None, "address": 0})()
-
-    class FakeHandler:
-        def actionContext(self):
-            return action_context
-
-    class FakeFrame:
-        def actionHandler(self):
-            return FakeHandler()
-
-    class FakeUIContext:
-        @staticmethod
-        def activeContext():
-            return FakeUIContext()
-
-        def getCurrentViewFrame(self):
-            return FakeFrame()
-
-    binaryninjaui = types.ModuleType("binaryninjaui")
-    binaryninjaui.UIContext = FakeUIContext
-    monkeypatch.setitem(sys.modules, "binaryninjaui", binaryninjaui)
-
-    calls = []
-    ui._ui_action(lambda got_bv, got_func: calls.append((got_bv, got_func)))(empty_context)
-
-    assert calls == [(bv, func)]
-
-
 def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypatch):
     FakePluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
@@ -157,38 +110,33 @@ def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypa
     assert "DispatchThis\\Disable All" in names
 
 
-def test_register_shortcuts_uses_separate_ui_action_name(monkeypatch):
+def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
     class FakeKeySequence:
         def __init__(self, text):
             self.text = text
 
     class FakeUIAction:
-        registered = {"DispatchThis\\Shortcuts\\Toggle Resolver": None}
-
-        def __init__(self, action):
-            self.action = action
+        registered = {"Selection Target\\DispatchThis\\Toggle Resolver": None}
+        unregistered = []
 
         @classmethod
         def registerAction(cls, name, key_sequence):
             cls.registered[name] = key_sequence.text
 
         @classmethod
+        def isActionRegistered(cls, name):
+            return name == "DispatchThis\\Shortcuts\\Toggle Resolver"
+
+        @classmethod
+        def unregisterAction(cls, name):
+            cls.unregistered.append(name)
+
+        @classmethod
         def getKeyBinding(cls, name):
             return [cls.registered[name]] if cls.registered.get(name) else []
 
-    class FakeUIActionHandler:
-        bound = []
-
-        @classmethod
-        def globalActions(cls):
-            return cls()
-
-        def bindAction(self, name, action):
-            self.bound.append((name, action))
-
     binaryninjaui = types.ModuleType("binaryninjaui")
     binaryninjaui.UIAction = FakeUIAction
-    binaryninjaui.UIActionHandler = FakeUIActionHandler
     qtgui = types.ModuleType("PySide6.QtGui")
     qtgui.QKeySequence = FakeKeySequence
 
@@ -197,8 +145,8 @@ def test_register_shortcuts_uses_separate_ui_action_name(monkeypatch):
     monkeypatch.setitem(sys.modules, "PySide6.QtGui", qtgui)
 
     assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
-    assert FakeUIAction.registered["DispatchThis\\Shortcuts\\Toggle Resolver"] == "Ctrl+Alt+R"
-    assert [name for name, _action in FakeUIActionHandler.bound] == ["DispatchThis\\Shortcuts\\Toggle Resolver"]
+    assert FakeUIAction.registered["Selection Target\\DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+J"
+    assert FakeUIAction.unregistered == ["DispatchThis\\Shortcuts\\Toggle Resolver"]
 
 
 def test_register_ui_commands_retries_shortcuts_on_main_thread(monkeypatch):

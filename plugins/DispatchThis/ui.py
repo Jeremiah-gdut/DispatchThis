@@ -6,15 +6,10 @@ from .utils.log import log_info, log_warn
 
 
 SHORTCUTS = {
-    "DispatchThis\\Toggle Resolver": "Ctrl+Alt+R",
+    "DispatchThis\\Toggle Resolver": "Ctrl+Alt+J",
     "DispatchThis\\Toggle Deflatten": "Ctrl+Alt+D",
     "DispatchThis\\Toggle String Decrypt": "Ctrl+Alt+S",
     "DispatchThis\\Disable All": "Ctrl+Alt+X",
-}
-
-SHORTCUT_ACTIONS = {
-    name: name.replace("DispatchThis\\", "DispatchThis\\Shortcuts\\", 1)
-    for name in SHORTCUTS
 }
 
 
@@ -77,72 +72,24 @@ def _register_function_command(name, description, action):
     return True
 
 
-def _context_function_from(ctx):
-    bv = getattr(ctx, "binaryView", None)
-    func = getattr(ctx, "function", None)
-    if func is None and bv is not None:
-        addr = getattr(ctx, "address", None)
-        if addr is not None:
-            func = bv.get_function_at(addr)
-            if func is None and hasattr(bv, "get_function_containing"):
-                func = bv.get_function_containing(addr)
-            if func is None and hasattr(bv, "get_functions_containing"):
-                funcs = bv.get_functions_containing(addr)
-                func = funcs[0] if funcs else None
-    return bv, func
-
-
-def _current_ui_context_function():
-    try:
-        from binaryninjaui import UIContext
-    except Exception:  # noqa: BLE001
-        return None, None
-    try:
-        context = UIContext.activeContext()
-        frame = context.getCurrentViewFrame() if context is not None else None
-        handler = frame.actionHandler() if frame is not None else None
-        action_context = handler.actionContext() if handler is not None else None
-    except Exception as exc:  # noqa: BLE001
-        log_warn(f"[ui] failed to read active UI context: {exc}")
-        return None, None
-    return _context_function_from(action_context)
-
-
-def _context_function(ctx):
-    bv, func = _context_function_from(ctx)
-    if _valid_function(bv, func):
-        return bv, func
-    return _current_ui_context_function()
-
-
-def _ui_action(action):
-    def wrapped(ctx):
-        bv, func = _context_function(ctx)
-        if not _valid_function(bv, func):
-            log_warn("[ui] DispatchThis shortcut requires an active function")
-            return
-        action(bv, func)
-
-    return wrapped
-
-
 def _register_shortcuts(actions):
     try:
-        from binaryninjaui import UIAction, UIActionHandler
+        from binaryninjaui import UIAction
         from PySide6.QtGui import QKeySequence
     except Exception:  # noqa: BLE001
         return False
 
-    handler = UIActionHandler.globalActions()
     registered = True
-    for name, action in actions.items():
+    for name in actions:
         shortcut = SHORTCUTS.get(name)
         if shortcut is None:
             continue
-        shortcut_action = SHORTCUT_ACTIONS[name]
+        shortcut_action = f"Selection Target\\{name}"
+        stale_action = name.replace("DispatchThis\\", "DispatchThis\\Shortcuts\\", 1)
         try:
+            if UIAction.isActionRegistered(stale_action):
+                UIAction.unregisterAction(stale_action)
             UIAction.registerAction(shortcut_action, QKeySequence(shortcut))
-            handler.bindAction(shortcut_action, UIAction(_ui_action(action)))
             registered = bool(UIAction.getKeyBinding(shortcut_action)) and registered
         except Exception as exc:  # noqa: BLE001
             log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
