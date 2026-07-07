@@ -70,6 +70,10 @@ def load(src, size=8):
     return Expr("MLIL_LOAD", [src], src=src, size=size)
 
 
+def load_struct(src, offset, size=8):
+    return Expr("MLIL_LOAD_STRUCT", [src], src=src, size=size, offset=offset)
+
+
 def set_var(dest, src, instr_index, expr_index=None, address=0x1000):
     expr = Expr(
         "MLIL_SET_VAR",
@@ -138,6 +142,31 @@ def test_walk_expr_and_cleanup_roots_return_instruction_indices():
     assert mlil_helpers.cleanup_roots_for_expr(mlil, expr) == {11, 12}
 
 
+def test_const_address_and_slot_loads_support_global_slot_analysis():
+    slot_load = set_var("slot", load(const(0xA43D70)), instr_index=11)
+    mlil = FakeMlil(defs={"slot": [slot_load]})
+
+    assert (
+        mlil_helpers.constant_address(mlil, add(const(0xA00000), const(0x43D70)))
+        == 0xA43D70
+    )
+    assert mlil_helpers.load_slot_address(mlil, var("slot")) == 0xA43D70
+    assert (
+        mlil_helpers.load_slot_address(mlil, load_struct(const(0xA00000), 0x43D70))
+        == 0xA43D70
+    )
+
+
+def test_mlil_store_detection_matches_constant_slot_destinations():
+    slot_store = Expr("MLIL_STORE", [const(0xA43D70)], dest=const(0xA43D70))
+    other_store = Expr("MLIL_STORE", [const(0xA43D80)], dest=const(0xA43D80))
+
+    assert mlil_helpers.mlil_stores_to_address(
+        FakeMlil([other_store, slot_store]), 0xA43D70
+    )
+    assert not mlil_helpers.mlil_stores_to_address(FakeMlil([other_store]), 0xA43D70)
+
+
 def test_set_roots_before_returns_contiguous_assignment_instruction_indices():
     first = set_var("a", const(1), instr_index=11, expr_index=111, address=0x1000)
     second = set_var("b", const(2), instr_index=12, expr_index=112, address=0x1004)
@@ -159,4 +188,6 @@ if __name__ == "__main__":
     test_peel_var_definitions_tracks_set_var_trail()
     test_fold_constant_value_folds_load_arithmetic_and_value_sets()
     test_walk_expr_and_cleanup_roots_return_instruction_indices()
+    test_const_address_and_slot_loads_support_global_slot_analysis()
+    test_mlil_store_detection_matches_constant_slot_destinations()
     test_set_roots_before_returns_contiguous_assignment_instruction_indices()

@@ -8,13 +8,109 @@ U48 = 0xFFFFFFFFFFFF
 
 CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT")
+LOAD_STRUCT_OPS = ("MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
+SLOT_LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
 SET_VAR_OPS = ("MLIL_SET_VAR", "MLIL_SET_VAR_FIELD")
+STORE_OPS = ("MLIL_STORE", "MLIL_STORE_SSA", "MLIL_STORE_STRUCT", "MLIL_STORE_STRUCT_SSA")
 
 
 def walk_expr(expr):
     if expr is None:
         return []
-    return list(expr.traverse(lambda node: node))
+    try:
+        return list(expr.traverse(lambda node: node))
+    except AttributeError:
+        pass
+
+    out = []
+    seen = set()
+
+    def visit(node):
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        out.append(node)
+        for name in ("src", "dest", "left", "right", "condition"):
+            child = getattr(node, name, None)
+            if hasattr(child, "operation"):
+                visit(child)
+        for name in ("params", "output", "vars_read", "vars_written"):
+            for child in getattr(node, name, ()) or ():
+                if hasattr(child, "operation"):
+                    visit(child)
+
+    visit(expr)
+    return out
+
+
+def _op_name(expr):
+    return getattr(getattr(expr, "operation", None), "name", None)
+
+
+def constant_value(mlil, expr):
+    expr = peel_var_definitions(
+        mlil,
+        expr,
+        max_depth=32,
+        require_single=True,
+        allowed_ops=None,
+    )
+    return expr.constant if _op_name(expr) in CONST_OPS else None
+
+
+def constant_address(mlil, expr, depth=0, max_depth=32):
+    if expr is None or depth > max_depth:
+        return None
+    expr = peel_var_definitions(
+        mlil,
+        expr,
+        max_depth=max_depth,
+        require_single=True,
+        allowed_ops=None,
+    )
+    value = constant_value(mlil, expr)
+    if value is not None:
+        return value & U48
+    op = _op_name(expr)
+    if op in ("MLIL_ADD", "MLIL_SUB"):
+        left = constant_address(mlil, expr.left, depth + 1, max_depth)
+        right = constant_address(mlil, expr.right, depth + 1, max_depth)
+        if left is not None and right is not None:
+            return (left + right if op == "MLIL_ADD" else left - right) & U48
+    return None
+
+
+def load_slot_address(mlil, expr, width=8):
+    expr = peel_var_definitions(
+        mlil,
+        expr,
+        max_depth=32,
+        require_single=True,
+        allowed_ops=None,
+    )
+    op = _op_name(expr)
+    if op not in SLOT_LOAD_OPS or getattr(expr, "size", None) != width:
+        return None
+    addr = constant_address(mlil, expr.src)
+    if addr is None:
+        return None
+    if op in LOAD_STRUCT_OPS:
+        offset = getattr(expr, "offset", 0)
+        if not isinstance(offset, int):
+            return None
+        return (addr + offset) & U48
+    return addr
+
+
+def mlil_stores_to_address(mlil, addr):
+    for ins in getattr(mlil, "instructions", ()) or ():
+        for expr in walk_expr(ins):
+            if (
+                _op_name(expr) in STORE_OPS
+                and constant_address(mlil, getattr(expr, "dest", None)) == addr
+            ):
+                return True
+    return False
 
 
 def iter_indirect_calls(mlil):
@@ -29,7 +125,14 @@ def iter_indirect_calls(mlil):
         yield insn
 
 
-def peel_var_definitions(mlil, expr, trail=None, max_depth=64):
+def peel_var_definitions(
+    mlil,
+    expr,
+    trail=None,
+    max_depth=64,
+    require_single=False,
+    allowed_ops=SET_VAR_OPS,
+):
     """Follow MLIL_VAR through SET_VAR definitions and return the peeled expr."""
     for _ in range(max_depth):
         if expr is None or expr.operation.name != "MLIL_VAR":
@@ -38,11 +141,16 @@ def peel_var_definitions(mlil, expr, trail=None, max_depth=64):
             defs = mlil.get_var_definitions(expr.src)
         except Exception:  # noqa: BLE001
             break
-        if not defs or defs[0].operation.name not in SET_VAR_OPS:
+        if not defs or (require_single and len(defs) != 1):
+            break
+        definition = defs[0]
+        if allowed_ops is not None and definition.operation.name not in allowed_ops:
+            break
+        if not hasattr(definition, "src"):
             break
         if trail is not None:
-            trail.append(defs[0])
-        expr = defs[0].src
+            trail.append(definition)
+        expr = definition.src
     return expr
 
 
@@ -137,11 +245,18 @@ def set_roots_before(mlil, site_addrs):
 
 __all__ = (
     "CONST_OPS",
+    "LOAD_STRUCT_OPS",
     "LOAD_OPS",
     "SET_VAR_OPS",
+    "SLOT_LOAD_OPS",
+    "STORE_OPS",
     "cleanup_roots_for_expr",
+    "constant_address",
+    "constant_value",
     "fold_constant_value",
     "iter_indirect_calls",
+    "load_slot_address",
+    "mlil_stores_to_address",
     "peel_var_definitions",
     "set_roots_before",
     "walk_expr",
