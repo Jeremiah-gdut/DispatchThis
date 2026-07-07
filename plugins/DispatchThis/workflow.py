@@ -85,12 +85,18 @@ def _call_has_fallthrough(mlil, call_il):
     return bool(block.outgoing_edges)
 
 
-def _submit_branch_mutations(bv, func, state, resolved_targets):
+def _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots=None):
+    cleanup_roots = cleanup_roots or {}
     mutations = state.branch_updates_for(resolved_targets)
+    for source, roots in cleanup_roots.items():
+        if source not in mutations:
+            state.set_branch_cleanup_roots(source, roots)
     for source, targets in mutations.items():
         try:
             func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
             changed = state.mark_branch_applied(source, targets)
+            if source in cleanup_roots:
+                state.set_branch_cleanup_roots(source, cleanup_roots[source])
             if changed:
                 log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
         except Exception as e:  # noqa: BLE001
@@ -123,7 +129,8 @@ def _resolve_pending_branches_from_function_llil(ctx, state):
     plan = active_profile(bv).resolve_branch_gadget(bv, llil, state.branch_targets())
     _remove_plan_target_user_functions(bv, func, plan)
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
+    cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
+    mutations = _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots)
     if mutations:
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
         return True
@@ -165,7 +172,8 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     _remove_plan_target_user_functions(bv, func, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
+    cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
+    mutations = _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots)
 
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
     if mutations:
@@ -273,7 +281,8 @@ def translate_branches_mlil(ctx: AnalysisContext):
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
     cleaned = 0
     branch_cleanup_needed = state.branch_cleanup_needed()
-    if branch_cleanup_needed or state.branch_receipts:
+    if branch_cleanup_needed or state.branch_receipts or state.branch_cleanup_roots:
+        cleanup_roots.update(state.branch_cleanup_root_indices())
         cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
         cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
         if cleaned:

@@ -10,6 +10,7 @@ def _fresh_state():
         "branch": {
             "stable": False,
             "receipts": {},
+            "cleanup_roots": {},
             "cleanup_done": False,
             "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
@@ -35,6 +36,14 @@ def _targets_tuple(targets):
     return tuple(sorted(set(targets)))
 
 
+def _int_set(values):
+    if values is None:
+        return set()
+    if isinstance(values, int):
+        return {values}
+    return set(values)
+
+
 def _user_branch_targets(func):
     by_source = {}
     for branch in getattr(func, "indirect_branches", ()):
@@ -52,6 +61,10 @@ def _normalize_state(data):
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
+    branch["cleanup_roots"] = {
+        source: _int_set(roots)
+        for source, roots in branch.setdefault("cleanup_roots", {}).items()
+    }
     branch.setdefault("cleanup_done", False)
     if branch.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
         branch["cleanup_done"] = False
@@ -92,6 +105,16 @@ class FunctionWorkflowState:
     def branch_targets(self):
         return {source: _targets_tuple(targets) for source, targets in self.branch_receipts.items()}
 
+    @property
+    def branch_cleanup_roots(self):
+        return self.data["branch"]["cleanup_roots"]
+
+    def branch_cleanup_root_indices(self):
+        roots = set()
+        for root_set in self.branch_cleanup_roots.values():
+            roots.update(root_set)
+        return roots
+
     def seed_branch_receipts(self, func=None):
         """Import existing user indirect-branch metadata as branch receipts.
 
@@ -127,10 +150,23 @@ class FunctionWorkflowState:
         if previous == targets:
             return False
         self.branch_receipts[source] = targets
+        self.branch_cleanup_roots.pop(source, None)
         self.data["branch"]["stable"] = False
         self.data["branch"]["cleanup_done"] = False
         self.invalidate_calls()
         return previous is not None
+
+    def set_branch_cleanup_roots(self, source, cleanup_roots):
+        roots = _int_set(cleanup_roots)
+        previous = self.branch_cleanup_roots.get(source, set())
+        if previous == roots:
+            return False
+        if roots:
+            self.branch_cleanup_roots[source] = roots
+        else:
+            self.branch_cleanup_roots.pop(source, None)
+        self.data["branch"]["cleanup_done"] = False
+        return True
 
     def mark_branch_stable(self):
         self.data["branch"]["stable"] = True

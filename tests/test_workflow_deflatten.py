@@ -75,6 +75,7 @@ def fake_active_profile(bv):
 
 class FakeWorkflowState:
     receipts = {}
+    branch_cleanup_root_map = {}
     unmapped = set()
     marked_stable = False
     stable = False
@@ -113,6 +114,16 @@ class FakeWorkflowState:
     def branch_receipts(self):
         return FakeWorkflowState.receipts
 
+    @property
+    def branch_cleanup_roots(self):
+        return FakeWorkflowState.branch_cleanup_root_map
+
+    def branch_cleanup_root_indices(self):
+        roots = set()
+        for root_set in FakeWorkflowState.branch_cleanup_root_map.values():
+            roots.update(root_set)
+        return roots
+
     def branch_updates_for(self, _resolved_targets):
         return self.updates
 
@@ -128,6 +139,18 @@ class FakeWorkflowState:
 
     def invalidate_branch_cleanup(self):
         FakeWorkflowState.branch_cleanup = True
+
+    def set_branch_cleanup_roots(self, source, cleanup_roots):
+        roots = set(cleanup_roots or ())
+        previous = FakeWorkflowState.branch_cleanup_root_map.get(source, set())
+        if previous == roots:
+            return False
+        if roots:
+            FakeWorkflowState.branch_cleanup_root_map[source] = roots
+        else:
+            FakeWorkflowState.branch_cleanup_root_map.pop(source, None)
+        FakeWorkflowState.branch_cleanup = True
+        return True
 
     def mark_branch_applied(self, source, targets):
         FakeWorkflowState.applied.append((source, targets))
@@ -325,6 +348,7 @@ def test_deflatten_waits_for_global_phase_stability():
 
 def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     FakeWorkflowState.receipts = {0x1000: (0x2000, 0x3000)}
+    FakeWorkflowState.branch_cleanup_root_map = {}
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
@@ -347,8 +371,43 @@ def test_branch_resolver_reuses_branch_receipts_as_known_targets():
     assert "dispatchthis_gadget_map" not in ctx.view.session_data
 
 
+def test_branch_resolver_records_profile_cleanup_roots_without_target_mutation():
+    FakeWorkflowState.branch_cleanup_root_map = {}
+    FakeWorkflowState.updates = {}
+    ctx = FakeContext()
+    state = FakeWorkflowState(ctx.function)
+
+    workflow._submit_branch_mutations(
+        ctx.view,
+        ctx.function,
+        state,
+        {0x1000: (0x2000, 0x3000)},
+        {0x1000: {31, 32}},
+    )
+
+    assert FakeWorkflowState.branch_cleanup_root_map == {0x1000: {31, 32}}
+
+
+def test_branch_resolver_preserves_cleanup_roots_when_fact_omits_optional_field():
+    FakeWorkflowState.branch_cleanup_root_map = {0x1000: {31, 32}}
+    FakeWorkflowState.updates = {}
+    ctx = FakeContext()
+    state = FakeWorkflowState(ctx.function)
+
+    workflow._submit_branch_mutations(
+        ctx.view,
+        ctx.function,
+        state,
+        {0x1000: (0x2000, 0x3000)},
+        {},
+    )
+
+    assert FakeWorkflowState.branch_cleanup_root_map == {0x1000: {31, 32}}
+
+
 def test_branch_resolver_removes_target_user_functions_from_workflow_layer():
     FakeWorkflowState.receipts = {}
+    FakeWorkflowState.branch_cleanup_root_map = {}
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
@@ -672,6 +731,7 @@ def test_branch_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.branch_cleanup = False
     FakeWorkflowState.receipts = {}
+    FakeWorkflowState.branch_cleanup_root_map = {}
     FakeWorkflowState.branch_cleanup_marked = False
     cleanup_decode_calls.clear()
     ctx = FakeContext()
@@ -691,6 +751,7 @@ def test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil():
     FakeWorkflowState.branch_cleanup = False
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
     cleanup_decode_results[:] = [1]
     set_roots_before_results[:] = [{21621}]
@@ -705,6 +766,41 @@ def test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil():
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.receipts = {}
+    cleanup_decode_results.clear()
+    set_roots_before_results.clear()
+
+
+def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_marked = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    FakeWorkflowState.branch_cleanup_root_map = {0x8DB6F8: {31, 32}}
+    cleanup_decode_calls.clear()
+    cleanup_decode_results[:] = [0]
+    set_roots_before_results[:] = [{21621}]
+    translated = []
+    old_translate = workflow.translate_indirect_branch_conditions
+    workflow.translate_indirect_branch_conditions = lambda bv, mlil: (
+        translated.append((bv, mlil)),
+        (mlil, 1, {44}),
+    )[1]
+    ctx = FakeContext()
+
+    try:
+        workflow.translate_branches_mlil(ctx)
+    finally:
+        workflow.translate_indirect_branch_conditions = old_translate
+
+    assert translated == [(ctx.view, ctx.mlil)]
+    assert cleanup_decode_calls == [((ctx.mlil, {31, 32, 44, 21621}, "branch"), {})]
+    assert FakeWorkflowState.branch_cleanup_marked is True
+    assert ctx.committed is True
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_results.clear()
     set_roots_before_results.clear()
 
@@ -904,6 +1000,8 @@ if __name__ == "__main__":
     test_deflatten_workflow_runs_without_branch_mirror_state()
     test_deflatten_waits_for_global_phase_stability()
     test_branch_resolver_reuses_branch_receipts_as_known_targets()
+    test_branch_resolver_records_profile_cleanup_roots_without_target_mutation()
+    test_branch_resolver_preserves_cleanup_roots_when_fact_omits_optional_field()
     test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
     test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
     test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
@@ -916,6 +1014,7 @@ if __name__ == "__main__":
     test_call_cleanup_retries_after_current_mlil_was_changed()
     test_branch_cleanup_respects_one_shot_receipt()
     test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil()
+    test_branch_cleanup_merges_profile_translation_and_fallback_roots()
     test_global_resolver_uses_active_profile_without_workflow_state()
     test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()

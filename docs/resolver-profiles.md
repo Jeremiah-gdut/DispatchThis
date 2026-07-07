@@ -185,12 +185,14 @@ missing. No-op hooks are valid.
     "dest_expr_index": 42,
     "targets": (0x2000, 0x3000),
     "newly_resolved": True,
+    "cleanup_roots": {123, 124},
 }
 ```
 
 `source` is the indirect branch address. `targets` must contain valid target
 addresses. `dest_expr_index` is used only for current-LLIL presentation rewrites;
-workflow owns `Function.set_user_indirect_branches`.
+workflow owns `Function.set_user_indirect_branches`. `cleanup_roots` is optional
+and must contain instruction indices rooted in branch-target decode garbage.
 
 `resolve_call_gadget(bv, mlil)` returns call facts:
 

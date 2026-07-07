@@ -140,6 +140,25 @@ def test_existing_user_branch_metadata_seeds_branch_receipts():
     assert state.branch_updates_for({0x4000: (0x5000,)}) == {0x4000: (0x5000,)}
 
 
+def test_branch_cleanup_roots_are_tracked_as_instruction_indices():
+    state = FunctionWorkflowState(FakeFunction())
+    state.mark_branch_applied(0x1000, (0x2000, 0x3000))
+    state.mark_branch_cleanup_done()
+
+    assert state.set_branch_cleanup_roots(0x1000, [12, 11, 12]) is True
+    assert state.branch_targets() == {0x1000: (0x2000, 0x3000)}
+    assert state.branch_cleanup_root_indices() == {11, 12}
+    assert state.branch_cleanup_needed()
+
+    state.mark_branch_cleanup_done()
+    assert state.set_branch_cleanup_roots(0x1000, [11, 12]) is False
+    assert not state.branch_cleanup_needed()
+
+    state.mark_branch_applied(0x1000, (0x4000,))
+    assert state.branch_cleanup_root_indices() == set()
+    assert state.branch_cleanup_needed()
+
+
 def test_stale_branch_receipts_reapply_when_bn_metadata_is_missing():
     func = FakeFunction()
     state = FunctionWorkflowState(func)
@@ -216,6 +235,7 @@ if __name__ == "__main__":
     test_global_phase_invalidates_on_new_phase_work()
     test_global_slot_changes_invalidate_phase_cleanup_receipts()
     test_existing_user_branch_metadata_seeds_branch_receipts()
+    test_branch_cleanup_roots_are_tracked_as_instruction_indices()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()
     test_old_cleanup_receipts_are_invalidated_once()

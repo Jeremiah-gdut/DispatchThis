@@ -42,13 +42,16 @@ def _int_set(name, values):
         raise MalformedRecoveryFact(f"{name} must be an iterable of integers") from exc
 
 
-def branch_fact(source, dest_expr_index, targets, newly_resolved=True):
-    return {
+def branch_fact(source, dest_expr_index, targets, newly_resolved=True, cleanup_roots=None):
+    fact = {
         "source": _require_int("source", source),
         "dest_expr_index": _require_int("dest_expr_index", dest_expr_index),
         "targets": _targets(targets),
         "newly_resolved": bool(newly_resolved),
     }
+    if cleanup_roots is not None:
+        fact["cleanup_roots"] = _int_set("cleanup_roots", cleanup_roots)
+    return fact
 
 
 def call_fact(call_il, target, decode_def=None, cleanup_roots=None, call_addr=None):

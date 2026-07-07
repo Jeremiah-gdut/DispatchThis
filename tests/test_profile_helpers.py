@@ -106,6 +106,13 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
         "targets": (0x2000, 0x3000),
         "newly_resolved": True,
     }
+    assert facts.branch_fact(0x1000, 7, [0x2000], cleanup_roots=[12, 11, 12]) == {
+        "source": 0x1000,
+        "dest_expr_index": 7,
+        "targets": (0x2000,),
+        "newly_resolved": True,
+        "cleanup_roots": {11, 12},
+    }
     assert facts.call_fact(call_il, 0x5000, decode_def=decode_def, cleanup_roots=[2, 1, 2]) == {
         "call_il": call_il,
         "call_addr": 0x4000,
@@ -133,6 +140,8 @@ def test_fact_builders_reject_malformed_required_fields():
 
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
         facts.branch_fact(0x1000, 7, [])
+    with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
+        facts.branch_fact(0x1000, 7, [0x2000], cleanup_roots=1)
     with pytest.raises(facts.MalformedRecoveryFact, match="call_il"):
         facts.call_fact(None, 0x5000)
     with pytest.raises(facts.MalformedRecoveryFact, match="call_addr"):
