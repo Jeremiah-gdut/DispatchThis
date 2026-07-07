@@ -6,10 +6,10 @@ from .utils.log import log_info, log_warn
 
 
 SHORTCUTS = {
-    "DispatchThis\\Toggle Resolver": "Ctrl+Alt+Shift+R",
-    "DispatchThis\\Toggle Deflatten": "Ctrl+Alt+Shift+D",
-    "DispatchThis\\Toggle String Decrypt": "Ctrl+Alt+Shift+S",
-    "DispatchThis\\Disable All": "Ctrl+Alt+Shift+X",
+    "DispatchThis\\Toggle Resolver": "Ctrl+Alt+R",
+    "DispatchThis\\Toggle Deflatten": "Ctrl+Alt+D",
+    "DispatchThis\\Toggle String Decrypt": "Ctrl+Alt+S",
+    "DispatchThis\\Disable All": "Ctrl+Alt+X",
 }
 
 

@@ -91,9 +91,8 @@ target function open, right-click inside the function and use:
 - **DispatchThis ▸ Disable All** - disables all DispatchThis function toggles for
   the current function.
 
-Default shortcuts are `Ctrl+Alt+Shift+R` for Resolver, `Ctrl+Alt+Shift+D` for
-Deflatten, `Ctrl+Alt+Shift+S` for String Decrypt, and `Ctrl+Alt+Shift+X` for
-Disable All.
+Default shortcuts are `Ctrl+Alt+R` for Resolver, `Ctrl+Alt+D` for Deflatten,
+`Ctrl+Alt+S` for String Decrypt, and `Ctrl+Alt+X` for Disable All.
 
 The passes are enabled per-function from the **Function Settings** context menu. With the target function open in a disassembly or graph view, **right-click anywhere inside the function** and choose **Function Settings**. Three plugin entries appear:
 

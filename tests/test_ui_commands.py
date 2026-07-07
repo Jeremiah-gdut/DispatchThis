@@ -161,5 +161,5 @@ def test_register_shortcuts_sets_key_for_pre_registered_plugin_command(monkeypat
     monkeypatch.setitem(sys.modules, "PySide6.QtGui", qtgui)
 
     assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
-    assert FakeUIAction.registered["DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+Shift+R"
+    assert FakeUIAction.registered["DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+R"
     assert [name for name, _action in FakeUIActionHandler.bound] == ["DispatchThis\\Toggle Resolver"]
