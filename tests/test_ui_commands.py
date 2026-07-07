@@ -1,4 +1,6 @@
 import binaryninja
+import sys
+import types
 
 from conftest import load_plugin_module
 
@@ -121,3 +123,43 @@ def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypa
     assert "DispatchThis\\Toggle Deflatten" in names
     assert "DispatchThis\\Toggle String Decrypt" in names
     assert "DispatchThis\\Disable All" in names
+
+
+def test_register_shortcuts_sets_key_for_pre_registered_plugin_command(monkeypatch):
+    class FakeKeySequence:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeUIAction:
+        registered = {"DispatchThis\\Toggle Resolver": None}
+
+        def __init__(self, action):
+            self.action = action
+
+        @classmethod
+        def registerAction(cls, name, key_sequence):
+            cls.registered[name] = key_sequence.text
+
+    class FakeUIActionHandler:
+        bound = []
+
+        @classmethod
+        def globalActions(cls):
+            return cls()
+
+        def bindAction(self, name, action):
+            self.bound.append((name, action))
+
+    binaryninjaui = types.ModuleType("binaryninjaui")
+    binaryninjaui.UIAction = FakeUIAction
+    binaryninjaui.UIActionHandler = FakeUIActionHandler
+    qtgui = types.ModuleType("PySide6.QtGui")
+    qtgui.QKeySequence = FakeKeySequence
+
+    monkeypatch.setitem(sys.modules, "binaryninjaui", binaryninjaui)
+    monkeypatch.setitem(sys.modules, "PySide6", types.ModuleType("PySide6"))
+    monkeypatch.setitem(sys.modules, "PySide6.QtGui", qtgui)
+
+    assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
+    assert FakeUIAction.registered["DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+Shift+R"
+    assert [name for name, _action in FakeUIActionHandler.bound] == ["DispatchThis\\Toggle Resolver"]

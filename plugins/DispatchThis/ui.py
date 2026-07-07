@@ -111,8 +111,7 @@ def _register_shortcuts(actions):
         if shortcut is None:
             continue
         try:
-            if not UIAction.isActionRegistered(name):
-                UIAction.registerAction(name, QKeySequence(shortcut))
+            UIAction.registerAction(name, QKeySequence(shortcut))
             handler.bindAction(name, UIAction(_ui_action(action)))
         except Exception as exc:  # noqa: BLE001
             log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
