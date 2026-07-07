@@ -172,6 +172,10 @@ def test_register_shortcuts_sets_key_for_pre_registered_plugin_command(monkeypat
         def registerAction(cls, name, key_sequence):
             cls.registered[name] = key_sequence.text
 
+        @classmethod
+        def getKeyBinding(cls, name):
+            return [cls.registered[name]] if cls.registered.get(name) else []
+
     class FakeUIActionHandler:
         bound = []
 
@@ -195,3 +199,30 @@ def test_register_shortcuts_sets_key_for_pre_registered_plugin_command(monkeypat
     assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
     assert FakeUIAction.registered["DispatchThis\\Toggle Resolver"] == "Ctrl+Alt+R"
     assert [name for name, _action in FakeUIActionHandler.bound] == ["DispatchThis\\Toggle Resolver"]
+
+
+def test_register_ui_commands_retries_shortcuts_on_main_thread(monkeypatch):
+    FakePluginCommand.registered = []
+    scheduled = []
+    calls = []
+
+    monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
+    monkeypatch.setattr(
+        binaryninja,
+        "execute_on_main_thread",
+        lambda callback: scheduled.append(callback),
+        raising=False,
+    )
+
+    def register_shortcuts(actions):
+        calls.append(actions)
+        return len(calls) > 1
+
+    monkeypatch.setattr(ui, "_register_shortcuts", register_shortcuts)
+
+    ui.register_ui_commands("resolve", "deflatten", "string")
+
+    assert len(calls) == 1
+    assert len(scheduled) == 1
+    scheduled[0]()
+    assert len(calls) == 2

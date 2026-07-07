@@ -129,6 +129,7 @@ def _register_shortcuts(actions):
         return False
 
     handler = UIActionHandler.globalActions()
+    registered = True
     for name, action in actions.items():
         shortcut = SHORTCUTS.get(name)
         if shortcut is None:
@@ -136,9 +137,23 @@ def _register_shortcuts(actions):
         try:
             UIAction.registerAction(name, QKeySequence(shortcut))
             handler.bindAction(name, UIAction(_ui_action(action)))
+            registered = bool(UIAction.getKeyBinding(name)) and registered
         except Exception as exc:  # noqa: BLE001
             log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
-    return True
+            registered = False
+    return registered
+
+
+def _retry_shortcuts_on_main_thread(actions):
+    execute_on_main_thread = getattr(binaryninja, "execute_on_main_thread", None)
+    if execute_on_main_thread is None:
+        return False
+    try:
+        execute_on_main_thread(lambda: _register_shortcuts(actions))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log_warn(f"[ui] failed to schedule shortcut registration retry: {exc}")
+        return False
 
 
 def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
@@ -180,4 +195,5 @@ def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
         _register_function_command(name, description, action)
         actions[name] = action
 
-    _register_shortcuts(actions)
+    if not _register_shortcuts(actions):
+        _retry_shortcuts_on_main_thread(actions)
