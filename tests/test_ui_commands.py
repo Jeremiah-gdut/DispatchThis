@@ -226,3 +226,37 @@ def test_register_ui_commands_retries_shortcuts_on_main_thread(monkeypatch):
     assert len(scheduled) == 1
     scheduled[0]()
     assert len(calls) == 2
+
+
+def test_register_ui_commands_retries_shortcuts_when_ui_ready(monkeypatch):
+    FakePluginCommand.registered = []
+    scheduled = []
+    calls = []
+
+    monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
+    monkeypatch.setattr(ui, "_retry_shortcuts_on_main_thread", lambda _actions: False)
+
+    def register_shortcuts(actions):
+        calls.append(actions)
+        return False
+
+    class FakeTimer:
+        @staticmethod
+        def singleShot(delay, callback):
+            scheduled.append((delay, callback))
+
+    binaryninjaui = types.ModuleType("binaryninjaui")
+    qtcore = types.ModuleType("PySide6.QtCore")
+    qtcore.QTimer = FakeTimer
+
+    monkeypatch.setattr(ui, "_register_shortcuts", register_shortcuts)
+    monkeypatch.setitem(sys.modules, "binaryninjaui", binaryninjaui)
+    monkeypatch.setitem(sys.modules, "PySide6", types.ModuleType("PySide6"))
+    monkeypatch.setitem(sys.modules, "PySide6.QtCore", qtcore)
+
+    ui.register_ui_commands("resolve", "deflatten", "string")
+
+    assert len(calls) == 1
+    assert [delay for delay, _callback in scheduled] == [250, 1000, 3000]
+    scheduled[0][1]()
+    assert len(calls) == 2

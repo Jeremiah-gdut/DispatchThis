@@ -156,6 +156,21 @@ def _retry_shortcuts_on_main_thread(actions):
         return False
 
 
+def _retry_shortcuts_when_ui_ready(actions):
+    try:
+        import binaryninjaui  # noqa: F401
+        from PySide6.QtCore import QTimer
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        for delay in (250, 1000, 3000):
+            QTimer.singleShot(delay, lambda actions=actions: _register_shortcuts(actions))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log_warn(f"[ui] failed to schedule delayed shortcut registration: {exc}")
+        return False
+
+
 def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
     setting_actions = {
         "DispatchThis\\Toggle Resolver": (
@@ -197,3 +212,4 @@ def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
 
     if not _register_shortcuts(actions):
         _retry_shortcuts_on_main_thread(actions)
+        _retry_shortcuts_when_ui_ready(actions)
