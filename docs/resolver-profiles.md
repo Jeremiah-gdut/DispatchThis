@@ -133,6 +133,83 @@ task is explicitly to fix the current default binary. Reuse default by calling
 its hooks. Widening default behavior for a new binary risks regressing the
 existing default binary.
 
+## Helper authoring path
+
+Profile helpers are inspection primitives, not a resolver engine. A resolver
+profile still owns binary-specific recognition, target formulas, and the recovery
+facts it returns. The recovery backend owns CFG recovery, call-target
+application, global slot typing, branch condition translation, IL rewrites, phase
+receipts, and cleanup application.
+
+Bundled profiles should import helper modules at module level and call through
+the module names:
+
+```python
+from ..helpers import facts, llil, memory, mlil
+```
+
+This is the stable import surface. Do not import private helper implementation
+details, and do not build profile base classes, pattern DSLs, automatic resolver
+engines, or external profile loaders around the helpers.
+
+Use the helper modules by IL level and purpose:
+
+- `llil`: indirect-jump iteration, register definition peeling, and
+  `const_values` for PHI-aware constant candidate sets.
+- `mlil`: indirect-call iteration, variable definition peeling, single-value
+  constant folding, expression walking, address/slot extraction, store checks,
+  and cleanup-root discovery.
+- `memory`: explicit-width little-endian reads, section checks, and target or
+  address validation.
+- `facts`: branch, call, global constant, and string decrypt recovery-fact
+  builders.
+
+Keep hook code focused on the binary shape. For example, an indirect-call hook
+may use MLIL helpers to find a candidate and facts helpers to build the result,
+but it should leave call type adjustment and cleanup to workflow:
+
+```python
+def resolve_call_gadget(bv, mlil_func):
+    out = []
+    for call_il in mlil.iter_indirect_calls(mlil_func):
+        target = mlil.fold_constant_value(bv, mlil_func, call_il.dest)
+        if target is None or not memory.is_call_target(bv, target):
+            continue
+        roots = mlil.cleanup_roots_for_expr(mlil_func, call_il.dest)
+        out.append(facts.call_fact(call_il, target, cleanup_roots=roots))
+    return out
+```
+
+Cleanup roots are instruction-index sets. They identify top-level IL
+instructions that belong to the profile's decode slice, such as assignment
+instructions feeding a recovered branch or call target. Expression indices are
+backend replacement details used only at the final `replace_expr` site, after the
+backend has mapped current SSA/non-SSA IL and decided whether cleanup is safe.
+
+`llil.const_values(bv, ssa, expr)` returns a set of concrete candidates, not a
+single value. An empty set means the helper could not recover a concrete value;
+multiple values mean the expression has multiple viable candidates, often from a
+PHI or live-edge case. If a profile formula needs exactly one table base, key, or
+offset, enforce that at the call site:
+
+```python
+offsets = llil.const_values(bv, ssa, offset_expr)
+if len(offsets) != 1:
+    return []
+offset = next(iter(offsets))
+```
+
+Global constant helpers provide inspection primitives. They can walk MLIL,
+extract constant slot addresses, read qword slots, check sections, detect stores,
+and build global constant facts, but the profile or pass still decides which
+slot-use shapes, offsets, sections, and resolved addresses are valid. Do not move
+an automatic global-constant planner into `helpers`.
+
+String decrypt and deflatten internals are not part of the first helper
+migration. A profile may implement the existing `plan_string_decrypt_calls` hook,
+but decrypt-function recognition and deflatten state-machine rewriting remain
+backend internals unless a later task explicitly extracts helpers for them.
+
 ## When adaptation fails
 
 Escalate in this order:

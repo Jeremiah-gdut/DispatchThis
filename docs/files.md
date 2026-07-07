@@ -13,6 +13,12 @@ DispatchThis/
 ├── profiles/
 │   ├── __init__.py             Bundled resolver profile registry and contract validation.
 │   └── default.py              Built-in resolver profile for the current binary.
+├── helpers/
+│   ├── __init__.py             Stable profile-helper import surface.
+│   ├── llil.py                 LLIL indirect-jump, definition, and constant helpers.
+│   ├── mlil.py                 MLIL call-target, slot, store, and cleanup-root helpers.
+│   ├── memory.py               BinaryView memory, section, and target validation helpers.
+│   └── facts.py                Recovery fact builders for resolver profiles and passes.
 ├── utils/
 │   └── log.py                  Shared "DispatchThis" logger.
 ├── passes/
@@ -59,6 +65,12 @@ the current indirect branch, indirect call, global constant, and string decrypt
 resolver behavior behind the resolver profile contract. See
 [`resolver-profiles.md`](resolver-profiles.md) before adding a new binary
 profile.
+
+### `helpers/`
+Stable profile-helper modules for reusable BNIL and BinaryView inspection:
+`llil`, `mlil`, `memory`, and `facts`. Helpers reduce repeated profile code, but
+profiles still own binary-specific recognition; the recovery backend owns Binary
+Ninja mutations, phase receipts, IL rewrites, and cleanup application.
 
 ### `passes/low/gadget_llil.py`
 Parses decode-gadget `jump(reg)` and tail-call forms, recovers table slots, table-base
