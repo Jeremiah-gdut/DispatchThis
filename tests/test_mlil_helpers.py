@@ -142,6 +142,18 @@ def test_walk_expr_and_cleanup_roots_return_instruction_indices():
     assert mlil_helpers.cleanup_roots_for_expr(mlil, expr) == {11, 12}
 
 
+def test_walk_expr_with_defs_expands_variable_definitions():
+    definition = set_var("tmp", add(const(1), const(2)), instr_index=11)
+    mlil = FakeMlil(defs={"tmp": [definition]})
+
+    assert [node.operation.name for node in mlil_helpers.walk_expr_with_defs(mlil, var("tmp"))] == [
+        "MLIL_VAR",
+        "MLIL_ADD",
+        "MLIL_CONST_PTR",
+        "MLIL_CONST_PTR",
+    ]
+
+
 def test_const_address_and_slot_loads_support_global_slot_analysis():
     slot_load = set_var("slot", load(const(0xA43D70)), instr_index=11)
     mlil = FakeMlil(defs={"slot": [slot_load]})
@@ -154,6 +166,23 @@ def test_const_address_and_slot_loads_support_global_slot_analysis():
     assert (
         mlil_helpers.load_slot_address(mlil, load_struct(const(0xA00000), 0x43D70))
         == 0xA43D70
+    )
+
+
+def test_load_slot_offsets_follows_variable_offsets():
+    slot_load = set_var("slot", load(const(0xA43D70)), instr_index=11, address=0x1000)
+    base = set_var("base", add(var("slot"), const(0x20)), instr_index=12, address=0x1004)
+    use = load(add(var("base"), const(4)))
+    use.address = 0x1008
+    mlil = FakeMlil([slot_load, base, use], {"slot": [slot_load], "base": [base]})
+
+    assert mlil_helpers.load_slot_offsets(
+        mlil,
+        add(var("base"), const(4)),
+        address_mask=0xFFFFFFFFFFFF,
+    ) == [(0xA43D70, 0x24)]
+    assert (use.src, 0x1008, 0xA43D70, 0x24) in list(
+        mlil_helpers.iter_load_slot_offsets(mlil, address_mask=0xFFFFFFFFFFFF)
     )
 
 
@@ -218,6 +247,8 @@ if __name__ == "__main__":
     test_peel_var_definitions_tracks_set_var_trail()
     test_fold_constant_value_folds_load_arithmetic_and_value_sets()
     test_walk_expr_and_cleanup_roots_return_instruction_indices()
+    test_walk_expr_with_defs_expands_variable_definitions()
     test_const_address_and_slot_loads_support_global_slot_analysis()
+    test_load_slot_offsets_follows_variable_offsets()
     test_mlil_store_detection_matches_constant_slot_destinations()
     test_set_roots_before_returns_contiguous_assignment_instruction_indices()

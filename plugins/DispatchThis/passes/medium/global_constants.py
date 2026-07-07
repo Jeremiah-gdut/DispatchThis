@@ -2,73 +2,12 @@
 
 from ...helpers.facts import global_constant_fact
 from ...helpers.memory import in_section, is_valid_target, read_qword_slot
-from ...helpers.mlil import (
-    constant_value,
-    load_slot_address,
-    mlil_stores_to_address,
-    peel_var_definitions,
-    walk_expr,
-)
+from ...helpers.mlil import iter_load_slot_offsets, mlil_stores_to_address
 from ...utils.log import log_info, log_warn
 
 
 U48 = 0xFFFFFFFFFFFF
 CONST_SLOT_TYPE = "uint8_t const* const"
-
-
-def _slot_uses(mlil):
-    for ins in getattr(mlil, "instructions", ()) or ():
-        ins_addr = getattr(ins, "address", 0)
-        for expr in walk_expr(ins):
-            yield expr, getattr(expr, "address", ins_addr)
-
-
-def _op(expr):
-    return getattr(getattr(expr, "operation", None), "name", None)
-
-
-def _signed_const(value):
-    return value - (1 << 64) if value > 0x7FFFFFFFFFFFFFFF else value
-
-
-def _slot_offsets(mlil, expr, depth=0):
-    if depth > 32:
-        return []
-    expr = peel_var_definitions(
-        mlil,
-        expr,
-        max_depth=32,
-        require_single=True,
-        allowed_ops=None,
-    )
-    slot_addr = load_slot_address(mlil, expr, address_mask=U48)
-    if slot_addr is not None:
-        return [(slot_addr, 0)]
-
-    op = _op(expr)
-    if op not in ("MLIL_ADD", "MLIL_SUB"):
-        return []
-
-    out = []
-    right_const = constant_value(mlil, expr.right)
-    if right_const is not None:
-        signed = _signed_const(right_const)
-        addend = signed if op == "MLIL_ADD" else -signed
-        out.extend(
-            (slot, offset + addend)
-            for slot, offset in _slot_offsets(mlil, expr.left, depth + 1)
-        )
-
-    if op == "MLIL_ADD":
-        left_const = constant_value(mlil, expr.left)
-        if left_const is not None:
-            addend = _signed_const(left_const)
-            out.extend(
-                (slot, offset + addend)
-                for slot, offset in _slot_offsets(mlil, expr.right, depth + 1)
-            )
-
-    return out
 
 
 def _plain_ptr_var(bv, addr):
@@ -134,13 +73,12 @@ def plan_global_constant_slots(bv, mlil):
         return []
 
     plans = {}
-    for expr, use_addr in _slot_uses(mlil):
-        for slot_addr, offset in _slot_offsets(mlil, expr):
-            if slot_addr in plans:
-                continue
-            plan = _plan_for_slot(bv, mlil, slot_addr, offset, use_addr)
-            if plan is not None:
-                plans[slot_addr] = plan
+    for _expr, use_addr, slot_addr, offset in iter_load_slot_offsets(mlil, address_mask=U48):
+        if slot_addr in plans:
+            continue
+        plan = _plan_for_slot(bv, mlil, slot_addr, offset, use_addr)
+        if plan is not None:
+            plans[slot_addr] = plan
 
     out = [plans[addr] for addr in sorted(plans)]
     if out:

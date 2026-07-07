@@ -46,10 +46,20 @@ class CapturedSettings:
         pass
 
 
+class CapturedPluginCommand:
+    registered = []
+
+    @classmethod
+    def register_for_function(cls, name, description, action, is_valid=None):
+        cls.registered.append((name, description, action, is_valid))
+
+
 def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monkeypatch):
     monkeypatch.setattr(binaryninja, "Activity", CapturedActivity)
     monkeypatch.setattr(binaryninja, "Workflow", CapturedWorkflow)
     monkeypatch.setattr(binaryninja, "Settings", CapturedSettings)
+    CapturedPluginCommand.registered = []
+    monkeypatch.setattr(binaryninja, "PluginCommand", CapturedPluginCommand, raising=False)
 
     plugin = load_plugin_module("plugins.DispatchThis.__init__")
 
@@ -91,3 +101,6 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(
         plugin.DEFLATTEN_SETTING
     )
+    names = [item[0] for item in CapturedPluginCommand.registered]
+    assert "DispatchThis\\Toggle Resolver" in names
+    assert "DispatchThis\\Disable All" in names

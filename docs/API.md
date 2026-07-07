@@ -140,7 +140,7 @@ analysis, expression walking, and cleanup-root collection.
 | Name | Purpose |
 | --- | --- |
 | `CONST_OPS` | MLIL constant operations: `MLIL_CONST`, `MLIL_CONST_PTR`. |
-| `LOAD_OPS` | MLIL load operations used by constant folding. |
+| `LOAD_OPS` | MLIL load operations used by constant folding and load-shape recognition. |
 | `LOAD_STRUCT_OPS` | Struct load operations supported by slot-address helpers. |
 | `SLOT_LOAD_OPS` | Load operations accepted by `load_slot_address`. |
 | `SET_VAR_OPS` | MLIL variable assignment operations followed by peeling and cleanup helpers. |
@@ -174,6 +174,37 @@ A list of expression nodes. If `expr` is `None`, returns `[]`.
   `src`, `dest`, `left`, `right`, `condition`, `params`, `output`,
   `vars_read`, and `vars_written`.
 - Uses object identity to avoid repeated fallback visits.
+
+### `walk_expr_with_defs`
+
+**Signature**
+
+```python
+walk_expr_with_defs(mlil, expr, max_depth=16)
+```
+
+**Purpose**
+
+Yield the expression tree rooted at `expr`, and recursively include expressions
+behind `MLIL_VAR` definitions.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object supporting `get_var_definitions(var)`.
+- `expr`: MLIL expression to inspect.
+- `max_depth`: Maximum recursive variable-definition depth.
+
+**Returns**
+
+An iterator of MLIL expression nodes.
+
+**Key behavior and limits**
+
+- Uses `walk_expr` for each visited expression tree.
+- Tracks expression object identity and variable identity to avoid cycles.
+- Follows every definition returned for a variable, but only through each
+  variable once.
+- Does not perform CFG path reasoning or decide which definition is feasible.
 
 ### `constant_value`
 
@@ -268,6 +299,73 @@ The recovered slot address, including `MLIL_LOAD_STRUCT` offset when present, or
 - For struct loads, requires `offset` to be an integer.
 - Does not implicitly apply U48. Pass `address_mask=U48` explicitly when the
   caller's binary formula requires it.
+
+### `load_slot_offsets`
+
+**Signature**
+
+```python
+load_slot_offsets(mlil, expr, width=8, address_mask=None, max_depth=32)
+```
+
+**Purpose**
+
+Recover constant slot-load addresses plus constant `MLIL_ADD`/`MLIL_SUB`
+offsets around the load.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object supporting `get_var_definitions(var)`.
+- `expr`: MLIL expression to inspect.
+- `width`: Required slot-load width in bytes.
+- `address_mask`: Optional integer mask applied to recovered slot addresses.
+- `max_depth`: Maximum recursive expression/definition depth.
+
+**Returns**
+
+A list of `(slot_addr, offset)` tuples. An empty list means no matching slot-load
+offset shape was found.
+
+**Key behavior and limits**
+
+- Peels variables with `peel_var_definitions(..., require_single=True,
+  allowed_ops=None)`.
+- Uses `load_slot_address` for the base slot load.
+- Folds only constant add/sub offsets around the slot load.
+- Does not decide whether a slot should become const or whether the resolved
+  address is valid.
+
+### `iter_load_slot_offsets`
+
+**Signature**
+
+```python
+iter_load_slot_offsets(mlil, width=8, address_mask=None)
+```
+
+**Purpose**
+
+Scan an MLIL function for every expression that contains a recoverable slot-load
+plus offset.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object exposing `instructions`.
+- `width`: Required slot-load width in bytes.
+- `address_mask`: Optional integer mask applied to recovered slot addresses.
+
+**Returns**
+
+An iterator of `(expr, use_addr, slot_addr, offset)` tuples.
+
+**Key behavior and limits**
+
+- Walks every instruction with `walk_expr`.
+- `use_addr` is the expression address when present, otherwise the containing
+  instruction address.
+- Delegates recognition to `load_slot_offsets`.
+- May yield multiple expressions for the same slot; planners should deduplicate
+  at their own semantic level.
 
 ### `mlil_stores_to_address`
 

@@ -1,3 +1,4 @@
+import inspect
 import json
 import types
 from importlib import import_module
@@ -36,6 +37,20 @@ def test_default_resolver_profile_is_registered():
 
     assert profile.id == "default"
     assert profile.name
+    assert profile.description
+    assert profile.resolve_branch_gadget is not None
+    assert profile.resolve_call_gadget is not None
+    assert profile.plan_global_constant_slots is not None
+    assert profile.plan_string_decrypt_calls is not None
+
+
+def test_dyzznb_resolver_profile_is_registered():
+    profiles = import_module("plugins.DispatchThis.profiles")
+
+    profile = profiles.get_profile("dyzznb")
+
+    assert profile.id == "dyzznb"
+    assert profile.name == "DYZZNB"
     assert profile.description
     assert profile.resolve_branch_gadget is not None
     assert profile.resolve_call_gadget is not None
@@ -102,7 +117,16 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     )
 
 
-def test_profile_setting_is_registered_with_default_profile():
+def test_dyzznb_profile_does_not_import_pass_planners():
+    dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
+
+    source = inspect.getsource(dyzznb)
+
+    assert "passes." not in source
+    assert "..passes" not in source
+
+
+def test_profile_setting_is_registered_with_bundled_profiles():
     profiles = import_module("plugins.DispatchThis.profiles")
     settings = FakeSettings()
 
@@ -116,7 +140,7 @@ def test_profile_setting_is_registered_with_default_profile():
             "description": "Active DispatchThis resolver profile for this BinaryView.",
             "type": "string",
             "default": "default",
-            "enum": ["default"],
+            "enum": ["default", "dyzznb"],
         },
     )]
 
@@ -165,11 +189,11 @@ def test_setting_active_profile_only_writes_binaryview_profile_setting():
     profiles = import_module("plugins.DispatchThis.profiles")
     settings = FakeSettings()
 
-    assert profiles.set_active_profile("bv", "default", settings=settings)
+    assert profiles.set_active_profile("bv", "dyzznb", settings=settings)
 
     assert settings.writes == [(
         profiles.ACTIVE_PROFILE_SETTING,
-        "default",
+        "dyzznb",
         "bv",
         profiles.SettingsScope.SettingsResourceScope,
     )]

@@ -112,8 +112,8 @@ def set_var(name, src, address=0x1000):
     return Expr("MLIL_SET_VAR", dest=name, src=src, address=address)
 
 
-def load(src, size=1):
-    return Expr("MLIL_LOAD", src=src, size=size)
+def load(src, size=1, op="MLIL_LOAD"):
+    return Expr(op, src=src, size=size)
 
 
 def store(dest, src, address=0x1000, size=1):
@@ -147,7 +147,7 @@ def encoded_blob(text, key=b"k3y!"):
     return bytes(out)
 
 
-def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4):
+def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4, load_op="MLIL_LOAD"):
     dest = "dst"
     src = "src"
     i = "i"
@@ -158,9 +158,9 @@ def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4):
             set_var("q_scaled", mul(var("q"), const(key_modulus))),
             set_var("rem", sub(var(i), var("q_scaled"))),
             set_var("key_addr", add(var(src), var("rem"))),
-            set_var("key_byte", load(var("key_addr"))),
+            set_var("key_byte", load(var("key_addr"), op=load_op)),
             set_var("payload_addr", add(var("payload_base"), var(i))),
-            set_var("enc_byte", load(var("payload_addr"))),
+            set_var("enc_byte", load(var("payload_addr"), op=load_op)),
             set_var("parity", and_(mul(var("rem"), var("key_byte")), const(1))),
             if_(cmp_ult(var("parity"), const(1))),
             set_var("tmp", xor(add(var("prev"), var("enc_byte")), var("key_byte"))),
@@ -175,6 +175,14 @@ def decrypt_callee(text="libUE4.so", start=0x2000, key_modulus=4):
 
 def test_recognizer_matches_sample_family_decrypt_shape():
     spec = recognize_string_decrypt_function(decrypt_callee(b"libUE4.so\x00", key_modulus=16))
+
+    assert spec == {"key_modulus": 16, "length": 10}
+
+
+def test_recognizer_accepts_struct_ssa_loads():
+    spec = recognize_string_decrypt_function(
+        decrypt_callee(b"libUE4.so\x00", key_modulus=16, load_op="MLIL_LOAD_STRUCT_SSA")
+    )
 
     assert spec == {"key_modulus": 16, "length": 10}
 
@@ -304,6 +312,7 @@ def test_rejects_similar_non_matching_callee_without_done_flag():
 
 if __name__ == "__main__":
     test_recognizer_matches_sample_family_decrypt_shape()
+    test_recognizer_accepts_struct_ssa_loads()
     test_decoder_recovers_observed_strings()
     test_annotates_current_function_direct_decrypt_calls_and_preserves_comments()
     test_decrypt_comment_appends_replaces_in_place_and_deduplicates()

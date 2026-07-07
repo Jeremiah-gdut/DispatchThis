@@ -10,9 +10,12 @@ DispatchThis/
 │                               string decrypt, deflatten, phase cleanup,
 │                               and deflatten cleanup) and their gating.
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
+├── ui.py                       Function context-menu commands and shortcuts for
+│                               selecting profiles and toggling workflow settings.
 ├── profiles/
 │   ├── __init__.py             Bundled resolver profile registry and contract validation.
-│   └── default.py              Built-in resolver profile for the current binary.
+│   ├── default.py              Built-in resolver profile for the current binary.
+│   └── dyzznb.py               Bundled resolver profile for the dyzznb sample.
 ├── helpers/
 │   ├── __init__.py             Stable profile-helper import surface.
 │   ├── llil.py                 LLIL indirect-jump, definition, and constant helpers.

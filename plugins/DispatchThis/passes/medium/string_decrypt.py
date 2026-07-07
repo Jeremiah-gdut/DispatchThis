@@ -1,12 +1,17 @@
 """MLIL-stage string decrypt recognizer for the current sample family."""
 
+from ...helpers.mlil import (
+    CONST_OPS,
+    LOAD_OPS,
+    STORE_OPS,
+    peel_var_definitions,
+    walk_expr,
+    walk_expr_with_defs,
+)
 from ...utils.log import log_debug, log_info, log_warn
 
 
 _CALL_OPS = ("MLIL_CALL", "MLIL_CALL_SSA", "MLIL_CALL_UNTYPED")
-_CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
-_LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
-_STORE_OPS = ("MLIL_STORE", "MLIL_STORE_SSA", "MLIL_STORE_STRUCT", "MLIL_STORE_STRUCT_SSA")
 _CMP_OPS = (
     "MLIL_CMP_E",
     "MLIL_CMP_NE",
@@ -24,77 +29,9 @@ def _op(expr):
     return getattr(getattr(expr, "operation", None), "name", None)
 
 
-def _children(expr):
-    for name in ("src", "dest", "left", "right", "condition"):
-        child = getattr(expr, name, None)
-        if hasattr(child, "operation"):
-            yield child
-    for name in ("params", "output", "vars_read", "vars_written"):
-        for child in getattr(expr, name, ()) or ():
-            if hasattr(child, "operation"):
-                yield child
-
-
-def _walk_exprs(expr, seen=None):
-    if expr is None:
-        return
-    if seen is None:
-        seen = set()
-    key = id(expr)
-    if key in seen:
-        return
-    seen.add(key)
-    yield expr
-    for child in _children(expr):
-        yield from _walk_exprs(child, seen)
-
-
-def _walk_exprs_with_defs(mlil, expr, seen_exprs=None, seen_vars=None, depth=0):
-    if expr is None:
-        return
-    if seen_exprs is None:
-        seen_exprs = set()
-    if seen_vars is None:
-        seen_vars = set()
-    for child in _walk_exprs(expr):
-        key = id(child)
-        if key in seen_exprs:
-            continue
-        seen_exprs.add(key)
-        yield child
-        if _op(child) != "MLIL_VAR" or mlil is None or depth >= 16:
-            continue
-        var_key = repr(getattr(child, "src", None))
-        if var_key in seen_vars:
-            continue
-        seen_vars.add(var_key)
-        try:
-            defs = mlil.get_var_definitions(child.src)
-        except Exception:  # noqa: BLE001
-            continue
-        for definition in defs or ():
-            yield from _walk_exprs_with_defs(
-                mlil, getattr(definition, "src", None), seen_exprs, seen_vars, depth + 1
-            )
-
-
-def _peel_var(mlil, expr):
-    for _ in range(32):
-        if _op(expr) != "MLIL_VAR":
-            return expr
-        try:
-            defs = mlil.get_var_definitions(expr.src)
-        except Exception:  # noqa: BLE001
-            return expr
-        if not defs or not hasattr(defs[0], "src"):
-            return expr
-        expr = defs[0].src
-    return expr
-
-
 def _const(mlil, expr):
-    expr = _peel_var(mlil, expr)
-    if _op(expr) in _CONST_OPS:
+    expr = peel_var_definitions(mlil, expr, max_depth=32, allowed_ops=None)
+    if _op(expr) in CONST_OPS:
         return expr.constant
     value = getattr(expr, "value", None)
     value_type = getattr(getattr(value, "type", None), "name", None)
@@ -104,13 +41,13 @@ def _const(mlil, expr):
 
 
 def _loads(expr):
-    return [child for child in _walk_exprs(expr) if _op(child) in _LOAD_OPS]
+    return [child for child in walk_expr(expr) if _op(child) in LOAD_OPS]
 
 
 def _mod_constants(mlil):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
+        for expr in walk_expr(ins):
             if _op(expr) not in _MOD_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
@@ -123,7 +60,7 @@ def _mod_constants(mlil):
 def _divisor_constants(mlil):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
+        for expr in walk_expr(ins):
             if _op(expr) not in _DIV_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
@@ -140,7 +77,7 @@ def _key_modulus_constants(mlil):
 def _length_constants(mlil, key_modulus):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
+        for expr in walk_expr(ins):
             if _op(expr) not in _CMP_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
@@ -159,11 +96,11 @@ def _parameters(func, mlil):
 
 
 def _has_const(expr, value):
-    return any(_op(child) in _CONST_OPS and child.constant == value for child in _walk_exprs(expr))
+    return any(_op(child) in CONST_OPS and child.constant == value for child in walk_expr(expr))
 
 
 def _has_remainder_index(mlil, expr, key_modulus):
-    expanded = list(_walk_exprs_with_defs(mlil, expr))
+    expanded = list(walk_expr_with_defs(mlil, expr))
     if any(_op(child) in _MOD_OPS and _has_const(child, key_modulus) for child in expanded):
         return True
     return (
@@ -187,18 +124,18 @@ def _has_sample_family_loads(mlil, key_modulus):
 
 def _has_byte_write_from_xor(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
-            if _op(expr) not in _STORE_OPS or getattr(expr, "size", None) != 1:
+        for expr in walk_expr(ins):
+            if _op(expr) not in STORE_OPS or getattr(expr, "size", None) != 1:
                 continue
-            if any(_op(child) == "MLIL_XOR" for child in _walk_exprs_with_defs(mlil, getattr(expr, "src", None))):
+            if any(_op(child) == "MLIL_XOR" for child in walk_expr_with_defs(mlil, getattr(expr, "src", None))):
                 return True
     return False
 
 
 def _has_done_flag_store(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
-        for expr in _walk_exprs(ins):
-            if _op(expr) in _STORE_OPS and _const(mlil, getattr(expr, "src", None)) == 1:
+        for expr in walk_expr(ins):
+            if _op(expr) in STORE_OPS and _const(mlil, getattr(expr, "src", None)) == 1:
                 return True
     return False
 

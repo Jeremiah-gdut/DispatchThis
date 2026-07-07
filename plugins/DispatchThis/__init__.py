@@ -9,6 +9,7 @@ import json
 from binaryninja import Activity, Workflow, Settings
 from .utils.log import log_info, log_warn
 from .profiles import register_profile_settings
+from .ui import register_ui_commands
 from .workflow import (
     resolve_jumps_llil,
     resolve_calls_mlil,
@@ -150,3 +151,4 @@ Settings().set_bool("analysis.outlining.builtins", False)
 
 register_profile_settings()
 register_workflows()
+register_ui_commands(RESOLVE_SETTING, DEFLATTEN_SETTING, STRING_DECRYPT_SETTING)

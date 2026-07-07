@@ -3,7 +3,7 @@ import json
 
 from binaryninja import Settings, SettingsScope
 
-from . import default
+from . import default, dyzznb
 from ..utils.log import log_warn
 
 
@@ -43,6 +43,7 @@ def resolver_profile_from_module(module):
 
 _PROFILES = {
     DEFAULT_PROFILE_ID: resolver_profile_from_module(default),
+    dyzznb.PROFILE_ID: resolver_profile_from_module(dyzznb),
 }
 
 

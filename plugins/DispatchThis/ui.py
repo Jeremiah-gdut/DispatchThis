@@ -1,0 +1,161 @@
+import binaryninja
+from binaryninja import Settings, SettingsScope
+
+from .profiles import profile_ids, set_active_profile
+from .utils.log import log_info, log_warn
+
+
+SHORTCUTS = {
+    "DispatchThis\\Toggle Resolver": "Ctrl+Alt+Shift+R",
+    "DispatchThis\\Toggle Deflatten": "Ctrl+Alt+Shift+D",
+    "DispatchThis\\Toggle String Decrypt": "Ctrl+Alt+Shift+S",
+    "DispatchThis\\Disable All": "Ctrl+Alt+Shift+X",
+}
+
+
+def _settings(settings):
+    return settings or Settings()
+
+
+def _reanalyze(bv, func):
+    try:
+        func.reanalyze()
+        bv.update_analysis_and_wait()
+    except Exception as exc:  # noqa: BLE001
+        log_warn(f"[ui] {getattr(func, 'name', '<unknown>')}: reanalysis failed: {exc}")
+
+
+def _setting_label(key):
+    return {
+        "analysis.plugins.dispatchThis.indirectJumpsCalls": "resolver",
+        "analysis.plugins.dispatchThis.deflatten": "deflatten",
+        "analysis.plugins.dispatchThis.stringDecrypt": "string decrypt",
+    }[key]
+
+
+def toggle_function_setting(bv, func, key, settings=None, reanalyze=True):
+    settings = _settings(settings)
+    enabled = not settings.get_bool(key, func)
+    settings.set_bool(key, enabled, func, SettingsScope.SettingsResourceScope)
+    if reanalyze:
+        _reanalyze(bv, func)
+    state = "enabled" if enabled else "disabled"
+    log_info(f"[ui] {func.name}: {state} {_setting_label(key)}")
+    return enabled
+
+
+def disable_function_settings(bv, func, keys, settings=None, reanalyze=True):
+    settings = _settings(settings)
+    for key in keys:
+        settings.set_bool(key, False, func, SettingsScope.SettingsResourceScope)
+    if reanalyze:
+        _reanalyze(bv, func)
+    log_info(f"[ui] {func.name}: disabled DispatchThis function settings")
+
+
+def use_profile(bv, func, profile_id, reanalyze=True):
+    set_active_profile(bv, profile_id)
+    if reanalyze:
+        _reanalyze(bv, func)
+    log_info(f"[ui] {func.name}: selected DispatchThis profile {profile_id}")
+
+
+def _valid_function(bv, func):
+    return bv is not None and func is not None
+
+
+def _register_function_command(name, description, action):
+    plugin_command = getattr(binaryninja, "PluginCommand", None)
+    if plugin_command is None:
+        return False
+    plugin_command.register_for_function(name, description, action, _valid_function)
+    return True
+
+
+def _context_function(ctx):
+    bv = getattr(ctx, "binaryView", None)
+    func = getattr(ctx, "function", None)
+    if func is None and bv is not None:
+        addr = getattr(ctx, "address", None)
+        if addr is not None:
+            func = bv.get_function_at(addr)
+            if func is None and hasattr(bv, "get_function_containing"):
+                func = bv.get_function_containing(addr)
+            if func is None and hasattr(bv, "get_functions_containing"):
+                funcs = bv.get_functions_containing(addr)
+                func = funcs[0] if funcs else None
+    return bv, func
+
+
+def _ui_action(action):
+    def wrapped(ctx):
+        bv, func = _context_function(ctx)
+        if not _valid_function(bv, func):
+            log_warn("[ui] DispatchThis shortcut requires an active function")
+            return
+        action(bv, func)
+
+    return wrapped
+
+
+def _register_shortcuts(actions):
+    try:
+        from binaryninjaui import UIAction, UIActionHandler
+        from PySide6.QtGui import QKeySequence
+    except Exception:  # noqa: BLE001
+        return False
+
+    handler = UIActionHandler.globalActions()
+    for name, action in actions.items():
+        shortcut = SHORTCUTS.get(name)
+        if shortcut is None:
+            continue
+        try:
+            if not UIAction.isActionRegistered(name):
+                UIAction.registerAction(name, QKeySequence(shortcut))
+            handler.bindAction(name, UIAction(_ui_action(action)))
+        except Exception as exc:  # noqa: BLE001
+            log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
+    return True
+
+
+def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
+    setting_actions = {
+        "DispatchThis\\Toggle Resolver": (
+            "Toggle DispatchThis resolver for this function.",
+            lambda bv, func: toggle_function_setting(bv, func, resolve_key),
+        ),
+        "DispatchThis\\Toggle Deflatten": (
+            "Toggle DispatchThis deflattening for this function.",
+            lambda bv, func: toggle_function_setting(bv, func, deflatten_key),
+        ),
+        "DispatchThis\\Toggle String Decrypt": (
+            "Toggle DispatchThis string decrypt for this function.",
+            lambda bv, func: toggle_function_setting(bv, func, string_decrypt_key),
+        ),
+        "DispatchThis\\Disable All": (
+            "Disable DispatchThis function settings for this function.",
+            lambda bv, func: disable_function_settings(
+                bv,
+                func,
+                (resolve_key, deflatten_key, string_decrypt_key),
+            ),
+        ),
+    }
+
+    actions = {}
+    for profile_id in profile_ids():
+        name = f"DispatchThis\\Profile\\Use {profile_id}"
+        action = lambda bv, func, profile_id=profile_id: use_profile(bv, func, profile_id)
+        _register_function_command(
+            name,
+            f"Select the DispatchThis {profile_id} resolver profile for this view.",
+            action,
+        )
+        actions[name] = action
+
+    for name, (description, action) in setting_actions.items():
+        _register_function_command(name, description, action)
+        actions[name] = action
+
+    _register_shortcuts(actions)

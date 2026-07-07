@@ -6,8 +6,8 @@ from .memory import read_uint_le
 U64 = 0xFFFFFFFFFFFFFFFF
 
 CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
-LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT")
 LOAD_STRUCT_OPS = ("MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
+LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
 SLOT_LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
 SET_VAR_OPS = ("MLIL_SET_VAR", "MLIL_SET_VAR_FIELD")
 STORE_OPS = ("MLIL_STORE", "MLIL_STORE_SSA", "MLIL_STORE_STRUCT", "MLIL_STORE_STRUCT_SSA")
@@ -118,6 +118,120 @@ def mlil_stores_to_address(mlil, addr, address_mask=None):
             ):
                 return True
     return False
+
+
+def walk_expr_with_defs(mlil, expr, max_depth=16):
+    """Yield expression nodes, following MLIL_VAR definitions."""
+    yield from _walk_expr_with_defs(mlil, expr, set(), set(), 0, max_depth)
+
+
+def _walk_expr_with_defs(mlil, expr, seen_exprs, seen_vars, depth, max_depth):
+    if expr is None:
+        return
+    for child in walk_expr(expr):
+        expr_key = id(child)
+        if expr_key in seen_exprs:
+            continue
+        seen_exprs.add(expr_key)
+        yield child
+        if _op_name(child) != "MLIL_VAR" or mlil is None or depth >= max_depth:
+            continue
+        var_key = repr(getattr(child, "src", None))
+        if var_key in seen_vars:
+            continue
+        seen_vars.add(var_key)
+        try:
+            definitions = mlil.get_var_definitions(child.src)
+        except Exception:  # noqa: BLE001
+            continue
+        for definition in definitions or ():
+            yield from _walk_expr_with_defs(
+                mlil,
+                getattr(definition, "src", None),
+                seen_exprs,
+                seen_vars,
+                depth + 1,
+                max_depth,
+            )
+
+
+def load_slot_offsets(mlil, expr, width=8, address_mask=None, max_depth=32):
+    """Return ``(slot_addr, offset)`` pairs for slot loads plus constant offsets."""
+    return _load_slot_offsets(mlil, expr, width, address_mask, 0, max_depth)
+
+
+def iter_load_slot_offsets(mlil, width=8, address_mask=None):
+    """Yield ``(expr, use_addr, slot_addr, offset)`` for every slot-offset use."""
+    for ins in getattr(mlil, "instructions", ()) or ():
+        ins_addr = getattr(ins, "address", 0)
+        for expr in walk_expr(ins):
+            use_addr = getattr(expr, "address", ins_addr)
+            for slot_addr, offset in load_slot_offsets(
+                mlil,
+                expr,
+                width=width,
+                address_mask=address_mask,
+            ):
+                yield expr, use_addr, slot_addr, offset
+
+
+def _load_slot_offsets(mlil, expr, width, address_mask, depth, max_depth):
+    if depth > max_depth:
+        return []
+    expr = peel_var_definitions(
+        mlil,
+        expr,
+        max_depth=max_depth,
+        require_single=True,
+        allowed_ops=None,
+    )
+    slot_addr = load_slot_address(mlil, expr, width=width, address_mask=address_mask)
+    if slot_addr is not None:
+        return [(slot_addr, 0)]
+
+    op = _op_name(expr)
+    if op not in ("MLIL_ADD", "MLIL_SUB"):
+        return []
+
+    out = []
+    right_const = constant_value(mlil, expr.right)
+    if right_const is not None:
+        addend = _signed_offset(right_const)
+        if op == "MLIL_SUB":
+            addend = -addend
+        out.extend(
+            (slot, offset + addend)
+            for slot, offset in _load_slot_offsets(
+                mlil,
+                expr.left,
+                width,
+                address_mask,
+                depth + 1,
+                max_depth,
+            )
+        )
+
+    if op == "MLIL_ADD":
+        left_const = constant_value(mlil, expr.left)
+        if left_const is not None:
+            addend = _signed_offset(left_const)
+            out.extend(
+                (slot, offset + addend)
+                for slot, offset in _load_slot_offsets(
+                    mlil,
+                    expr.right,
+                    width,
+                    address_mask,
+                    depth + 1,
+                    max_depth,
+                )
+            )
+
+    return out
+
+
+def _signed_offset(value):
+    return value - (1 << 64) if value > 0x7FFFFFFFFFFFFFFF else value
 
 
 def iter_indirect_calls(mlil):
@@ -271,10 +385,13 @@ __all__ = (
     "constant_address",
     "constant_value",
     "fold_constant_value",
+    "iter_load_slot_offsets",
     "iter_indirect_calls",
+    "load_slot_offsets",
     "load_slot_address",
     "mlil_stores_to_address",
     "peel_var_definitions",
     "set_roots_before",
     "walk_expr",
+    "walk_expr_with_defs",
 )
