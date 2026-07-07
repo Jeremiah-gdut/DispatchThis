@@ -4,7 +4,6 @@ from .memory import read_uint_le
 
 
 U64 = 0xFFFFFFFFFFFFFFFF
-U48 = 0xFFFFFFFFFFFF
 
 CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT")
@@ -47,6 +46,10 @@ def _op_name(expr):
     return getattr(getattr(expr, "operation", None), "name", None)
 
 
+def _mask_address(value, address_mask):
+    return value if address_mask is None else value & address_mask
+
+
 def constant_value(mlil, expr):
     expr = peel_var_definitions(
         mlil,
@@ -58,7 +61,7 @@ def constant_value(mlil, expr):
     return expr.constant if _op_name(expr) in CONST_OPS else None
 
 
-def constant_address(mlil, expr, depth=0, max_depth=32):
+def constant_address(mlil, expr, depth=0, max_depth=32, address_mask=None):
     if expr is None or depth > max_depth:
         return None
     expr = peel_var_definitions(
@@ -70,17 +73,17 @@ def constant_address(mlil, expr, depth=0, max_depth=32):
     )
     value = constant_value(mlil, expr)
     if value is not None:
-        return value & U48
+        return _mask_address(value, address_mask)
     op = _op_name(expr)
     if op in ("MLIL_ADD", "MLIL_SUB"):
-        left = constant_address(mlil, expr.left, depth + 1, max_depth)
-        right = constant_address(mlil, expr.right, depth + 1, max_depth)
+        left = constant_address(mlil, expr.left, depth + 1, max_depth, address_mask)
+        right = constant_address(mlil, expr.right, depth + 1, max_depth, address_mask)
         if left is not None and right is not None:
-            return (left + right if op == "MLIL_ADD" else left - right) & U48
+            return _mask_address(left + right if op == "MLIL_ADD" else left - right, address_mask)
     return None
 
 
-def load_slot_address(mlil, expr, width=8):
+def load_slot_address(mlil, expr, width=8, address_mask=None):
     expr = peel_var_definitions(
         mlil,
         expr,
@@ -91,23 +94,27 @@ def load_slot_address(mlil, expr, width=8):
     op = _op_name(expr)
     if op not in SLOT_LOAD_OPS or getattr(expr, "size", None) != width:
         return None
-    addr = constant_address(mlil, expr.src)
+    addr = constant_address(mlil, expr.src, address_mask=address_mask)
     if addr is None:
         return None
     if op in LOAD_STRUCT_OPS:
         offset = getattr(expr, "offset", 0)
         if not isinstance(offset, int):
             return None
-        return (addr + offset) & U48
+        return _mask_address(addr + offset, address_mask)
     return addr
 
 
-def mlil_stores_to_address(mlil, addr):
+def mlil_stores_to_address(mlil, addr, address_mask=None):
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
             if (
                 _op_name(expr) in STORE_OPS
-                and constant_address(mlil, getattr(expr, "dest", None)) == addr
+                and constant_address(
+                    mlil,
+                    getattr(expr, "dest", None),
+                    address_mask=address_mask,
+                ) == addr
             ):
                 return True
     return False
@@ -164,7 +171,7 @@ def _single_value(expr):
     return None
 
 
-def fold_constant_value(bv, mlil, expr, depth=0, max_depth=32):
+def fold_constant_value(bv, mlil, expr, depth=0, max_depth=32, load_address_mask=None):
     """Best-effort single-value fold for current MLIL call-target recovery."""
     if expr is None or depth > max_depth:
         return None
@@ -179,31 +186,41 @@ def fold_constant_value(bv, mlil, expr, depth=0, max_depth=32):
         except Exception:  # noqa: BLE001
             defs = ()
         if defs and defs[0].operation.name in SET_VAR_OPS:
-            value = fold_constant_value(bv, mlil, defs[0].src, depth + 1, max_depth)
+            value = fold_constant_value(
+                bv, mlil, defs[0].src, depth + 1, max_depth, load_address_mask
+            )
             if value is not None:
                 return value
         return _single_value(expr)
 
     if op in ("MLIL_ADD", "MLIL_SUB"):
-        left = fold_constant_value(bv, mlil, expr.left, depth + 1, max_depth)
-        right = fold_constant_value(bv, mlil, expr.right, depth + 1, max_depth)
+        left = fold_constant_value(
+            bv, mlil, expr.left, depth + 1, max_depth, load_address_mask
+        )
+        right = fold_constant_value(
+            bv, mlil, expr.right, depth + 1, max_depth, load_address_mask
+        )
         if left is None or right is None:
             return None
         return (left + right if op == "MLIL_ADD" else left - right) & U64
 
     if op == "MLIL_MUL":
-        left = fold_constant_value(bv, mlil, expr.left, depth + 1, max_depth)
-        right = fold_constant_value(bv, mlil, expr.right, depth + 1, max_depth)
+        left = fold_constant_value(
+            bv, mlil, expr.left, depth + 1, max_depth, load_address_mask
+        )
+        right = fold_constant_value(
+            bv, mlil, expr.right, depth + 1, max_depth, load_address_mask
+        )
         return None if left is None or right is None else (left * right) & U64
 
     if op in ("MLIL_ZX", "MLIL_SX", "MLIL_LOW_PART"):
-        return fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth)
+        return fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth, load_address_mask)
 
     if op in LOAD_OPS:
-        addr = fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth)
+        addr = fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth, load_address_mask)
         if addr is None:
             return None
-        return read_uint_le(bv, addr & U48, expr.size)
+        return read_uint_le(bv, _mask_address(addr, load_address_mask), expr.size)
 
     return _single_value(expr)
 

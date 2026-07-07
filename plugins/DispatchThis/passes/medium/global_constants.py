@@ -41,7 +41,7 @@ def _slot_offsets(mlil, expr, depth=0):
         require_single=True,
         allowed_ops=None,
     )
-    slot_addr = load_slot_address(mlil, expr)
+    slot_addr = load_slot_address(mlil, expr, address_mask=U48)
     if slot_addr is not None:
         return [(slot_addr, 0)]
 
@@ -98,14 +98,14 @@ def _ref_functions(bv, data_var):
 
 def _refs_store_slot(bv, current_mlil, slot_addr):
     data_var = bv.get_data_var_at(slot_addr)
-    if mlil_stores_to_address(current_mlil, slot_addr):
+    if mlil_stores_to_address(current_mlil, slot_addr, address_mask=U48):
         return True
     for func in _ref_functions(bv, data_var):
         mlil = getattr(func, "mlil", None)
         if (
             mlil is not None
             and mlil is not current_mlil
-            and mlil_stores_to_address(mlil, slot_addr)
+            and mlil_stores_to_address(mlil, slot_addr, address_mask=U48)
         ):
             return True
     return False

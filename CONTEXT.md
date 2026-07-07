@@ -41,6 +41,13 @@ traceable to the binary without exposing local paths, usernames, customer names,
 or other sensitive project labels.
 _Avoid_: sample1, current, default2, full local paths
 
+**Profile helper**:
+A reusable BNIL or BinaryView inspection helper used by resolver profiles and
+passes to collect definitions, fold constants, read target data, validate
+addresses, or build recovery facts. Profile helpers reduce per-binary resolver
+code, but they do not own binary-specific recognition or workflow mutations.
+_Avoid_: utils, generic rule engine, backend
+
 **Active resolver profile**:
 The resolver profile explicitly selected for a BinaryView. It chooses how enabled
 functions interpret that binary's obfuscation shapes; it does not enable the
@@ -63,6 +70,13 @@ A standard piece of recovered analysis information returned by a resolver profil
 such as an indirect branch target, indirect call target, or global constant slot.
 Workflow callbacks decide how and when to submit recovery facts to Binary Ninja.
 _Avoid_: profile action, Binary Ninja mutation request
+
+**Recovery backend**:
+The workflow or pass layer that consumes recovery facts and applies stable
+Binary Ninja analysis effects, such as CFG recovery, call-target application, IL
+translation, global slot typing, or cleanup. Resolver profiles and profile
+helpers feed the backend; they do not replace it.
+_Avoid_: profile helper, generic rule engine
 
 **Indirect call resolving**:
 Recovering the concrete callee of a computed call target.

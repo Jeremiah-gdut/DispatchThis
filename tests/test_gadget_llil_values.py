@@ -240,7 +240,7 @@ def test_const_values_phi_cycle_returns_candidates_without_recursing_forever():
     assert llil_helpers.const_values(None, ssa, reg(x1_3)) == {0x10}
 
 
-def test_const_values_uses_live_edge_phi_when_predicate_is_constant():
+def test_const_values_keeps_phi_candidates_even_when_predicate_is_constant():
     if_block = type("Block", (), {"start": 0, "end": 1, "dominators": [], "outgoing_edges": []})()
     phi_block = type("Block", (), {"start": 1, "end": 2, "dominators": [], "outgoing_edges": []})()
     other_block = type("Block", (), {"start": 2, "end": 3, "dominators": [], "outgoing_edges": []})()
@@ -268,7 +268,7 @@ def test_const_values_uses_live_edge_phi_when_predicate_is_constant():
         [if_instr, phi_instr, other_instr],
     )
 
-    assert llil_helpers.const_values(None, ssa, reg(x1_3)) == {0x10}
+    assert llil_helpers.const_values(None, ssa, reg(x1_3)) == {0x10, 0x20}
 
 
 def test_const_values_unresolved_value_falls_back_to_empty_set():

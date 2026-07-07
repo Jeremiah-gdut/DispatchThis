@@ -193,13 +193,6 @@ def _single_const(bv, ssa, expr, depth=0, max_depth=48):
             value = _phi_const(bv, ssa, definition, depth + 1, max_depth)
             if value is not None:
                 return value
-            live = _live_phi_operand(bv, ssa, definition)
-            if live is not None:
-                live_definition = _reg_definition(ssa, live)
-                if live_definition is not None:
-                    value = _single_const(bv, ssa, live_definition.src, depth + 1, max_depth)
-                    if value is not None:
-                        return value
             return _vsa_const(ssa, expr)
         if hasattr(definition, "src"):
             return _single_const(bv, ssa, definition.src, depth + 1, max_depth)
@@ -281,9 +274,6 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
             value = _vsa_const(ssa, expr)
             return set() if value is None else {value}
         if definition.operation.name == "LLIL_REG_PHI":
-            value = _single_const(bv, ssa, expr)
-            if value is not None:
-                return {value}
             vals = set()
             for var in definition.src:
                 operand_definition = _reg_definition(ssa, var)
@@ -291,6 +281,9 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
                     vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy()))
             if vals:
                 return vals
+            value = _single_const(bv, ssa, expr)
+            if value is not None:
+                return {value}
             return set()
         if hasattr(definition, "src"):
             return _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen)
@@ -306,9 +299,6 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
             return set() if value is None else {value & _mask_for_expr(expr)}
         mask = _mask_for_expr(expr)
         if definition.operation.name == "LLIL_REG_PHI":
-            value = _single_const(bv, ssa, expr)
-            if value is not None:
-                return {value & mask}
             vals = set()
             for var in definition.src:
                 operand_definition = _reg_definition(ssa, var)
@@ -316,6 +306,9 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
                     vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy()))
             if vals:
                 return {value & mask for value in vals}
+            value = _single_const(bv, ssa, expr)
+            if value is not None:
+                return {value & mask}
             return set()
         if hasattr(definition, "src"):
             return {
@@ -418,95 +411,6 @@ def _define_cond(ssa, cond):
         definition = _flag_definition(ssa, cond.src)
         return definition.src if definition is not None else cond
     return cond
-
-
-def _eval_predicate(bv, ssa, if_instr):
-    cond = _define_cond(ssa, if_instr.condition)
-    cmp_fn = _CMP.get(cond.operation.name)
-    if cmp_fn is None:
-        return None
-    left_const = _single_const(bv, ssa, cond.left)
-    right_const = _single_const(bv, ssa, cond.right)
-    if left_const is not None and right_const is not None:
-        return cmp_fn(left_const, right_const)
-
-    try:
-        right = cond.right.constant
-    except AttributeError:
-        return None
-
-    left = cond.left
-    if left.operation.name in LOAD_OPS and right in (0x9, 0xA):
-        return cmp_fn(0, right)
-
-    try:
-        if left.operation.name == "LLIL_AND" and left.right.constant == 1 and right == 0:
-            return True
-    except AttributeError:
-        pass
-
-    return None
-
-
-def _controlling_if(ssa, block):
-    for edge in getattr(block, "incoming_edges", ()):
-        pred = edge.source
-        last = ssa[pred.end - 1]
-        if last.operation.name == "LLIL_IF":
-            return pred, last
-        if last.operation.name == "LLIL_GOTO":
-            for pred_edge in pred.incoming_edges:
-                pred2 = pred_edge.source
-                last2 = ssa[pred2.end - 1]
-                if last2.operation.name == "LLIL_IF":
-                    return pred2, last2
-    return None, None
-
-
-def _walk_to_pred(start_block, target_block):
-    cur = start_block
-    seen = set()
-    while cur is not None and cur.start not in seen:
-        seen.add(cur.start)
-        if any(edge.target.start == target_block.start for edge in cur.outgoing_edges):
-            return cur
-        outs = cur.outgoing_edges
-        cur = outs[0].target if len(outs) == 1 else None
-    return None
-
-
-def _live_phi_operand(bv, ssa, phi):
-    block = getattr(phi, "il_basic_block", None)
-    if block is None:
-        return None
-    if_block, if_instr = _controlling_if(ssa, block)
-    if if_instr is None:
-        return None
-    truth = _eval_predicate(bv, ssa, if_instr)
-    if truth is None:
-        return None
-
-    target_idx = if_instr.true if truth else if_instr.false
-    target_block = ssa[target_idx].il_basic_block
-    if target_block.start == block.start:
-        live_pred = if_block
-    else:
-        live_pred = _walk_to_pred(target_block, block)
-    if live_pred is None:
-        return None
-
-    live_doms = {b.start for b in live_pred.dominators}
-    flow_through = []
-    for var in phi.src:
-        definition = _reg_definition(ssa, var)
-        if definition is None:
-            continue
-        definition_block = definition.il_basic_block
-        if definition_block.start == live_pred.start:
-            return var
-        if definition_block.start in live_doms:
-            flow_through.append(var)
-    return flow_through[0] if len(flow_through) == 1 else None
 
 
 __all__ = (

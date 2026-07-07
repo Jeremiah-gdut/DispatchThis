@@ -63,11 +63,11 @@ def resolve_call_target(bv, mlil, call_il):
         # right operand as the gadget always places the key there.
         key_expr, enc_expr = right, left
 
-    key = fold_constant_value(bv, mlil, key_expr)
+    key = fold_constant_value(bv, mlil, key_expr, load_address_mask=U48)
     if key is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold decode key")
         return None, None, set()
-    encoded = fold_constant_value(bv, mlil, enc_expr)
+    encoded = fold_constant_value(bv, mlil, enc_expr, load_address_mask=U48)
     if encoded is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold encoded target")
         return None, None, set()

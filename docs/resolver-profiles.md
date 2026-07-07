@@ -189,8 +189,8 @@ backend has mapped current SSA/non-SSA IL and decided whether cleanup is safe.
 `llil.const_values(bv, ssa, expr)` returns a set of concrete candidates, not a
 single value. An empty set means the helper could not recover a concrete value;
 multiple values mean the expression has multiple viable candidates, often from a
-PHI or live-edge case. If a profile formula needs exactly one table base, key, or
-offset, enforce that at the call site:
+PHI merge or loop-carried value. If a profile formula needs exactly one table
+base, key, or offset, enforce that at the call site:
 
 ```python
 offsets = llil.const_values(bv, ssa, offset_expr)
@@ -198,6 +198,9 @@ if len(offsets) != 1:
     return []
 offset = next(iter(offsets))
 ```
+
+`const_values` does not perform CFG path disambiguation. If one binary can prove
+only one PHI edge is feasible, keep that narrowing in its profile or pass.
 
 Global constant helpers provide inspection primitives. They can walk MLIL,
 extract constant slot addresses, read qword slots, check sections, detect stores,

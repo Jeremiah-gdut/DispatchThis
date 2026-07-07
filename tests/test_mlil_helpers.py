@@ -157,6 +157,36 @@ def test_const_address_and_slot_loads_support_global_slot_analysis():
     )
 
 
+def test_address_helpers_mask_only_when_requested():
+    wide_addr = 0x1000000001234
+    mlil = FakeMlil()
+
+    assert mlil_helpers.constant_address(mlil, const(wide_addr)) == wide_addr
+    assert (
+        mlil_helpers.constant_address(mlil, const(wide_addr), address_mask=0xFFFFFFFFFFFF)
+        == 0x1234
+    )
+
+
+def test_fold_constant_value_load_masks_only_when_requested():
+    wide_addr = 0x1000000001000
+    bv = FakeBv()
+    bv.memory[wide_addr] = (0x40).to_bytes(8, "little")
+    bv.memory[0x1000] = (0x99).to_bytes(8, "little")
+    mlil = FakeMlil()
+
+    assert mlil_helpers.fold_constant_value(bv, mlil, load(const(wide_addr))) == 0x40
+    assert (
+        mlil_helpers.fold_constant_value(
+            bv,
+            mlil,
+            load(const(wide_addr)),
+            load_address_mask=0xFFFFFFFFFFFF,
+        )
+        == 0x99
+    )
+
+
 def test_mlil_store_detection_matches_constant_slot_destinations():
     slot_store = Expr("MLIL_STORE", [const(0xA43D70)], dest=const(0xA43D70))
     other_store = Expr("MLIL_STORE", [const(0xA43D80)], dest=const(0xA43D80))
