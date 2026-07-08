@@ -97,7 +97,7 @@ def test_use_profile_updates_view_profile_without_function_settings(monkeypatch)
 def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypatch):
     FakePluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
-    monkeypatch.setattr(ui, "_register_shortcuts", lambda _actions: False)
+    monkeypatch.setattr(ui, "_schedule_shortcuts", lambda: None)
 
     ui.register_ui_commands("resolve", "deflatten", "string")
 
@@ -116,24 +116,11 @@ def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
             self.text = text
 
     class FakeUIAction:
-        registered = {"Selection Target\\DispatchThis\\Toggle Resolver": None}
-        unregistered = []
+        registered = {}
 
         @classmethod
         def registerAction(cls, name, key_sequence):
             cls.registered[name] = key_sequence.text
-
-        @classmethod
-        def isActionRegistered(cls, name):
-            return name == "DispatchThis\\Shortcuts\\Toggle Resolver"
-
-        @classmethod
-        def unregisterAction(cls, name):
-            cls.unregistered.append(name)
-
-        @classmethod
-        def getKeyBinding(cls, name):
-            return [cls.registered[name]] if cls.registered.get(name) else []
 
     binaryninjaui = types.ModuleType("binaryninjaui")
     binaryninjaui.UIAction = FakeUIAction
@@ -144,86 +131,56 @@ def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
     monkeypatch.setitem(sys.modules, "PySide6", types.ModuleType("PySide6"))
     monkeypatch.setitem(sys.modules, "PySide6.QtGui", qtgui)
 
-    assert ui._register_shortcuts({"DispatchThis\\Toggle Resolver": lambda *_args: None})
-    assert FakeUIAction.registered["Selection Target\\DispatchThis\\Toggle Resolver"] == "Alt+Q"
-    assert FakeUIAction.unregistered == ["DispatchThis\\Shortcuts\\Toggle Resolver"]
+    ui._register_shortcuts()
+
+    assert FakeUIAction.registered == {
+        "Selection Target\\DispatchThis\\Toggle Resolver": "Alt+Q",
+        "Selection Target\\DispatchThis\\Toggle Deflatten": "Alt+W",
+        "Selection Target\\DispatchThis\\Toggle String Decrypt": "Alt+E",
+        "Selection Target\\DispatchThis\\Disable All": "Alt+R",
+    }
 
 
-def test_register_ui_commands_retries_shortcuts_on_main_thread(monkeypatch):
-    FakePluginCommand.registered = []
-    scheduled = []
-    calls = []
-
-    monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
-    monkeypatch.setattr(
-        binaryninja,
-        "execute_on_main_thread",
-        lambda callback: scheduled.append(callback),
-        raising=False,
-    )
-    monkeypatch.setattr(ui, "_retry_shortcuts_when_ui_ready", lambda _actions: False)
-
-    def register_shortcuts(actions):
-        calls.append(actions)
-        return len(calls) > 1
-
-    monkeypatch.setattr(ui, "_register_shortcuts", register_shortcuts)
-
-    ui.register_ui_commands("resolve", "deflatten", "string")
-
-    assert calls == []
-    assert len(scheduled) == 1
-    scheduled[0]()
-    assert len(calls) == 1
-
-
-def test_register_ui_commands_retries_shortcuts_when_ui_ready(monkeypatch):
-    FakePluginCommand.registered = []
+def test_schedule_shortcuts_runs_registration_on_main_thread_timer(monkeypatch):
     main_thread = []
     scheduled = []
     calls = []
 
-    monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
-    monkeypatch.setattr(ui, "_retry_shortcuts_on_main_thread", lambda _actions: False)
     monkeypatch.setattr(binaryninja, "execute_on_main_thread", lambda callback: main_thread.append(callback), raising=False)
 
-    def register_shortcuts(actions):
-        calls.append(actions)
-        return False
+    def register_shortcuts():
+        calls.append(True)
 
     class FakeTimer:
         @staticmethod
         def singleShot(delay, callback):
             scheduled.append((delay, callback))
 
-    binaryninjaui = types.ModuleType("binaryninjaui")
     qtcore = types.ModuleType("PySide6.QtCore")
     qtcore.QTimer = FakeTimer
 
     monkeypatch.setattr(ui, "_register_shortcuts", register_shortcuts)
-    monkeypatch.setitem(sys.modules, "binaryninjaui", binaryninjaui)
     monkeypatch.setitem(sys.modules, "PySide6", types.ModuleType("PySide6"))
     monkeypatch.setitem(sys.modules, "PySide6.QtCore", qtcore)
 
-    ui.register_ui_commands("resolve", "deflatten", "string")
+    ui._schedule_shortcuts()
 
     assert calls == []
     assert len(main_thread) == 1
     assert scheduled == []
     main_thread[0]()
-    assert [delay for delay, _callback in scheduled] == [250, 1000, 3000]
+    assert [delay for delay, _callback in scheduled] == [0, 250, 1000]
     scheduled[0][1]()
     assert len(calls) == 1
 
 
-def test_register_ui_commands_schedules_delayed_shortcuts(monkeypatch):
+def test_register_ui_commands_schedules_shortcuts(monkeypatch):
     FakePluginCommand.registered = []
-    delayed = []
+    scheduled = []
 
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
-    monkeypatch.setattr(ui, "_register_shortcuts", lambda _actions: True)
-    monkeypatch.setattr(ui, "_retry_shortcuts_when_ui_ready", lambda actions: delayed.append(actions))
+    monkeypatch.setattr(ui, "_schedule_shortcuts", lambda: scheduled.append(True))
 
     ui.register_ui_commands("resolve", "deflatten", "string")
 
-    assert len(delayed) == 1
+    assert scheduled == [True]

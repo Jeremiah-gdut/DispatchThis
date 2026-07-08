@@ -67,67 +67,42 @@ def _valid_function(bv, func):
 def _register_function_command(name, description, action):
     plugin_command = getattr(binaryninja, "PluginCommand", None)
     if plugin_command is None:
-        return False
+        return
     plugin_command.register_for_function(name, description, action, _valid_function)
-    return True
 
 
-def _register_shortcuts(actions):
+def _register_shortcuts():
     try:
         from binaryninjaui import UIAction
         from PySide6.QtGui import QKeySequence
     except Exception:  # noqa: BLE001
-        return False
+        return
 
-    registered = True
-    for name in actions:
-        shortcut = SHORTCUTS.get(name)
-        if shortcut is None:
-            continue
+    for name, shortcut in SHORTCUTS.items():
         shortcut_action = f"Selection Target\\{name}"
-        stale_action = name.replace("DispatchThis\\", "DispatchThis\\Shortcuts\\", 1)
         try:
-            if UIAction.isActionRegistered(stale_action):
-                UIAction.unregisterAction(stale_action)
             UIAction.registerAction(shortcut_action, QKeySequence(shortcut))
-            registered = bool(UIAction.getKeyBinding(shortcut_action)) and registered
         except Exception as exc:  # noqa: BLE001
             log_warn(f"[ui] failed to register shortcut for {name}: {exc}")
-            registered = False
-    return registered
 
 
-def _retry_shortcuts_on_main_thread(actions):
-    execute_on_main_thread = getattr(binaryninja, "execute_on_main_thread", None)
-    if execute_on_main_thread is None:
-        return False
-    try:
-        execute_on_main_thread(lambda: _register_shortcuts(actions))
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log_warn(f"[ui] failed to schedule shortcut registration retry: {exc}")
-        return False
-
-
-def _retry_shortcuts_when_ui_ready(actions):
+def _schedule_shortcuts():
     try:
         from PySide6.QtCore import QTimer
     except Exception:  # noqa: BLE001
-        return False
+        return
     execute_on_main_thread = getattr(binaryninja, "execute_on_main_thread", None)
     if execute_on_main_thread is None:
-        return False
+        return
 
     def schedule():
-        for delay in (250, 1000, 3000):
-            QTimer.singleShot(delay, lambda actions=actions: _register_shortcuts(actions))
+        for delay in (0, 250, 1000):
+            QTimer.singleShot(delay, _register_shortcuts)
 
     try:
         execute_on_main_thread(schedule)
-        return True
     except Exception as exc:  # noqa: BLE001
-        log_warn(f"[ui] failed to schedule delayed shortcut registration: {exc}")
-        return False
+        log_warn(f"[ui] failed to schedule shortcut registration: {exc}")
 
 
 def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
@@ -154,7 +129,6 @@ def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
         ),
     }
 
-    actions = {}
     for profile_id in profile_ids():
         name = f"DispatchThis\\Profile\\Use {profile_id}"
         action = lambda bv, func, profile_id=profile_id: use_profile(bv, func, profile_id)
@@ -163,11 +137,8 @@ def register_ui_commands(resolve_key, deflatten_key, string_decrypt_key):
             f"Select the DispatchThis {profile_id} resolver profile for this view.",
             action,
         )
-        actions[name] = action
 
     for name, (description, action) in setting_actions.items():
         _register_function_command(name, description, action)
-        actions[name] = action
 
-    _retry_shortcuts_on_main_thread(actions)
-    _retry_shortcuts_when_ui_ready(actions)
+    _schedule_shortcuts()
