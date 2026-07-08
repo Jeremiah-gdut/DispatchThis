@@ -1,14 +1,15 @@
 # Known issues & limitations
 
-Proof of concept indirect jump and control flow unflattener built around a
-**single sample** and a **single Binary Ninja version**. The list below is non-exhaustive - expect rough edges.
+DispatchThis is specialized for ARM64 ELF resolver profiles and Binary Ninja
+workflow-based IL rewrites. The list below is non-exhaustive; verify surprising
+output against the disassembly before trusting it.
 
 ## Scope
 
-- **One sample, one version.** Everything was developed and verified against
-  `FortiEndpoint_Patch.exe` on Binary Ninja 5.3.9757. The gadget shapes, decode variants,
-  and predicate forms are tuned to what that sample emits; other binaries (even from the
-  same family) may use shapes the parsers don't yet recognize.
+- **ARM64 ELF profiles only.** DispatchThis is specialized for ARM64 ELF
+  resolver profiles. Gadget shapes, decode variants, and predicate forms are
+  still profile-specific; other binaries may use shapes the active profile does
+  not recognize.
 
 ## Cleanup residue
 
@@ -20,7 +21,7 @@ Proof of concept indirect jump and control flow unflattener built around a
 ## Conditional reconstruction
 
 - **Conditional deflattening is narrow.** It handles branch regions where each arm writes
-  exactly one known dispatcher state token. More complex `cmov` compositions or impure
+  exactly one known dispatcher state token. More complex state-selection chains or impure
   branch tails are left intact. See [`conditional-deflattening.md`](conditional-deflattening.md).
 
 ## Operational
@@ -41,5 +42,5 @@ Proof of concept indirect jump and control flow unflattener built around a
 
 ## Reporting
 
-Because this is an educational PoC rather than a maintained tool, treat surprising output as
-expected and verify against the disassembly before trusting it.
+Unexpected output usually means the active resolver profile did not match that
+binary's shape. Capture the relevant LLIL/MLIL excerpt before changing code.

@@ -29,5 +29,5 @@ successors.
 ## Limits
 
 This is intentionally narrower than a symbolic predicate rebuild. It does not try to
-solve arbitrary `cmov` chains or rewrite impure branch tails. Unsupported shapes are left
-intact for Binary Ninja to display normally.
+solve arbitrary multi-step state-selection chains or rewrite impure branch tails.
+Unsupported shapes are left intact for Binary Ninja to display normally.

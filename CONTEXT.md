@@ -132,7 +132,7 @@ A recovered original-block successor selected by a single state token write.
 
 **Conditional transition**:
 A recovered original-block successor set selected from multiple state tokens by
-program control flow, such as a branch/cmove diamond. For the current sample
+program control flow, such as a branch/state-selection diamond. For the current sample
 family it carries two branch outcomes, each with its own state token and target
 original basic block. Deflattening rewrites conditional transitions when both
 branch outcomes resolve.

@@ -34,13 +34,17 @@ DispatchThis/
 │       ├── string_decrypt.py   MLIL direct-call string decrypt recognizer/commenter.
 │       ├── phase_cleanup.py    One-shot branch/call target-decode cleanup.
 │       ├── deflatten.py        Computes and applies dispatcher state-token redirections.
-│       ├── nop_pass.py         Deflatten state-write NOPing.
-│       └── REFERENCE_conditional_obb.md   Annotated reference example for the
-│                                          conditional transition handling.
+│       └── nop_pass.py         Deflatten state-write NOPing.
 ├── docs/                       This documentation.
-│   ├── API.md                   Helper API reference for resolver profiles.
-│   ├── resolver-profiles.md     How to add bundled binary resolver profiles.
-│   └── assets/                 README screenshots.
+│   ├── API.md                  Helper API reference for resolver profiles.
+│   ├── conditional-deflattening.md
+│   ├── files.md                This source map.
+│   ├── known-issues.md
+│   ├── obfuscation.md
+│   ├── pipeline.md
+│   ├── resolver-profiles.md    How to add bundled binary resolver profiles.
+│   ├── adr/                    Architecture decision records.
+│   └── agents/                 Agent workflow notes.
 ├── README.md
 └── LICENSE
 ```
