@@ -48,6 +48,26 @@ addresses, or build recovery facts. Profile helpers reduce per-binary resolver
 code, but they do not own binary-specific recognition or workflow mutations.
 _Avoid_: utils, generic rule engine, backend
 
+**MLIL helper primitive**:
+A stable profile helper in `helpers.mlil` that exposes reusable Medium Level IL
+inspection behavior, such as call iteration, expression scalar-value extraction,
+expression operation queries, or variable-definition-aware expression traversal.
+It is not a binary-specific recognizer, pattern DSL, resolver engine, or recovery
+backend mutation point.
+_Avoid_: string decrypt helper, pattern rule, resolver engine
+
+**Expression scalar value**:
+A direct MLIL constant or Binary Ninja single-value result recovered from one
+expression without arithmetic folding, memory reads, PHI candidate expansion, or
+target validation.
+_Avoid_: full value engine, constant folder
+
+**Expression operation query**:
+A helper-level check for whether an MLIL expression tree, optionally including
+followed variable definitions, contains one of a caller-provided set of MLIL
+operation names.
+_Avoid_: pattern matcher, string decrypt recognizer
+
 **Active resolver profile**:
 The resolver profile explicitly selected for a BinaryView. It chooses how enabled
 functions interpret that binary's obfuscation shapes; it does not enable the

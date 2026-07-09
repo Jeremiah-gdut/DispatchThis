@@ -205,13 +205,14 @@ fall back to their normal value folder on `None`.
 
 ## `mlil`
 
-MLIL helpers inspect medium-level IL for indirect call targets, global slot
-analysis, expression walking, and cleanup-root collection.
+MLIL helpers inspect medium-level IL for call targets, global slot analysis,
+expression walking, operation queries, and cleanup-root collection.
 
 ### Constants
 
 | Name | Purpose |
 | --- | --- |
+| `CALL_OPS` | MLIL call and tail-call operations scanned by call iteration helpers, including typed, untyped, and SSA forms. |
 | `CONST_OPS` | MLIL constant operations: `MLIL_CONST`, `MLIL_CONST_PTR`. |
 | `LOAD_OPS` | MLIL load operations used by constant folding and load-shape recognition. |
 | `LOAD_STRUCT_OPS` | Struct load operations supported by slot-address helpers. |
@@ -302,6 +303,66 @@ A list of expression nodes. If `expr` is `None`, returns `[]`.
   `vars_read`, and `vars_written`.
 - Uses object identity to avoid repeated fallback visits.
 
+### `expression_has_operation`
+
+**Signature**
+
+```python
+expression_has_operation(expr, ops)
+```
+
+**Purpose**
+
+Return whether the expression tree rooted at `expr` contains any operation named
+by `ops`.
+
+**Parameters**
+
+- `expr`: MLIL expression or instruction to inspect.
+- `ops`: Operation name string, or an iterable of operation name strings.
+
+**Returns**
+
+`True` when any visited node has a matching operation name, otherwise `False`.
+
+**Key behavior and limits**
+
+- Uses `walk_expr`.
+- Does not follow variable definitions. Use
+  `expression_or_definitions_have_operation` when the shape may sit behind
+  `MLIL_VAR`.
+
+### `expression_or_definitions_have_operation`
+
+**Signature**
+
+```python
+expression_or_definitions_have_operation(mlil, expr, ops, max_depth=16)
+```
+
+**Purpose**
+
+Return whether `expr` or any followed `MLIL_VAR` definition contains an operation
+named by `ops`.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object supporting `get_var_definitions(var)`.
+- `expr`: MLIL expression or instruction to inspect.
+- `ops`: Operation name string, or an iterable of operation name strings.
+- `max_depth`: Maximum recursive variable-definition depth.
+
+**Returns**
+
+`True` when any visited expression or followed definition contains a matching
+operation, otherwise `False`.
+
+**Key behavior and limits**
+
+- Uses `walk_expr_with_defs`.
+- Shares the same definition-following limits as `walk_expr_with_defs`: no CFG
+  path reasoning and no feasibility filtering.
+
 ### `walk_expr_with_defs`
 
 **Signature**
@@ -361,6 +422,39 @@ The expression's `constant` value, or `None` if the peeled expression is not in
 - Stops when a variable has zero or multiple definitions.
 - Does not evaluate arithmetic, loads, or value-set information. Use
   `fold_constant_value` for broader folding.
+
+### `expression_scalar_value`
+
+**Signature**
+
+```python
+expression_scalar_value(mlil, expr)
+```
+
+**Purpose**
+
+Recover a direct MLIL constant or Binary Ninja single-value result after peeling
+single-definition variables.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object supporting `get_var_definitions(var)`.
+- `expr`: MLIL expression to inspect.
+
+**Returns**
+
+An integer value, or `None` when the expression is not a direct constant and does
+not expose a Binary Ninja value object of type `ConstantValue`,
+`ConstantPointerValue`, or `ImportedAddressValue`.
+
+**Key behavior and limits**
+
+- Calls `peel_var_definitions(..., require_single=True, allowed_ops=None)`.
+- Does not evaluate arithmetic, loads, PHI candidates, or memory. Use
+  `fold_constant_value` or a profile-private value engine when those semantics
+  are required.
+- Returns the value as reported by Binary Ninja. It does not apply U48 or U64
+  masking.
 
 ### `constant_address`
 
@@ -493,6 +587,62 @@ An iterator of `(expr, use_addr, slot_addr, offset)` tuples.
 - Delegates recognition to `load_slot_offsets`.
 - May yield multiple expressions for the same slot; planners should deduplicate
   at their own semantic level.
+
+### `iter_calls`
+
+**Signature**
+
+```python
+iter_calls(mlil, ops=CALL_OPS)
+```
+
+**Purpose**
+
+Yield MLIL call-like instructions from an MLIL function.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object exposing `instructions`.
+- `ops`: Operation name string or iterable of operation names to include. The
+  default is `CALL_OPS`.
+
+**Returns**
+
+An iterator of MLIL call-like instruction objects.
+
+**Key behavior and limits**
+
+- Scans only top-level MLIL instructions, not nested expressions.
+- Does not resolve targets or classify calls as direct/indirect.
+
+### `iter_direct_calls`
+
+**Signature**
+
+```python
+iter_direct_calls(mlil)
+```
+
+**Purpose**
+
+Yield MLIL call-like instructions whose destination has a recoverable scalar
+value.
+
+**Parameters**
+
+- `mlil`: MLIL function-like object exposing `instructions` and, for variable
+  destinations, `get_var_definitions(var)`.
+
+**Returns**
+
+An iterator of MLIL call-like instruction objects.
+
+**Key behavior and limits**
+
+- Uses `iter_calls` for traversal and
+  `expression_scalar_value(mlil, call.dest)` for target classification.
+- Does not validate that the target is executable, typed as a function, or in a
+  specific BinaryView section. Profiles still own those binary-specific checks.
 
 ### `mlil_stores_to_address`
 

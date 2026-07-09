@@ -6,6 +6,16 @@ from .memory import read_uint_le
 U64 = 0xFFFFFFFFFFFFFFFF
 U32 = 0xFFFFFFFF
 
+CALL_OPS = (
+    "MLIL_CALL",
+    "MLIL_CALL_SSA",
+    "MLIL_CALL_UNTYPED",
+    "MLIL_CALL_UNTYPED_SSA",
+    "MLIL_TAILCALL",
+    "MLIL_TAILCALL_SSA",
+    "MLIL_TAILCALL_UNTYPED",
+    "MLIL_TAILCALL_UNTYPED_SSA",
+)
 CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 LOAD_STRUCT_OPS = ("MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
 LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
@@ -41,6 +51,25 @@ def walk_expr(expr):
 
     visit(expr)
     return out
+
+
+def _op_names(ops):
+    return {ops} if isinstance(ops, str) else set(ops)
+
+
+def expression_has_operation(expr, ops):
+    """Return whether ``expr`` contains any operation in ``ops``."""
+    wanted = _op_names(ops)
+    return any(op_name(node) in wanted for node in walk_expr(expr))
+
+
+def expression_or_definitions_have_operation(mlil, expr, ops, max_depth=16):
+    """Return whether ``expr`` or followed MLIL_VAR definitions contain ``ops``."""
+    wanted = _op_names(ops)
+    return any(
+        op_name(node) in wanted
+        for node in walk_expr_with_defs(mlil, expr, max_depth=max_depth)
+    )
 
 
 def op_name(expr):
@@ -88,6 +117,24 @@ def constant_value(mlil, expr):
         allowed_ops=None,
     )
     return expr.constant if _op_name(expr) in CONST_OPS else None
+
+
+def expression_scalar_value(mlil, expr):
+    """Return a direct MLIL constant or Binary Ninja single-value result."""
+    expr = peel_var_definitions(
+        mlil,
+        expr,
+        max_depth=32,
+        require_single=True,
+        allowed_ops=None,
+    )
+    if _op_name(expr) in CONST_OPS:
+        return expr.constant
+    value = getattr(expr, "value", None)
+    value_type = getattr(getattr(value, "type", None), "name", None)
+    if value_type in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
+        return value.value
+    return None
 
 
 def constant_address(mlil, expr, depth=0, max_depth=32, address_mask=None):
@@ -275,6 +322,21 @@ def iter_indirect_calls(mlil):
         yield insn
 
 
+def iter_calls(mlil, ops=CALL_OPS):
+    """Yield MLIL call-like instructions."""
+    wanted = _op_names(ops)
+    for insn in getattr(mlil, "instructions", ()) or ():
+        if _op_name(insn) in wanted:
+            yield insn
+
+
+def iter_direct_calls(mlil):
+    """Yield MLIL call-like instructions with a recoverable scalar destination."""
+    for insn in iter_calls(mlil):
+        if expression_scalar_value(mlil, getattr(insn, "dest", None)) is not None:
+            yield insn
+
+
 def peel_var_definitions(
     mlil,
     expr,
@@ -404,6 +466,7 @@ def set_roots_before(mlil, site_addrs):
 
 
 __all__ = (
+    "CALL_OPS",
     "CONST_OPS",
     "LOAD_STRUCT_OPS",
     "LOAD_OPS",
@@ -414,6 +477,11 @@ __all__ = (
     "constant_address",
     "constant_value",
     "fold_constant_value",
+    "expression_has_operation",
+    "expression_or_definitions_have_operation",
+    "expression_scalar_value",
+    "iter_calls",
+    "iter_direct_calls",
     "iter_load_slot_offsets",
     "iter_indirect_calls",
     "load_slot_offsets",

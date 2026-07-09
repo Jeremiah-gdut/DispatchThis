@@ -68,6 +68,10 @@ def add(left, right):
     return Expr("MLIL_ADD", [left, right], left=left, right=right)
 
 
+def xor(left, right):
+    return Expr("MLIL_XOR", [left, right], left=left, right=right)
+
+
 def load(src, size=8):
     return Expr("MLIL_LOAD", [src], src=src, size=size)
 
@@ -92,6 +96,10 @@ def set_var(dest, src, instr_index, expr_index=None, address=0x1000):
 
 def call(dest):
     return Expr("MLIL_CALL", [dest], dest=dest)
+
+
+def call_like(op, dest):
+    return Expr(op, [dest], dest=dest)
 
 
 def nop(address=0x1000):
@@ -138,6 +146,56 @@ def test_iter_indirect_calls_skips_direct_constant_destinations():
     mlil = FakeMlil([direct, indirect, Expr("MLIL_SET_VAR")])
 
     assert list(mlil_helpers.iter_indirect_calls(mlil)) == [indirect]
+
+
+def test_call_helpers_scan_call_like_and_direct_destinations():
+    direct_calls = [
+        call_like(op, const(0x5000 + index))
+        for index, op in enumerate(mlil_helpers.CALL_OPS)
+    ]
+    value_dest = call(var("import", value=0x7000))
+    indirect = call(var("x0"))
+    mlil = FakeMlil([*direct_calls, value_dest, indirect, Expr("MLIL_SET_VAR")])
+
+    assert list(mlil_helpers.iter_calls(mlil)) == [*direct_calls, value_dest, indirect]
+    assert list(mlil_helpers.iter_calls(mlil, "MLIL_TAILCALL")) == [
+        call for call in direct_calls if mlil_helpers.op_name(call) == "MLIL_TAILCALL"
+    ]
+    assert list(mlil_helpers.iter_direct_calls(mlil)) == [*direct_calls, value_dest]
+
+
+def test_expression_scalar_value_reads_constants_value_sets_and_single_definitions():
+    definition = set_var("target", const(0x1234), instr_index=11)
+    other_a = set_var("ambiguous", const(1), instr_index=12)
+    other_b = set_var("ambiguous", const(2), instr_index=13)
+    mlil = FakeMlil(defs={"target": [definition], "ambiguous": [other_a, other_b]})
+
+    assert mlil_helpers.expression_scalar_value(mlil, const(0x5000)) == 0x5000
+    assert mlil_helpers.expression_scalar_value(mlil, var("import", value=0x6000)) == 0x6000
+    assert mlil_helpers.expression_scalar_value(mlil, var("target")) == 0x1234
+    assert mlil_helpers.expression_scalar_value(mlil, var("ambiguous")) is None
+    assert mlil_helpers.expression_scalar_value(mlil, add(const(1), const(2))) is None
+
+
+def test_operation_queries_scan_expression_trees():
+    expr = add(load(const(0x1000)), var("x0"))
+
+    assert mlil_helpers.expression_has_operation(expr, "MLIL_LOAD")
+    assert mlil_helpers.expression_has_operation(expr, ("MLIL_STORE", "MLIL_CONST_PTR"))
+    assert not mlil_helpers.expression_has_operation(expr, "MLIL_STORE")
+
+
+def test_operation_queries_can_follow_variable_definitions():
+    definition = set_var("tmp", xor(const(1), const(2)), instr_index=11)
+    mlil = FakeMlil(defs={"tmp": [definition]})
+
+    assert not mlil_helpers.expression_has_operation(var("tmp"), "MLIL_XOR")
+    assert mlil_helpers.expression_or_definitions_have_operation(mlil, var("tmp"), "MLIL_XOR")
+    assert mlil_helpers.expression_or_definitions_have_operation(
+        mlil,
+        var("tmp"),
+        ("MLIL_ADD", "MLIL_XOR"),
+    )
 
 
 def test_peel_var_definitions_tracks_set_var_trail():
@@ -281,6 +339,10 @@ def test_set_roots_before_returns_contiguous_assignment_instruction_indices():
 if __name__ == "__main__":
     test_deflatten_profile_helpers_normalize_mlil_shapes()
     test_iter_indirect_calls_skips_direct_constant_destinations()
+    test_call_helpers_scan_call_like_and_direct_destinations()
+    test_expression_scalar_value_reads_constants_value_sets_and_single_definitions()
+    test_operation_queries_scan_expression_trees()
+    test_operation_queries_can_follow_variable_definitions()
     test_peel_var_definitions_tracks_set_var_trail()
     test_fold_constant_value_folds_load_arithmetic_and_value_sets()
     test_walk_expr_and_cleanup_roots_return_instruction_indices()

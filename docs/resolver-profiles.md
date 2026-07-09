@@ -164,9 +164,10 @@ Use the helper modules by IL level and purpose:
 
 - `llil`: indirect-jump iteration, register definition peeling, and
   `const_values` for PHI-aware constant candidate sets.
-- `mlil`: indirect-call iteration, variable definition peeling, single-value
-  constant folding, expression walking, variable/state-token normalization,
-  address/slot extraction, store checks, and cleanup-root discovery.
+- `mlil`: direct/indirect call iteration, variable definition peeling,
+  constant/value extraction, single-value constant folding, expression walking
+  and operation queries, variable/state-token normalization, address/slot
+  extraction, store checks, and cleanup-root discovery.
 - `memory`: explicit-width little-endian reads, section checks, and target or
   address validation.
 - `facts`: branch, call, global constant, and string decrypt recovery-fact
