@@ -4,6 +4,7 @@ from binaryninja import ILSourceLocation, MediumLevelILLabel
 
 from ...helpers.mlil import cleanup_roots_for_expr, walk_expr
 from ...utils.log import log_info, log_warn
+from .rewrite import copy_mlil_with_instruction_rewrites
 
 
 U48 = 0xFFFFFFFFFFFF
@@ -267,7 +268,11 @@ def _plan_for_jump(bv, mlil, jump_il):
 
 def _condition_for_plan(mlil, plan):
     if "condition" in plan:
-        return mlil.copy_expr(plan["condition"])
+        condition = plan["condition"]
+        copy_to = getattr(condition, "copy_to", None)
+        if copy_to is not None:
+            return copy_to(mlil)
+        return mlil.copy_expr(condition)
     size = plan["condition_size"]
     return mlil.compare_equal(
         0,
@@ -276,8 +281,29 @@ def _condition_for_plan(mlil, plan):
     )
 
 
-def translate_indirect_branch_conditions(bv, mlil):
-    """Translate resolved two-target MLIL_JUMP_TO gadgets back to MLIL_IF in place."""
+def _label_for_source(mlil, instr_index):
+    get_label = getattr(mlil, "get_label_for_source_instruction", None)
+    if get_label is not None:
+        label = get_label(instr_index)
+        if label is not None:
+            return label
+    raise ValueError(f"no copied MLIL label for source instruction {instr_index}")
+
+
+def _replacement_for_plan(plan):
+    def replace(new_mlil, jump_il):
+        return new_mlil.if_expr(
+            _condition_for_plan(new_mlil, plan),
+            _label_for_source(new_mlil, plan["true"]),
+            _label_for_source(new_mlil, plan["false"]),
+            ILSourceLocation.from_instruction(jump_il),
+        )
+
+    return replace
+
+
+def translate_indirect_branch_conditions(bv, ctx, mlil):
+    """Translate resolved two-target MLIL_JUMP_TO gadgets back to MLIL_IF."""
     plans = []
     for ins in list(mlil.instructions):
         plan = _plan_for_jump(bv, mlil, ins)
@@ -291,25 +317,23 @@ def translate_indirect_branch_conditions(bv, mlil):
     if not plans:
         return mlil, 0, cleanup_roots
 
-    applied = 0
+    replacements = {}
     for jump_il, plan in plans:
-        try:
-            mlil.replace_expr(
-                jump_il.expr_index,
-                mlil.if_expr(
-                    _condition_for_plan(mlil, plan),
-                    _label(plan["true"]),
-                    _label(plan["false"]),
-                    ILSourceLocation.from_instruction(jump_il),
-                ),
-            )
-            applied += 1
-        except Exception as e:  # noqa: BLE001
-            log_warn(f"[branch-conditions] failed to translate {hex(jump_il.address)}: {e}")
+        instr_index = getattr(jump_il, "instr_index", None)
+        if instr_index is None:
+            log_warn(f"[branch-conditions] skipped {hex(jump_il.address)} without instruction index")
+            continue
+        replacements[instr_index] = _replacement_for_plan(plan)
+    if not replacements:
+        return mlil, 0, set()
+
+    try:
+        new_mlil, applied = copy_mlil_with_instruction_rewrites(ctx, replacements, mlil=mlil)
+    except Exception as e:  # noqa: BLE001
+        log_warn(f"[branch-conditions] failed to translate branch conditions: {e}")
+        return mlil, 0, set()
 
     if applied:
-        # The workflow callback owns committing this MLIL object to AnalysisContext.
-        mlil.finalize()
-        mlil.generate_ssa_form()
         log_info(f"[branch-conditions] translated {applied} indirect branch switch(es) to if/else")
-    return mlil, applied, cleanup_roots
+        return new_mlil, applied, cleanup_roots
+    return mlil, 0, set()

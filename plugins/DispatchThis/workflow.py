@@ -25,12 +25,12 @@ GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
 
 def _commit_mlil(ctx, mlil):
     try:
-        ctx.mlil = mlil
+        ctx.set_mlil_function(mlil)
         return
     except Exception:  # noqa: BLE001
         pass
     try:
-        ctx.set_mlil_function(mlil)
+        ctx.mlil = mlil
     except Exception as e:  # noqa: BLE001
         func = ctx.function
         log_warn(f"[workflow] {func.name}: failed to commit MLIL changes: {e}")
@@ -276,9 +276,10 @@ def translate_branches_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    _, n, cleanup_roots = translate_indirect_branch_conditions(bv, mlil)
+    new_mlil, n, cleanup_roots = translate_indirect_branch_conditions(bv, ctx, mlil)
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
+        mlil = new_mlil
     cleaned = 0
     branch_cleanup_needed = state.branch_cleanup_needed()
     if branch_cleanup_needed or state.branch_receipts or state.branch_cleanup_roots:

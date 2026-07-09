@@ -100,6 +100,7 @@ for name, value in {
     "ILSourceLocation": FakeILSourceLocation,
     "Logger": FakeLogger,
     "MediumLevelILJump": object,
+    "MediumLevelILFunction": object,
     "MediumLevelILLabel": FakeMediumLevelILLabel,
     "Settings": FakeSettings,
     "SettingsScope": types.SimpleNamespace(SettingsResourceScope="resource"),

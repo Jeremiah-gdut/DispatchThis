@@ -794,8 +794,8 @@ def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
     set_roots_before_results[:] = [{21621}]
     translated = []
     old_translate = workflow.translate_indirect_branch_conditions
-    workflow.translate_indirect_branch_conditions = lambda bv, mlil: (
-        translated.append((bv, mlil)),
+    workflow.translate_indirect_branch_conditions = lambda bv, ctx_arg, mlil: (
+        translated.append((bv, ctx_arg, mlil)),
         (mlil, 1, {44}),
     )[1]
     ctx = FakeContext()
@@ -805,7 +805,7 @@ def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
     finally:
         workflow.translate_indirect_branch_conditions = old_translate
 
-    assert translated == [(ctx.view, ctx.mlil)]
+    assert translated == [(ctx.view, ctx, ctx.mlil)]
     assert cleanup_decode_calls == [((ctx.mlil, {31, 32, 44, 21621}, "branch"), {})]
     assert FakeWorkflowState.branch_cleanup_marked is True
     assert ctx.committed is True
@@ -813,6 +813,43 @@ def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.branch_cleanup_root_map = {}
+    cleanup_decode_results.clear()
+    set_roots_before_results.clear()
+
+
+def test_branch_cleanup_runs_on_translated_mlil():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_marked = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    FakeWorkflowState.branch_cleanup_root_map = {}
+    cleanup_decode_calls.clear()
+    cleanup_decode_results[:] = [1]
+    set_roots_before_results[:] = [{21621}]
+    old_translate = workflow.translate_indirect_branch_conditions
+    old_commit = workflow._commit_mlil
+    ctx = FakeContext()
+    translated_mlil = object()
+    committed = []
+    workflow.translate_indirect_branch_conditions = lambda _bv, _ctx, _mlil: (
+        translated_mlil,
+        1,
+        {44},
+    )
+    workflow._commit_mlil = lambda ctx_arg, mlil_arg: committed.append((ctx_arg, mlil_arg))
+
+    try:
+        workflow.translate_branches_mlil(ctx)
+    finally:
+        workflow.translate_indirect_branch_conditions = old_translate
+        workflow._commit_mlil = old_commit
+
+    assert cleanup_decode_calls == [((translated_mlil, {44, 21621}, "branch"), {})]
+    assert committed == [(ctx, translated_mlil)]
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.receipts = {}
     cleanup_decode_results.clear()
     set_roots_before_results.clear()
 
