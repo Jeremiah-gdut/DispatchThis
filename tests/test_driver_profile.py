@@ -80,12 +80,30 @@ class FakeBv:
     def __init__(self):
         self.memory = {}
         self.functions = {}
+        self.data_vars = {}
+        self.sections = {}
 
     def read(self, addr, size):
         return self.memory.get(addr, b"")[:size]
 
     def get_function_at(self, addr):
         return self.functions.get(addr)
+
+    def get_data_var_at(self, addr):
+        return self.data_vars.get(addr)
+
+    def get_sections_at(self, addr):
+        return self.sections.get(addr, [])
+
+
+class DataVar:
+    def __init__(self, type_name):
+        self.type = type_name
+
+
+class Section:
+    def __init__(self, name):
+        self.name = name
 
 
 class FakeFunc:
@@ -106,12 +124,16 @@ def addr_of(name):
     return Expr("MLIL_ADDRESS_OF", src=name)
 
 
-def set_var(dest, src):
-    return Expr("MLIL_SET_VAR", [src], dest=dest, src=src, vars_written={dest})
+def set_var(dest, src, address=0x1000):
+    return Expr("MLIL_SET_VAR", [src], dest=dest, src=src, vars_written={dest}, address=address)
 
 
 def binary(op, left, right):
     return Expr(op, [left, right], left=left, right=right)
+
+
+def load(src, size=8, address=0x1000):
+    return Expr("MLIL_LOAD", [src], src=src, size=size, address=address)
 
 
 def store(dest, src):
@@ -302,6 +324,24 @@ def test_driver_deflatten_hook_skips_conditional_tail_with_real_store():
     assert all(plan.get("if_il") is not branch for plan in plans)
 
 
+def test_driver_global_constant_hook_plans_driver_blob_base_slot():
+    bv = FakeBv()
+    slot = 0x2987E0
+    value = 0x6DE0D0EBF3F9FF28
+    bv.data_vars[slot] = DataVar("void*")
+    bv.sections[slot] = [Section(".data")]
+    bv.memory[slot] = value.to_bytes(8, "little")
+    il = one_block(set_var("x9", load(const(slot), address=0x30A40), address=0x30A40))
+
+    assert driver.plan_global_constant_slots(bv, il) == [{
+        "slot_addr": slot,
+        "type": "void const* const",
+        "value": value,
+        "resolved_addr": value & 0xFFFFFFFFFFFF,
+        "use_addr": 0x30A40,
+    }]
+
+
 def test_driver_string_decrypt_hook_recovers_clone_calls():
     bv = FakeBv()
     callee = decrypt_callee(0x5E334, 3, 5)
@@ -350,6 +390,7 @@ def test_driver_string_decrypt_hook_rejects_oversized_key_modulus():
 if __name__ == "__main__":
     test_driver_deflatten_hook_handles_stack_state_stores()
     test_driver_deflatten_hook_skips_conditional_tail_with_real_store()
+    test_driver_global_constant_hook_plans_driver_blob_base_slot()
     test_driver_string_decrypt_hook_recovers_clone_calls()
     test_driver_string_decrypt_hook_rejects_counter_loop_callee()
     test_driver_string_decrypt_hook_rejects_oversized_key_modulus()

@@ -1,7 +1,7 @@
 from collections import deque
 
 from . import valorant_2_6
-from ..helpers import facts, mlil
+from ..helpers import facts, memory, mlil
 from ..utils.log import log_debug, log_info, log_warn
 
 
@@ -25,6 +25,10 @@ PROFILE_DESCRIPTION = (
 # - string decrypt: main @ 0x36d10, 65 decrypt facts recovered in driver.bndb.
 
 _DISPATCHER_MIN_ROWS = 3
+_DRIVER_GLOBAL_CONSTANT_SLOTS = (0x2987E0,)
+_CONST_DATA_SECTIONS = {".data"}
+_CONST_PTR_TYPE = valorant_2_6.CONST_SLOT_TYPE
+_U48 = 0xFFFFFFFFFFFF
 
 
 def resolve_branch_gadget(bv, il, known_targets=None):
@@ -36,7 +40,43 @@ def resolve_call_gadget(bv, il):
 
 
 def plan_global_constant_slots(bv, il):
-    return valorant_2_6.plan_global_constant_slots(bv, il)
+    plans = {
+        plan["slot_addr"]: plan
+        for plan in valorant_2_6.plan_global_constant_slots(bv, il)
+    }
+    for slot_addr, use_addr in _driver_global_constant_slot_refs(il):
+        _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr)
+    return [plans[addr] for addr in sorted(plans)]
+
+
+def _driver_global_constant_slot_refs(il):
+    if il is None:
+        return []
+    refs = {}
+    for _expr, use_addr, slot_addr, _offset in mlil.iter_load_slot_offsets(il, address_mask=_U48):
+        if slot_addr in _DRIVER_GLOBAL_CONSTANT_SLOTS:
+            refs.setdefault(slot_addr, use_addr)
+    return refs.items()
+
+
+def _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr):
+    if slot_addr in plans:
+        return
+    data_var = bv.get_data_var_at(slot_addr)
+    if data_var is None or str(data_var.type).replace(" ", "") != "void*":
+        return
+    if not memory.in_section(bv, slot_addr, _CONST_DATA_SECTIONS):
+        return
+    value = memory.read_qword_slot(bv, slot_addr)
+    if value is None:
+        return
+    plans[slot_addr] = facts.global_constant_fact(
+        slot_addr,
+        _CONST_PTR_TYPE,
+        value,
+        value & _U48,
+        use_addr,
+    )
 
 
 def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
