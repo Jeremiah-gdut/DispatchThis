@@ -25,9 +25,9 @@ PROFILE_DESCRIPTION = (
 # - string decrypt: main @ 0x36d10, 65 decrypt facts recovered in driver.bndb.
 
 _DISPATCHER_MIN_ROWS = 3
-_DRIVER_GLOBAL_CONSTANT_SLOTS = (0x2987E0,)
 _CONST_DATA_SECTIONS = {".data"}
 _CONST_PTR_TYPE = valorant_2_6.CONST_SLOT_TYPE
+_DRIVER_GLOBAL_CONSTANT_SOURCE_TYPES = {"void*", "int64_t"}
 _U48 = 0xFFFFFFFFFFFF
 
 
@@ -53,9 +53,14 @@ def _driver_global_constant_slot_refs(il):
     if il is None:
         return []
     refs = {}
-    for _expr, use_addr, slot_addr, _offset in mlil.iter_load_slot_offsets(il, address_mask=_U48):
-        if slot_addr in _DRIVER_GLOBAL_CONSTANT_SLOTS:
-            refs.setdefault(slot_addr, use_addr)
+    for call in _direct_calls(il):
+        params = list(getattr(call, "params", ()) or ())
+        if len(params) < 2:
+            continue
+        use_addr = getattr(call, "address", 0)
+        for expr in mlil.walk_expr_with_defs(il, params[1], max_depth=32):
+            for slot_addr, _offset in mlil.load_slot_offsets(il, expr, address_mask=_U48):
+                refs.setdefault(slot_addr, use_addr)
     return refs.items()
 
 
@@ -63,7 +68,8 @@ def _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr):
     if slot_addr in plans:
         return
     data_var = bv.get_data_var_at(slot_addr)
-    if data_var is None or str(data_var.type).replace(" ", "") != "void*":
+    type_name = str(getattr(data_var, "type", "")).replace(" ", "") if data_var is not None else ""
+    if type_name not in _DRIVER_GLOBAL_CONSTANT_SOURCE_TYPES:
         return
     if not memory.in_section(bv, slot_addr, _CONST_DATA_SECTIONS):
         return

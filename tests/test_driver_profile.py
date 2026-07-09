@@ -154,8 +154,8 @@ def if_cond(true_idx, false_idx):
     return Expr("MLIL_IF", [cond], condition=cond, true=true_idx, false=false_idx)
 
 
-def call(dest, params):
-    return Expr("MLIL_CALL", [dest, *params], dest=dest, params=params, address=0x5000)
+def call(dest, params, address=0x5000):
+    return Expr("MLIL_CALL", [dest, *params], dest=dest, params=params, address=address)
 
 
 def link(source, target):
@@ -326,20 +326,44 @@ def test_driver_deflatten_hook_skips_conditional_tail_with_real_store():
 
 def test_driver_global_constant_hook_plans_driver_blob_base_slot():
     bv = FakeBv()
-    slot = 0x2987E0
-    value = 0x6DE0D0EBF3F9FF28
-    bv.data_vars[slot] = DataVar("void*")
-    bv.sections[slot] = [Section(".data")]
-    bv.memory[slot] = value.to_bytes(8, "little")
-    il = one_block(set_var("x9", load(const(slot), address=0x30A40), address=0x30A40))
+    base_slot = 0x2983C8
+    key_slot = 0x2983F8
+    values = {
+        base_slot: 0x206CA19FC1FAF2B9,
+        key_slot: 0xAFE4239D807FA475,
+    }
+    bv.data_vars[base_slot] = DataVar("void*")
+    bv.data_vars[key_slot] = DataVar("int64_t")
+    bv.sections[base_slot] = [Section(".data")]
+    bv.sections[key_slot] = [Section(".data")]
+    bv.memory[base_slot] = values[base_slot].to_bytes(8, "little")
+    bv.memory[key_slot] = values[key_slot].to_bytes(8, "little")
+    base_load = set_var("x9", load(const(base_slot), address=0x2F670), address=0x2F670)
+    key_load = set_var("x12", load(const(key_slot), address=0x2F674), address=0x2F674)
+    source_arg = set_var("x1", binary("MLIL_ADD", var("x9"), var("x12")), address=0x2F6A4)
+    il = one_block(
+        base_load,
+        key_load,
+        source_arg,
+        call(const(0x579CC), [const(0x2C8810), var("x1")], address=0x2F6A8),
+    )
 
-    assert driver.plan_global_constant_slots(bv, il) == [{
-        "slot_addr": slot,
-        "type": "void const* const",
-        "value": value,
-        "resolved_addr": value & 0xFFFFFFFFFFFF,
-        "use_addr": 0x30A40,
-    }]
+    assert driver.plan_global_constant_slots(bv, il) == [
+        {
+            "slot_addr": base_slot,
+            "type": "void const* const",
+            "value": values[base_slot],
+            "resolved_addr": values[base_slot] & 0xFFFFFFFFFFFF,
+            "use_addr": 0x2F6A8,
+        },
+        {
+            "slot_addr": key_slot,
+            "type": "void const* const",
+            "value": values[key_slot],
+            "resolved_addr": values[key_slot] & 0xFFFFFFFFFFFF,
+            "use_addr": 0x2F6A8,
+        },
+    ]
 
 
 def test_driver_string_decrypt_hook_recovers_clone_calls():
