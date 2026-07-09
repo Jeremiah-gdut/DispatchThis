@@ -75,6 +75,19 @@ def test_valorant_2_6_resolver_profile_is_registered():
     assert profile.plan_string_decrypt_calls is not None
 
 
+def test_driver_2_6_resolver_profile_is_registered():
+    profiles = import_module("plugins.DispatchThis.profiles")
+
+    profile = profiles.get_profile("driver_2_6")
+
+    assert profile.id == "driver_2_6"
+    assert profile.resolve_branch_gadget is not None
+    assert profile.resolve_call_gadget is not None
+    assert profile.plan_global_constant_slots is not None
+    assert profile.plan_deflatten_redirections is not None
+    assert profile.plan_string_decrypt_calls is not None
+
+
 def test_profile_without_required_hook_is_rejected():
     profiles = import_module("plugins.DispatchThis.profiles")
     module = types.SimpleNamespace(
@@ -166,7 +179,7 @@ def test_profile_setting_is_registered_with_bundled_profiles():
             "description": "Active DispatchThis resolver profile for this BinaryView.",
             "type": "string",
             "default": "default",
-            "enum": ["default", "dyzznb", "valorant_2_6"],
+            "enum": ["default", "driver_2_6", "dyzznb", "valorant_2_6"],
         },
     )]
 
