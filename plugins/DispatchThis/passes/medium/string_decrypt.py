@@ -189,22 +189,39 @@ def decode_string_blob(bv, source_addr, spec):
 
 
 def _escaped(data):
+    """Format plaintext for a single-line decrypt comment.
+
+    ASCII controls and quotes stay C-style escaped. Valid UTF-8 printable text
+    (including CJK and emoji) is shown as characters; invalid UTF-8 bytes stay
+    as ``\\xHH``.
+    """
+    data = bytes(data)
+    # surrogateescape keeps undecodable bytes recoverable as U+DC80..U+DCFF.
+    text = data.decode("utf-8", errors="surrogateescape")
     out = []
-    for ch in data:
-        if ch == 0:
+    for ch in text:
+        code = ord(ch)
+        if code == 0:
             out.append("\\0")
-        elif ch == 9:
+        elif code == 9:
             out.append("\\t")
-        elif ch == 10:
+        elif code == 10:
             out.append("\\n")
-        elif ch == 13:
+        elif code == 13:
             out.append("\\r")
-        elif ch in (34, 92):
-            out.append("\\" + chr(ch))
-        elif 32 <= ch <= 126:
-            out.append(chr(ch))
+        elif ch in ('"', "\\"):
+            out.append("\\" + ch)
+        elif 32 <= code <= 126:
+            out.append(ch)
+        elif code < 32 or code == 0x7F:
+            out.append(f"\\x{code:02x}")
+        elif 0xDC80 <= code <= 0xDCFF:
+            out.append(f"\\x{code - 0xDC00:02x}")
+        elif ch.isprintable():
+            out.append(ch)
         else:
-            out.append(f"\\x{ch:02x}")
+            for byte in ch.encode("utf-8"):
+                out.append(f"\\x{byte:02x}")
     return "".join(out)
 
 

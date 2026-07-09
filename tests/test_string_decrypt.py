@@ -270,6 +270,12 @@ def test_decrypt_comment_escapes_single_line_unsafe_bytes():
     assert _escaped(b'A\x00\n\r\t"\\\x01\x7f\x80Z') == expected
 
 
+def test_decrypt_comment_keeps_utf8_printable_text():
+    text = "是否使用上次启动配置(Y/N):\n👇🏻"
+    assert _escaped(text.encode("utf-8") + b"\x00") == text.replace("\n", "\\n") + "\\0"
+    assert _escaped(b"\x1b[31;1m\x00") == "\\x1b[31;1m\\0"
+
+
 def test_skips_indirect_non_constant_and_non_stable_calls():
     bv = FakeBv()
     callee = decrypt_callee("libtersafe.so")
