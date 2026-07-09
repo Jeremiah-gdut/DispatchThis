@@ -227,6 +227,27 @@ def test_const_values_collect_phi_candidates():
     assert llil_helpers.const_values(None, ssa, reg(x1_3)) == {0x10, 0x20}
 
 
+def test_correlated_const_values_preserves_sibling_phi_arms():
+    a0 = Var("x1", 1)
+    a1 = Var("x1", 2)
+    a = Var("x1", 3)
+    b0 = Var("x2", 1)
+    b1 = Var("x2", 2)
+    b = Var("x2", 3)
+    ssa = FakeSSA({
+        a0: set_reg(const(1)),
+        a1: set_reg(const(2)),
+        a: phi(a0, a1, instr_index=7),
+        b0: set_reg(const(10)),
+        b1: set_reg(const(20)),
+        b: phi(b0, b1, instr_index=8),
+    })
+    expr = add(reg(a), reg(b))
+
+    assert llil_helpers.const_values(None, ssa, expr) == {11, 12, 21, 22}
+    assert llil_helpers.correlated_const_values(None, ssa, expr) == {11, 22}
+
+
 def test_const_values_phi_cycle_returns_candidates_without_recursing_forever():
     x1_1 = Var("x1", 1)
     x1_2 = Var("x1", 2)
@@ -320,7 +341,8 @@ if __name__ == "__main__":
     test_resolve_llil_jump_plan_preserves_multi_target_branch_fact()
     test_peel_reg_definition_follows_ssa_copies_until_expression()
     test_const_values_collect_phi_candidates()
+    test_correlated_const_values_preserves_sibling_phi_arms()
     test_const_values_phi_cycle_returns_candidates_without_recursing_forever()
-    test_const_values_uses_live_edge_phi_when_predicate_is_constant()
+    test_const_values_keeps_phi_candidates_even_when_predicate_is_constant()
     test_const_values_unresolved_value_falls_back_to_empty_set()
     test_llil_rewrite_does_not_remove_user_functions_from_low_pass()

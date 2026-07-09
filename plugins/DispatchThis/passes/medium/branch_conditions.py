@@ -49,13 +49,22 @@ def _eval_const(bv, mlil, expr, overrides, depth=0):
     if op == "MLIL_VAR":
         if expr.src in overrides:
             return overrides[expr.src] & U64
-        d = _single_var_def(mlil, expr.src)
-        return None if d is None else _eval_const(bv, mlil, d.src, overrides, depth + 1)
+        values = set()
+        for definition in mlil.get_var_definitions(expr.src):
+            value = _eval_const(bv, mlil, definition.src, overrides, depth + 1)
+            if value is None:
+                return None
+            values.add(value)
+        return values.pop() if len(values) == 1 else None
 
     if op in ("MLIL_ZX", "MLIL_SX", "MLIL_LOW_PART"):
         return _eval_const(bv, mlil, expr.src, overrides, depth + 1)
 
-    if op in ("MLIL_ADD", "MLIL_SUB", "MLIL_AND", "MLIL_OR", "MLIL_XOR", "MLIL_LSL", "MLIL_LSR"):
+    if op == "MLIL_NEG":
+        value = _eval_const(bv, mlil, expr.src, overrides, depth + 1)
+        return None if value is None else (-value) & U64
+
+    if op in ("MLIL_ADD", "MLIL_SUB", "MLIL_MUL", "MLIL_AND", "MLIL_OR", "MLIL_XOR", "MLIL_LSL", "MLIL_LSR"):
         l = _eval_const(bv, mlil, expr.left, overrides, depth + 1)
         r = _eval_const(bv, mlil, expr.right, overrides, depth + 1)
         if l is None or r is None:
@@ -64,6 +73,8 @@ def _eval_const(bv, mlil, expr, overrides, depth=0):
             return (l + r) & U64
         if op == "MLIL_SUB":
             return (l - r) & U64
+        if op == "MLIL_MUL":
+            return (l * r) & U64
         if op == "MLIL_AND":
             return (l & r) & U64
         if op == "MLIL_OR":
@@ -145,6 +156,31 @@ def _const_assigns(mlil, bb):
     return assigns
 
 
+def _assign_size(assign):
+    return getattr(assign, "size", None) or getattr(getattr(assign, "src", None), "size", None) or 8
+
+
+def _plan_for_assigned_target_var(bv, mlil, jump_il, true_assigns, false_assigns):
+    for var in sorted(set(true_assigns) & set(false_assigns), key=str):
+        true_value, true_assign = true_assigns[var]
+        false_value, false_assign = false_assigns[var]
+        if true_value == false_value:
+            continue
+        true_idx = _target_for_value(bv, mlil, jump_il, var, true_value)
+        false_idx = _target_for_value(bv, mlil, jump_il, var, false_value)
+        if true_idx is None or false_idx is None or true_idx == false_idx:
+            continue
+        return {
+            "condition_var": var,
+            "condition_size": _assign_size(true_assign),
+            "condition_value": true_value,
+            "true": true_idx,
+            "false": false_idx,
+            "cleanup_roots": cleanup_roots_for_expr(mlil, jump_il.dest),
+        }
+    return None
+
+
 def _source_if_for_arm(mlil, bb):
     for edge in bb.incoming_edges:
         pred = edge.source
@@ -193,16 +229,19 @@ def _plan_for_jump(bv, mlil, jump_il):
     if len(arms) != 2:
         return None
 
+    arm_assigns = [_const_assigns(mlil, arm) for arm in arms]
+    assign_plan = _plan_for_assigned_target_var(bv, mlil, jump_il, arm_assigns[0], arm_assigns[1])
+
     true_if = _source_if_for_arm(mlil, arms[0])
     false_if = _source_if_for_arm(mlil, arms[1])
     if true_if is None or false_if is None or true_if.expr_index != false_if.expr_index:
-        return None
+        return assign_plan
     if_il = true_if
 
     true_arm = mlil[if_il.true].il_basic_block
     false_arm = mlil[if_il.false].il_basic_block
     if {true_arm.start, false_arm.start} != {bb.start for bb in arms}:
-        return None
+        return assign_plan
 
     true_assigns = _const_assigns(mlil, true_arm)
     false_assigns = _const_assigns(mlil, false_arm)
@@ -223,7 +262,18 @@ def _plan_for_jump(bv, mlil, jump_il):
             ),
         }
 
-    return None
+    return assign_plan
+
+
+def _condition_for_plan(mlil, plan):
+    if "condition" in plan:
+        return mlil.copy_expr(plan["condition"])
+    size = plan["condition_size"]
+    return mlil.compare_equal(
+        0,
+        mlil.var(size, plan["condition_var"]),
+        mlil.const(size, plan["condition_value"]),
+    )
 
 
 def translate_indirect_branch_conditions(bv, mlil):
@@ -247,7 +297,7 @@ def translate_indirect_branch_conditions(bv, mlil):
             mlil.replace_expr(
                 jump_il.expr_index,
                 mlil.if_expr(
-                    mlil.copy_expr(plan["condition"]),
+                    _condition_for_plan(mlil, plan),
                     _label(plan["true"]),
                     _label(plan["false"]),
                     ILSourceLocation.from_instruction(jump_il),

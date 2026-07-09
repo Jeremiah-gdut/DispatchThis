@@ -130,6 +130,79 @@ was recovered.
   `len(values) == 1`.
 - Values are masked to the helper's current 48-bit LLIL address model.
 
+### `correlated_const_values`
+
+**Signature**
+
+```python
+correlated_const_values(bv, ssa, expr, max_depth=32)
+```
+
+**Purpose**
+
+Recover LLIL constant candidates while preserving same-arm relationships across
+multiple sibling `LLIL_REG_PHI` nodes in one expression.
+
+**Parameters**
+
+- `bv`: BinaryView-like object, same role as in `const_values`.
+- `ssa`: LLIL SSA function-like object supporting register definition lookup.
+- `expr`: The LLIL expression to evaluate.
+- `max_depth`: Maximum recursive expression/definition depth.
+
+**Returns**
+
+A `set[int]` of recovered candidates. If sibling PHIs cannot be safely
+correlated, falls back to `const_values`.
+
+**Key behavior and limits**
+
+- When an expression reads several PHIs with the same arm count, evaluates the
+  expression once per arm using all PHI operands from that arm together.
+- Avoids impossible Cartesian-product combinations such as
+  `phi(1, 2) + phi(10, 20) -> {11, 12, 21, 22}`; correlated evaluation returns
+  `{11, 22}` for that shape.
+- Does not replace `const_values`; profiles should use this only when PHI
+  operands are expected to come from the same predecessor split.
+- Values are masked through `const_values`' current 48-bit LLIL address model.
+
+### `correlated_phi_values`
+
+**Signature**
+
+```python
+correlated_phi_values(ssa, expr, value_func, max_depth=32)
+```
+
+**Purpose**
+
+Generic same-arm PHI evaluator for profiles with their own value folder.
+
+**Parameters**
+
+- `ssa`: LLIL SSA function-like object supporting register definition lookup.
+- `expr`: The LLIL expression to evaluate.
+- `value_func`: Callable with signature `value_func(operand, bindings=None)`.
+  It must return a `set[int]`. `bindings` maps PHI registers, and their string
+  names, to the arm value selected by the helper.
+- `max_depth`: Maximum recursive expression/definition depth when collecting
+  PHI registers.
+
+**Returns**
+
+A `set[int]` when same-arm evaluation succeeds, otherwise `None`. Callers should
+fall back to their normal value folder on `None`.
+
+**Key behavior and limits**
+
+- Owns only PHI-arm correlation; the caller's `value_func` owns arithmetic,
+  loads, width masks, and binary-specific address models.
+- Requires every collected PHI to expose the same number of operands, and each
+  selected operand to fold to exactly one value.
+- Assumes sibling PHIs use matching operand order for the same predecessor
+  edges; callers should fall back when that shape is not known.
+- Does not mutate IL or workflow state.
+
 ## `mlil`
 
 MLIL helpers inspect medium-level IL for indirect call targets, global slot

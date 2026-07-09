@@ -143,7 +143,8 @@ def register_workflows():
 Settings().set_integer("analysis.limits.maxFunctionSize", 0)
 Settings().set_integer("analysis.limits.expressionValueComputeMaxDepth", 99999)
 Settings().set_integer("analysis.limits.maxFunctionAnalysisTime", 600000)
-Settings().set_integer("analysis.limits.maxFunctionUpdateCount", 0)
+# Keep this finite so non-enrolled complex functions cannot analyze forever.
+Settings().set_integer("analysis.limits.maxFunctionUpdateCount", 1024)
 
 # Prevent BN from lowering 32-bit state writes into __builtin_strncpy intrinsics,
 # which the MLIL_STORE/SET_VAR matcher won't recognize.

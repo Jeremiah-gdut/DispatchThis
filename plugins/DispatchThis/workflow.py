@@ -59,8 +59,8 @@ def _normalized_type_name(type_value):
     return str(type_value).replace(" ", "")
 
 
-def _global_slot_type(bv):
-    parsed, _ = bv.parse_type_string(f"{CONST_SLOT_TYPE} dispatchthis_global_constant_slot")
+def _global_slot_type(bv, type_name=CONST_SLOT_TYPE):
+    parsed, _ = bv.parse_type_string(f"{type_name} dispatchthis_global_constant_slot")
     return parsed
 
 
@@ -319,7 +319,7 @@ def resolve_globals_mlil(ctx: AnalysisContext):
         return
 
     receipts = bv.session_data.setdefault(GLOBAL_CONSTANT_RECEIPTS, {})
-    slot_type = None
+    slot_types = {}
     applied = 0
     changed = False
     failed = False
@@ -337,8 +337,9 @@ def resolve_globals_mlil(ctx: AnalysisContext):
             changed = state.mark_global_slot(slot_addr, type_name) or changed
             continue
         try:
-            if slot_type is None:
-                slot_type = _global_slot_type(bv)
+            if type_name not in slot_types:
+                slot_types[type_name] = _global_slot_type(bv, type_name)
+            slot_type = slot_types[type_name]
             bv.define_user_data_var(slot_addr, slot_type)
             if not _global_type_applied(bv, slot_addr, type_name):
                 log_warn(f"[workflow] {func.name}: failed to verify global const slot @ {hex(slot_addr)}")

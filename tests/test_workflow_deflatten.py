@@ -289,8 +289,12 @@ class FakeContext:
         )
         self.typed_globals = []
 
-        def parse_type_string(_decl):
-            return ("uint64_t", None)
+        def parse_type_string(decl):
+            name = "dispatchthis_global_constant_slot"
+            if f" {name}" not in decl:
+                return (decl, None)
+            before, after = decl.split(f" {name}", 1)
+            return (f"{before}{after}", name)
 
         def get_data_var_at(addr):
             return self.view.session_data.setdefault("data_vars", {}).get(addr)
@@ -839,6 +843,40 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     assert ctx.typed_globals == []
     assert FakeWorkflowState.global_slots == []
     assert FakeWorkflowState.global_stable_marked is True
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    global_plan_results.clear()
+
+
+def test_global_resolver_applies_profile_type():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.global_receipts = {}
+    FakeWorkflowState.global_slots = []
+    FakeWorkflowState.global_stable_marked = False
+    FakeWorkflowState.globals_stable = False
+    active_profile_calls.clear()
+    global_plan_calls.clear()
+    ctx = FakeContext()
+    global_plan_results[:] = [
+        {
+            "slot_addr": 0x11F57B8,
+            "type": "void const* const",
+            "value": 0x1234,
+            "resolved_addr": 0x1234,
+            "use_addr": 0,
+        },
+    ]
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert ctx.typed_globals == [
+        (0x11F57B8, "void const* const"),
+    ]
+    assert ctx.view.session_data[workflow.GLOBAL_CONSTANT_RECEIPTS] == {
+        0x11F57B8: "void const* const",
+    }
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False

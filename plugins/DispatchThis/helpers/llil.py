@@ -61,6 +61,60 @@ def const_values(bv, ssa, expr, max_depth=32):
     return _const_values(bv, ssa, expr, 0, max_depth, set())
 
 
+def correlated_const_values(bv, ssa, expr, max_depth=32):
+    """Return constants while preserving same-arm values across sibling PHIs."""
+    values = correlated_phi_values(
+        ssa,
+        expr,
+        lambda operand, bindings=None: _const_values_for_operand(
+            bv,
+            ssa,
+            operand,
+            0,
+            max_depth,
+            set(),
+            bindings,
+        ),
+        max_depth=max_depth,
+    )
+    return const_values(bv, ssa, expr, max_depth=max_depth) if values is None else values
+
+
+def correlated_phi_values(ssa, expr, value_func, max_depth=32):
+    """Evaluate ``expr`` once per shared PHI arm using ``value_func``.
+
+    ``value_func(operand, bindings)`` must return a ``set[int]``. The helper
+    returns ``None`` when the expression has no multi-PHI correlation or when a
+    PHI arm cannot be evaluated to exactly one value.
+    """
+    phi_regs = tuple(_collect_phi_regs(ssa, expr, max_depth=max_depth))
+    if len(phi_regs) <= 1:
+        return None
+
+    phi_defs = [(reg, _reg_definition(ssa, reg)) for reg in phi_regs]
+    if any(
+        getattr(getattr(definition, "operation", None), "name", None) != "LLIL_REG_PHI"
+        for _reg, definition in phi_defs
+    ):
+        return None
+    arities = {len(getattr(definition, "src", ()) or ()) for _reg, definition in phi_defs}
+    if len(arities) != 1:
+        return None
+
+    out = set()
+    for arm in range(arities.pop()):
+        bindings = {}
+        for reg, definition in phi_defs:
+            values = value_func(definition.src[arm], None)
+            if len(values) != 1:
+                return None
+            value = next(iter(values))
+            bindings[reg] = value
+            bindings[str(reg)] = value
+        out.update(value_func(expr, bindings))
+    return out
+
+
 def _mask_for_expr(expr):
     try:
         size = int(expr.size)
@@ -213,7 +267,26 @@ def _single_const(bv, ssa, expr, depth=0, max_depth=48):
     return _expr_constant(expr)
 
 
-def _const_values(bv, ssa, expr, depth, max_depth, seen):
+def _bound_value(bindings, reg):
+    if not bindings:
+        return None
+    if reg in bindings:
+        return bindings[reg]
+    return bindings.get(str(reg))
+
+
+def _const_values_for_operand(bv, ssa, operand, depth, max_depth, seen, bindings=None):
+    if hasattr(operand, "operation"):
+        return _const_values(bv, ssa, operand, depth, max_depth, seen, bindings)
+    definition = _reg_definition(ssa, operand)
+    if definition is None:
+        return set()
+    if hasattr(definition, "src"):
+        return _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen, bindings)
+    return _const_values(bv, ssa, definition, depth + 1, max_depth, seen, bindings)
+
+
+def _const_values(bv, ssa, expr, depth, max_depth, seen, bindings=None):
     if expr is None or depth > max_depth:
         return set()
     op = expr.operation.name
@@ -222,7 +295,7 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
         return {expr.constant & U48}
 
     if op in ("LLIL_ZX", "LLIL_SX", "LLIL_LOW_PART"):
-        return _const_values(bv, ssa, expr.src, depth + 1, max_depth, seen)
+        return _const_values(bv, ssa, expr.src, depth + 1, max_depth, seen, bindings)
 
     if op == "LLIL_BOOL_TO_INT":
         return {0, 1}
@@ -230,11 +303,11 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
     if op in LOAD_OPS:
         src = _stack_store_source(ssa, expr)
         if src is not None:
-            return _const_values(bv, ssa, src, depth + 1, max_depth, seen)
+            return _const_values(bv, ssa, src, depth + 1, max_depth, seen, bindings)
 
     if op in ("LLIL_LSL", "LLIL_LSR"):
-        lefts = _const_values(bv, ssa, expr.left, depth + 1, max_depth, seen)
-        rights = _const_values(bv, ssa, expr.right, depth + 1, max_depth, seen)
+        lefts = _const_values(bv, ssa, expr.left, depth + 1, max_depth, seen, bindings)
+        rights = _const_values(bv, ssa, expr.right, depth + 1, max_depth, seen, bindings)
         return {
             ((left << right) if op == "LLIL_LSL" else (left >> right)) & U48
             for left in lefts
@@ -242,8 +315,8 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
         }
 
     if op in ("LLIL_ADD", "LLIL_SUB", "LLIL_AND", "LLIL_OR", "LLIL_XOR"):
-        lefts = _const_values(bv, ssa, expr.left, depth + 1, max_depth, seen)
-        rights = _const_values(bv, ssa, expr.right, depth + 1, max_depth, seen)
+        lefts = _const_values(bv, ssa, expr.left, depth + 1, max_depth, seen, bindings)
+        rights = _const_values(bv, ssa, expr.right, depth + 1, max_depth, seen, bindings)
         if op == "LLIL_AND":
             if not lefts and len(rights) == 1:
                 return _small_mask_values(next(iter(rights)))
@@ -265,6 +338,9 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
         return out
 
     if op == "LLIL_REG_SSA":
+        bound = _bound_value(bindings, expr.src)
+        if bound is not None:
+            return {bound & U48}
         key = ("reg", str(expr.src))
         if key in seen:
             return set()
@@ -278,7 +354,7 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
             for var in definition.src:
                 operand_definition = _reg_definition(ssa, var)
                 if operand_definition is not None and hasattr(operand_definition, "src"):
-                    vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy()))
+                    vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy(), bindings))
             if vals:
                 return vals
             value = _single_const(bv, ssa, expr)
@@ -286,9 +362,12 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
                 return {value}
             return set()
         if hasattr(definition, "src"):
-            return _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen)
+            return _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen, bindings)
 
     if op == "LLIL_REG_SSA_PARTIAL":
+        bound = _bound_value(bindings, expr.full_reg)
+        if bound is not None:
+            return {bound & _mask_for_expr(expr)}
         key = ("partial", str(expr.full_reg), str(expr.src))
         if key in seen:
             return set()
@@ -303,7 +382,7 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
             for var in definition.src:
                 operand_definition = _reg_definition(ssa, var)
                 if operand_definition is not None and hasattr(operand_definition, "src"):
-                    vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy()))
+                    vals.update(_const_values(bv, ssa, operand_definition.src, depth + 1, max_depth, seen.copy(), bindings))
             if vals:
                 return {value & mask for value in vals}
             value = _single_const(bv, ssa, expr)
@@ -313,7 +392,7 @@ def _const_values(bv, ssa, expr, depth, max_depth, seen):
         if hasattr(definition, "src"):
             return {
                 value & mask
-                for value in _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen)
+                for value in _const_values(bv, ssa, definition.src, depth + 1, max_depth, seen, bindings)
             }
 
     value = _single_const(bv, ssa, expr)
@@ -328,6 +407,46 @@ def _small_mask_values(mask):
     for bit in bits:
         values |= {value | bit for value in values}
     return {value & U48 for value in values}
+
+
+def _collect_phi_regs(ssa, expr, out=None, seen=None, depth=0, max_depth=32):
+    if out is None:
+        out = set()
+    if seen is None:
+        seen = set()
+    if expr is None or depth > max_depth:
+        return out
+    if not hasattr(expr, "operation"):
+        return out
+    key = (expr.operation.name, getattr(expr, "expr_index", None), getattr(expr, "instr_index", None), str(expr))
+    if key in seen:
+        return out
+    seen.add(key)
+
+    if expr.operation.name == "LLIL_REG_SSA":
+        definition = _reg_definition(ssa, expr.src)
+        if getattr(getattr(definition, "operation", None), "name", None) == "LLIL_REG_PHI":
+            out.add(expr.src)
+            return out
+        if definition is not None and hasattr(definition, "src"):
+            return _collect_phi_regs(ssa, definition.src, out, seen, depth + 1, max_depth)
+
+    if expr.operation.name == "LLIL_REG_SSA_PARTIAL":
+        definition = _reg_definition(ssa, expr.full_reg)
+        if getattr(getattr(definition, "operation", None), "name", None) == "LLIL_REG_PHI":
+            out.add(expr.full_reg)
+            return out
+        if definition is not None and hasattr(definition, "src"):
+            return _collect_phi_regs(ssa, definition.src, out, seen, depth + 1, max_depth)
+
+    for name in ("src", "dest", "left", "right", "condition"):
+        child = getattr(expr, name, None)
+        if hasattr(child, "operation"):
+            _collect_phi_regs(ssa, child, out, seen, depth + 1, max_depth)
+    for child in getattr(expr, "params", ()) or ():
+        if hasattr(child, "operation"):
+            _collect_phi_regs(ssa, child, out, seen, depth + 1, max_depth)
+    return out
 
 
 def _reg_definition(ssa, reg):
@@ -419,6 +538,8 @@ __all__ = (
     "LOAD_OPS",
     "SET_REG_OPS",
     "U48",
+    "correlated_const_values",
+    "correlated_phi_values",
     "const_values",
     "iter_indirect_jumps",
     "peel_reg_definition",
