@@ -1,6 +1,8 @@
 from importlib import import_module
 import types
 
+import conftest  # noqa: F401
+
 
 mlil_helpers = import_module("plugins.DispatchThis.helpers.mlil")
 
@@ -94,6 +96,40 @@ def call(dest):
 
 def nop(address=0x1000):
     return Expr("MLIL_NOP", address=address, instr_index=99)
+
+
+def test_deflatten_profile_helpers_normalize_mlil_shapes():
+    class NamedVar:
+        def __init__(self, name):
+            self.name = name
+
+        def __str__(self):
+            return self.name
+
+    assert mlil_helpers.op_name(None) is None
+    assert mlil_helpers.op_name(add(const(1), const(2))) == "MLIL_ADD"
+    assert mlil_helpers.same_var(NamedVar("state"), NamedVar("state"))
+    assert not mlil_helpers.same_var(NamedVar("state"), NamedVar("other"))
+
+    assert mlil_helpers.var_from_expr(var("state")) == "state"
+    assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_FIELD", src="state")) == "state"
+    ssa_var = types.SimpleNamespace(var="state")
+    assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_SSA", src=ssa_var)) == "state"
+    assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_FIELD_SSA", src=ssa_var)) == "state"
+    assert mlil_helpers.var_from_expr(const(1)) is None
+
+    assert mlil_helpers.state_token(Expr("MLIL_CONST", constant=0x123456789, size=4)) == (
+        0x23456789,
+        4,
+    )
+    assert mlil_helpers.state_token(Expr("MLIL_CONST", constant=0x123456, size=None), 2) == (
+        0x3456,
+        2,
+    )
+    assert mlil_helpers.state_token(Expr("MLIL_CONST", constant=-1)) == (
+        0xFFFFFFFFFFFFFFFF,
+        8,
+    )
 
 
 def test_iter_indirect_calls_skips_direct_constant_destinations():
@@ -243,6 +279,7 @@ def test_set_roots_before_returns_contiguous_assignment_instruction_indices():
 
 
 if __name__ == "__main__":
+    test_deflatten_profile_helpers_normalize_mlil_shapes()
     test_iter_indirect_calls_skips_direct_constant_destinations()
     test_peel_var_definitions_tracks_set_var_trail()
     test_fold_constant_value_folds_load_arithmetic_and_value_sets()

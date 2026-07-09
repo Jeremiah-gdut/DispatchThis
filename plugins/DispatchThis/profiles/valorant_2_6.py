@@ -1,3 +1,4 @@
+from . import default
 from ..helpers import facts, llil, memory, mlil
 from ..passes.medium.string_decrypt import decode_string_blob
 from ..utils.log import log_debug, log_warn
@@ -14,6 +15,7 @@ PROFILE_DESCRIPTION = (
 # - branch gadget: yes
 # - indirect call gadget: yes
 # - global constants: yes
+# - deflatten: default planner
 # - string decrypt: yes (rem-loop, index0-loop, unrolled; ignores mlil_stable)
 #
 # Validation:
@@ -47,6 +49,10 @@ _CALL_OPS = ("MLIL_CALL", "MLIL_CALL_SSA", "MLIL_CALL_UNTYPED")
 _CMP_NE_OPS = ("MLIL_CMP_NE",)
 _STORE_OPS = mlil.STORE_OPS
 _VAR_OPS = ("MLIL_VAR", "MLIL_VAR_SSA", "MLIL_VAR_ALIASED", "MLIL_VAR_FIELD")
+
+
+def plan_deflatten_redirections(bv, func, il):
+    return default.plan_deflatten_redirections(bv, func, il)
 
 
 def _iter_scalar_constant_loads(bv, il):

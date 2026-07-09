@@ -219,6 +219,60 @@ analysis, expression walking, and cleanup-root collection.
 | `SET_VAR_OPS` | MLIL variable assignment operations followed by peeling and cleanup helpers. |
 | `STORE_OPS` | MLIL store operations inspected by `mlil_stores_to_address`. |
 
+### `op_name`
+
+**Signature**
+
+```python
+op_name(expr)
+```
+
+**Purpose**
+
+Return `expr.operation.name`, or `None` when the expression is absent or does
+not expose a Binary Ninja operation.
+
+### `same_var`
+
+**Signature**
+
+```python
+same_var(left, right)
+```
+
+**Purpose**
+
+Compare Binary Ninja variable-like objects by direct equality, falling back to
+their string form. This is useful when matching state variables across related
+MLIL objects whose wrappers do not compare equal.
+
+### `var_from_expr`
+
+**Signature**
+
+```python
+var_from_expr(expr)
+```
+
+**Purpose**
+
+Return the underlying variable from `MLIL_VAR`, `MLIL_VAR_FIELD`,
+`MLIL_VAR_SSA`, or `MLIL_VAR_FIELD_SSA`; otherwise return `None`.
+
+### `state_token`
+
+**Signature**
+
+```python
+state_token(const_expr, fallback_size=None)
+```
+
+**Purpose**
+
+Return a `(value, size_in_bytes)` token from an MLIL constant expression. If the
+constant expression has no size and no `fallback_size` is supplied, values that
+are negative or wider than 32 bits use size `8`; other values use size `4`.
+
 ### `walk_expr`
 
 **Signature**

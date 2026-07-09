@@ -2,7 +2,7 @@
 
 from binaryninja import AnalysisContext
 
-from .passes.medium.deflatten import apply_redirections_il, compute_redirections
+from .passes.medium.deflatten import apply_redirections_il
 from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
@@ -402,7 +402,7 @@ def deflatten_mlil(ctx: AnalysisContext):
     if not state.global_stable():
         return
 
-    redirections = compute_redirections(bv, func, mlil=mlil)
+    redirections = active_profile(bv).plan_deflatten_redirections(bv, func, mlil)
     if not redirections:
         return
 

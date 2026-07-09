@@ -25,6 +25,7 @@ capabilities:
   branch_gadget:
   call_gadget:
   global_constants:
+  deflatten:
   string_decrypt:
 
 branch_gadget:
@@ -45,6 +46,12 @@ global_constants:
   mlil_excerpt:
   notes:
   resolved_addr:
+
+deflatten:
+  dispatcher_state:
+  mlil_excerpt:
+  notes:
+  redirection_count:
 
 string_decrypt:
   call_addr:
@@ -158,8 +165,8 @@ Use the helper modules by IL level and purpose:
 - `llil`: indirect-jump iteration, register definition peeling, and
   `const_values` for PHI-aware constant candidate sets.
 - `mlil`: indirect-call iteration, variable definition peeling, single-value
-  constant folding, expression walking, address/slot extraction, store checks,
-  and cleanup-root discovery.
+  constant folding, expression walking, variable/state-token normalization,
+  address/slot extraction, store checks, and cleanup-root discovery.
 - `memory`: explicit-width little-endian reads, section checks, and target or
   address validation.
 - `facts`: branch, call, global constant, and string decrypt recovery-fact
@@ -209,10 +216,10 @@ and build global constant facts, but the profile or pass still decides which
 slot-use shapes, offsets, sections, and resolved addresses are valid. Do not move
 an automatic global-constant planner into `helpers`.
 
-String decrypt and deflatten internals are not part of the first helper
-migration. A profile may implement the existing `plan_string_decrypt_calls` hook,
-but decrypt-function recognition and deflatten state-machine rewriting remain
-backend internals unless a later task explicitly extracts helpers for them.
+String decrypt and deflatten algorithms are not part of the stable helper
+surface. Profiles may implement `plan_string_decrypt_calls` and
+`plan_deflatten_redirections` using reusable helper primitives, but comment
+writing and MLIL rewriting remain backend responsibilities.
 
 ## When adaptation fails
 
@@ -247,6 +254,9 @@ def resolve_call_gadget(bv, mlil):
     return []
 
 def plan_global_constant_slots(bv, mlil):
+    return []
+
+def plan_deflatten_redirections(bv, func, mlil):
     return []
 
 def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
@@ -304,6 +314,25 @@ must be rooted in the call-target decode slice, not in unrelated constants.
 
 Workflow owns `BinaryView.define_user_data_var` and global receipts.
 
+`plan_deflatten_redirections(bv, func, mlil)` returns deflatten redirection
+plans:
+
+```python
+{
+    "kind": "uncond",
+    "jump": jump_il,
+    "target_bb": target_block,
+    "obb": original_block,
+    "state_var": state_var,
+    "state_vars": {state_var},
+    "state_tokens": {(0x1234, 4)},
+}
+```
+
+Profiles recognize the binary-specific dispatcher/state-write shape. Workflow
+owns applying those plans through the deflatten backend, recording state tokens
+for cleanup, and marking `dispatchthis_mlil_stable`.
+
 `plan_string_decrypt_calls(bv, func, mlil, mlil_stable)` returns string facts:
 
 ```python
@@ -326,6 +355,7 @@ Profiles are pure recognizers. They must not call:
 - `Function.set_call_type_adjustment`
 - `BinaryView.add_analysis_completion_event`
 - `BinaryView.define_user_data_var`
+- MLIL rewrite APIs such as `replace_expr`, `finalize`, or `generate_ssa_form`
 - comment-writing APIs
 
 Those mutations stay in workflow callbacks or existing apply functions so phase

@@ -4,6 +4,7 @@ from .memory import read_uint_le
 
 
 U64 = 0xFFFFFFFFFFFFFFFF
+U32 = 0xFFFFFFFF
 
 CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 LOAD_STRUCT_OPS = ("MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
@@ -42,8 +43,36 @@ def walk_expr(expr):
     return out
 
 
-def _op_name(expr):
+def op_name(expr):
     return getattr(getattr(expr, "operation", None), "name", None)
+
+
+_op_name = op_name
+
+
+def same_var(left, right):
+    return left == right or str(left) == str(right)
+
+
+def var_from_expr(expr):
+    op = op_name(expr)
+    if op in ("MLIL_VAR", "MLIL_VAR_FIELD"):
+        return expr.src
+    if op in ("MLIL_VAR_SSA", "MLIL_VAR_FIELD_SSA"):
+        return getattr(expr.src, "var", expr.src)
+    return None
+
+
+def _mask(size):
+    return (1 << ((size or 4) * 8)) - 1
+
+
+def state_token(const_expr, fallback_size=None):
+    size = getattr(const_expr, "size", None) or fallback_size
+    if size is None:
+        value = getattr(const_expr, "constant", 0)
+        size = 8 if value > U32 or value < 0 else 4
+    return (const_expr.constant & _mask(size), size)
 
 
 def _mask_address(value, address_mask):
@@ -390,8 +419,12 @@ __all__ = (
     "load_slot_offsets",
     "load_slot_address",
     "mlil_stores_to_address",
+    "op_name",
     "peel_var_definitions",
+    "same_var",
     "set_roots_before",
+    "state_token",
+    "var_from_expr",
     "walk_expr",
     "walk_expr_with_defs",
 )

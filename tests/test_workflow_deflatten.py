@@ -54,6 +54,11 @@ def fake_plan_global_constant_slots(bv, mlil):
     return list(global_plan_results)
 
 
+def fake_plan_deflatten_redirections(bv, func, mlil):
+    calls.append(("compute", func.start, mlil))
+    return [{"kind": "uncond", "state_tokens": {(0x1234, 8)}, "state_vars": {"state"}}]
+
+
 def fake_plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
     string_decrypt_calls.append((bv, func, mlil, mlil_stable))
     return string_decrypt_results.pop(0) if string_decrypt_results else []
@@ -69,6 +74,7 @@ def fake_active_profile(bv):
         resolve_branch_gadget=fake_resolve_llil_jump_plan,
         resolve_call_gadget=fake_resolve_call_gadget,
         plan_global_constant_slots=fake_plan_global_constant_slots,
+        plan_deflatten_redirections=fake_plan_deflatten_redirections,
         plan_string_decrypt_calls=fake_plan_string_decrypt_calls,
     )
 
@@ -325,10 +331,12 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     FakeWorkflowState.stable = True
     FakeWorkflowState.globals_stable = True
     calls.clear()
+    active_profile_calls.clear()
     ctx = FakeContext()
 
     workflow.deflatten_mlil(ctx)
 
+    assert active_profile_calls == [ctx.view]
     assert calls[0] == ("compute", ctx.function.start, ctx.mlil)
     assert calls[1][0] == "apply"
     assert ctx.committed is True

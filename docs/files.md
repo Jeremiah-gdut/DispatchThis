@@ -19,7 +19,8 @@ DispatchThis/
 ├── helpers/
 │   ├── __init__.py             Stable profile-helper import surface.
 │   ├── llil.py                 LLIL indirect-jump, definition, and constant helpers.
-│   ├── mlil.py                 MLIL call-target, slot, store, and cleanup-root helpers.
+│   ├── mlil.py                 MLIL call-target, slot, store, deflatten-planner,
+│   │                           and cleanup-root helpers.
 │   ├── memory.py               BinaryView memory, section, and target validation helpers.
 │   └── facts.py                Recovery fact builders for resolver profiles and passes.
 ├── utils/
@@ -70,7 +71,8 @@ call, and global constant workflow phase stability, mutation receipts, and downs
 ### `profiles/`
 Owns the bundled resolver profile registry. The built-in `default` profile exposes
 the current indirect branch, indirect call, global constant, and string decrypt
-resolver behavior behind the resolver profile contract. See
+resolver behavior plus the default deflatten redirection planner behind the
+resolver profile contract. See
 [`resolver-profiles.md`](resolver-profiles.md) before adding a new binary
 profile.
 

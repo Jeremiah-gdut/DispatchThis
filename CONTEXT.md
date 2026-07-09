@@ -24,9 +24,9 @@ _Avoid_: generic rule engine
 **Resolver profile contract**:
 The narrow agreement a resolver profile must satisfy: recognize one binary's
 indirect branch, indirect call, global constant, and string decrypt shapes, then
-return standard recovery facts without owning workflow mutations. A profile may
-implement a hook as a no-op when that binary does not use the capability.
-Deflattening is not part of the contract.
+return standard recovery facts or deflatten redirection plans without owning
+workflow mutations. A profile may implement a hook as a no-op when that binary
+does not use the capability.
 _Avoid_: middleware, adapter framework, plugin rewrite layer
 
 **Binary profile**:

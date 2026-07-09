@@ -110,8 +110,9 @@ Gated behind the `Enable Deflattening` setting, and only runs once function phas
 reports that the LLIL indirect branch resolver has drained every indirect jump (otherwise
 the CFG - and the recovered state machine - would be incomplete).
 
-- `compute_redirections` identifies the dominant dispatcher comparison cluster from
-  state-token compares and maps each token to its target original block.
+- The active resolver profile's `plan_deflatten_redirections` identifies the
+  binary-specific dispatcher/state-write shape and maps state tokens to target
+  original blocks. The default profile delegates to `compute_redirections`.
 - `apply_redirections_il` rewrites each original basic block's dispatcher terminator into
   a direct `goto` to the real successor. Conditional transitions are reconstructed when each
   branch arm selects exactly one known state token - see

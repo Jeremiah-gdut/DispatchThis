@@ -1,3 +1,4 @@
+from . import default
 from ..helpers import facts, llil, memory, mlil
 from ..utils.log import log_debug, log_error, log_info, log_warn
 
@@ -10,6 +11,7 @@ PROFILE_DESCRIPTION = "Rules for the dyzznb sample profile."
 # - branch gadget: yes
 # - indirect call gadget: yes
 # - global constants: yes
+# - deflatten: default planner
 # - string decrypt: yes
 #
 # Validation:
@@ -35,6 +37,10 @@ _DIV_OPS = ("MLIL_DIVU", "MLIL_DIVS")
 
 def _op(expr):
     return getattr(getattr(expr, "operation", None), "name", None)
+
+
+def plan_deflatten_redirections(bv, func, il):
+    return default.plan_deflatten_redirections(bv, func, il)
 
 
 def _single_llil_const(bv, ssa, expr):

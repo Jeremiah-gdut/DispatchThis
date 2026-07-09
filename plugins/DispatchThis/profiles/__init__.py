@@ -13,6 +13,7 @@ REQUIRED_HOOKS = (
     "resolve_branch_gadget",
     "resolve_call_gadget",
     "plan_global_constant_slots",
+    "plan_deflatten_redirections",
     "plan_string_decrypt_calls",
 )
 

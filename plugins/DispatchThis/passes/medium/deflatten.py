@@ -5,22 +5,15 @@ transitions to determine which jumps/branches to re-point.
 ``apply_redirections_il`` -- rewrites MLIL in place; only meaningful inside a workflow activity.
 """
 
+from collections import deque
+
 from binaryninja import (
     ILSourceLocation,
     MediumLevelILLabel,
 )
 
-U32 = 0xFFFFFFFF
+from ...helpers import mlil as mlil_helpers
 from ...utils.log import log_info, log_warn, log_debug
-from collections import deque
-
-
-def _mask(size):
-    return (1 << ((size or 4) * 8)) - 1
-
-
-def _op(expr):
-    return getattr(getattr(expr, "operation", None), "name", None)
 
 
 def _last(mlil, bb):
@@ -31,25 +24,10 @@ def _block_at(mlil, instr_index):
     return mlil[instr_index].il_basic_block
 
 
-def _state_token(const_expr, fallback_size=None):
-    size = getattr(const_expr, "size", None) or fallback_size
-    if size is None:
-        value = getattr(const_expr, "constant", 0)
-        size = 8 if value > U32 or value < 0 else 4
-    return (const_expr.constant & _mask(size), size)
-
-
-def _same_var(left, right):
-    return left == right or str(left) == str(right)
-
-
-def _var_from_expr(expr):
-    op = _op(expr)
-    if op in ("MLIL_VAR", "MLIL_VAR_FIELD"):
-        return expr.src
-    if op in ("MLIL_VAR_SSA", "MLIL_VAR_FIELD_SSA"):
-        return getattr(expr.src, "var", expr.src)
-    return None
+_op = mlil_helpers.op_name
+_same_var = mlil_helpers.same_var
+_state_token = mlil_helpers.state_token
+_var_from_expr = mlil_helpers.var_from_expr
 
 
 def _resolve_cond(cond):
