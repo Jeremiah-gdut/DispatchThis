@@ -79,9 +79,12 @@ IL. Keep excerpts short, but include the addresses, instruction indices,
 variables, and key expressions needed to reproduce the shape.
 
 Keep binary-specific matching in the profile file until two profiles need the
-same helper or the profile becomes hard to read. Put shared profile helpers in
-`profiles/_shared.py` or `profiles/<family>_shared.py`. Shared `passes/` code is
-for stable workflow-level capabilities, not for one binary or speculative reuse.
+same helper or the profile becomes hard to read. Shared profile code must move
+to stable helper modules under `helpers/`, or a profile must explicitly delegate
+to another named profile. Do not add `profiles/_shared.py`,
+`profiles/<family>_shared.py`, or any resolver engine/DSL/base class.
+Shared `passes/` code is for stable workflow-level capabilities, not for one
+binary or speculative reuse.
 
 ## Naming
 
@@ -121,8 +124,8 @@ This distinguishes "not needed by this binary" from "not implemented yet".
 
 ## Reuse
 
-A binary profile may explicitly delegate a hook to `default` or to a shared
-profile helper:
+A binary profile may reuse behavior only by calling stable helper modules or by
+explicitly delegating a hook to another named profile:
 
 ```python
 from . import default
@@ -131,9 +134,14 @@ def resolve_branch_gadget(bv, llil, known_targets=None):
     return default.resolve_branch_gadget(bv, llil, known_targets)
 ```
 
-Do not add profile base classes, factories, mixins, or automatic inheritance.
-The profile module must make hook ownership obvious: document which hooks reuse
-default behavior and which hooks are binary-specific.
+A profile may not import recovery pass modules directly. The current
+`default` profile is the temporary exception because it is the facade for the
+existing pass backend; specialized profiles should use helpers or explicit
+profile delegation instead.
+
+Do not add profile base classes, factories, mixins, shared profile modules, or
+automatic inheritance. The profile module must make hook ownership obvious:
+document which hooks reuse another profile and which hooks are binary-specific.
 
 Do not change `profiles/default.py` while adding a new binary profile unless the
 task is explicitly to fix the current default binary. Reuse default by calling
@@ -230,8 +238,8 @@ Escalate in this order:
    a shape safely.
 2. Add or tighten one failing test for the hook that misses the shape.
 3. Extend the binary profile's private helper.
-4. If two binary profiles need the same extension, move it to
-   `profiles/_shared.py` or `profiles/<family>_shared.py`.
+4. If two binary profiles need the same extension, move it to a stable helper
+   module or explicitly delegate the hook to the profile that owns that shape.
 5. If the blocker is workflow receipts, cleanup replay, phase ordering, or a BN
    mutation boundary, stop profile work and diagnose or redesign that shared
    contract first.

@@ -156,13 +156,17 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     )
 
 
-def test_dyzznb_profile_does_not_import_pass_planners():
-    dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
+def test_specialized_profiles_do_not_import_pass_planners():
+    modules = (
+        import_module("plugins.DispatchThis.profiles.dyzznb"),
+        import_module("plugins.DispatchThis.profiles.driver_2_6"),
+        import_module("plugins.DispatchThis.profiles.valorant_2_6"),
+    )
 
-    source = inspect.getsource(dyzznb)
-
-    assert "passes." not in source
-    assert "..passes" not in source
+    for module in modules:
+        source = inspect.getsource(module)
+        assert "passes." not in source
+        assert "..passes" not in source
 
 
 def test_profile_setting_is_registered_with_bundled_profiles():

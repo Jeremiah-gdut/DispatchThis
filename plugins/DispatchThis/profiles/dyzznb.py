@@ -358,14 +358,7 @@ def plan_global_constant_slots(bv, il):
 
 
 def _const(il, expr):
-    expr = mlil.peel_var_definitions(il, expr, max_depth=32, allowed_ops=None)
-    if _op(expr) in mlil.CONST_OPS:
-        return expr.constant
-    value = getattr(expr, "value", None)
-    value_type = getattr(getattr(value, "type", None), "name", None)
-    if value_type in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
-        return value.value
-    return None
+    return mlil.expression_scalar_value(il, expr)
 
 
 def _has_const(expr, value):
@@ -490,19 +483,13 @@ def _decode_string_blob(bv, source_addr, spec):
     return bytes(out)
 
 
-def _direct_calls(il):
-    for ins in getattr(il, "instructions", ()) or ():
-        if _op(ins) in _CALL_OPS:
-            yield ins
-
-
 def plan_string_decrypt_calls(bv, _func, il, mlil_stable):
     if il is None:
         return []
     mlil_stable = mlil_stable or {}
 
     out = []
-    for call in _direct_calls(il):
+    for call in mlil.iter_calls(il, _CALL_OPS):
         target = _const(il, getattr(call, "dest", None))
         params = list(getattr(call, "params", ()) or ())
         if target is None or len(params) < 2:

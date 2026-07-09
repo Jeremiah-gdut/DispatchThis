@@ -154,6 +154,22 @@ def qword(bv, addr, value):
     bv.memory[addr] = value & 0xFFFFFFFFFFFFFFFF
 
 
+def encoded_blob(plaintext, key):
+    out = bytearray(key)
+    previous = 0
+    for index, plain in enumerate(plaintext):
+        key_index = index % len(key)
+        key_byte = key[key_index]
+        decoded = plain ^ key_byte
+        if ((key_index * key_byte) & 1) == 0:
+            encoded = (((decoded ^ ((~key_byte) & 0xFF)) - previous) & 0xFF)
+        else:
+            encoded = ((((-decoded) & 0xFF) ^ key_byte) + previous) & 0xFF
+        out.append(encoded)
+        previous = plain
+    return bytes(out)
+
+
 def test_branch_profile_resolves_main_two_target_jump():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
@@ -422,6 +438,18 @@ def test_value_folding_preserves_bindings_through_direct_phi_expr():
     assert valorant._values(None, ssa, phi(selected), bindings={bound: 0x77}) == {0x77}
 
 
+def test_string_decoder_stays_profile_local():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    blob = encoded_blob(b"vanguard", b"k3y!")
+    bv = types.SimpleNamespace(read=lambda _addr, size: blob[:size])
+
+    assert valorant._decode_string_blob(
+        bv,
+        0x7000,
+        {"key_modulus": 4, "length": 8},
+    ) == b"vanguard"
+
+
 if __name__ == "__main__":
     test_branch_profile_resolves_main_two_target_jump()
     test_call_profile_accepts_text_target_without_existing_function()
@@ -434,3 +462,4 @@ if __name__ == "__main__":
     test_llil_value_folding_uses_stack_spill_before_memory_read()
     test_branch_value_folding_correlates_phi_arms()
     test_value_folding_preserves_bindings_through_direct_phi_expr()
+    test_string_decoder_stays_profile_local()

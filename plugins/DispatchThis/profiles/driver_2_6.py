@@ -29,6 +29,7 @@ _CONST_DATA_SECTIONS = {".data"}
 _CONST_PTR_TYPE = valorant_2_6.CONST_SLOT_TYPE
 _DRIVER_GLOBAL_CONSTANT_SOURCE_TYPES = {"void*", "int64_t"}
 _U48 = 0xFFFFFFFFFFFF
+_DIRECT_CALL_OPS = ("MLIL_CALL", "MLIL_CALL_UNTYPED", "MLIL_TAILCALL")
 
 
 def resolve_branch_gadget(bv, il, known_targets=None):
@@ -53,7 +54,7 @@ def _driver_global_constant_slot_refs(il):
     if il is None:
         return []
     refs = {}
-    for call in _direct_calls(il):
+    for call in mlil.iter_calls(il, _DIRECT_CALL_OPS):
         params = list(getattr(call, "params", ()) or ())
         if len(params) < 2:
             continue
@@ -90,13 +91,13 @@ def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
         return []
 
     out = []
-    for call in _direct_calls(il):
-        target = mlil.constant_value(il, getattr(call, "dest", None))
+    for call in mlil.iter_calls(il, _DIRECT_CALL_OPS):
+        target = mlil.expression_scalar_value(il, getattr(call, "dest", None))
         params = list(getattr(call, "params", ()) or ())
         if target is None or len(params) < 2:
             continue
-        dst_addr = mlil.constant_value(il, params[0])
-        src_addr = mlil.constant_value(il, params[1])
+        dst_addr = mlil.expression_scalar_value(il, params[0])
+        src_addr = mlil.expression_scalar_value(il, params[1])
         if dst_addr is None or src_addr is None:
             continue
         callee = bv.get_function_at(target)
@@ -114,12 +115,6 @@ def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
             continue
         out.append(facts.string_decrypt_fact(call.address, src_addr, dst_addr, plaintext))
     return out
-
-
-def _direct_calls(il):
-    for ins in getattr(il, "instructions", ()) or ():
-        if mlil.op_name(ins) in ("MLIL_CALL", "MLIL_CALL_UNTYPED", "MLIL_TAILCALL"):
-            yield ins
 
 
 def _const_from_binary_expr(expr):

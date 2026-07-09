@@ -1,6 +1,5 @@
 from . import default
 from ..helpers import facts, llil, memory, mlil
-from ..passes.medium.string_decrypt import decode_string_blob
 from ..utils.log import log_debug, log_warn
 
 
@@ -476,19 +475,7 @@ def plan_global_constant_slots(bv, il):
 
 
 def _mlil_const(il, expr):
-    value = mlil.constant_value(il, expr)
-    if value is not None:
-        return value
-    if _op(expr) in _CONST_OPS:
-        return expr.constant
-    value = getattr(expr, "value", None)
-    value_type = getattr(getattr(value, "type", None), "name", None)
-    if value_type in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
-        return value.value
-    constant = getattr(expr, "constant", None)
-    if isinstance(constant, int):
-        return constant
-    return None
+    return mlil.expression_scalar_value(il, expr)
 
 
 def _parameters(func, il):
@@ -763,10 +750,31 @@ def _recognize_string_decrypt_function(func, il=None):
     )
 
 
-def _direct_calls(il):
-    for ins in getattr(il, "instructions", ()) or ():
-        if _op(ins) in _CALL_OPS:
-            yield ins
+def _decode_string_blob(bv, source_addr, spec):
+    key_modulus = spec["key_modulus"]
+    length = spec["length"]
+    try:
+        data = bv.read(source_addr, key_modulus + length)
+    except Exception:  # noqa: BLE001
+        return None
+    if data is None or len(data) < key_modulus + length:
+        return None
+
+    key = data[:key_modulus]
+    payload = data[key_modulus:key_modulus + length]
+    out = bytearray()
+    previous = 0
+    for index, encoded in enumerate(payload):
+        key_index = index % key_modulus
+        key_byte = key[key_index]
+        if ((key_index * key_byte) & 1) == 0:
+            decoded = ((previous + encoded) & 0xFF) ^ ((~key_byte) & 0xFF)
+        else:
+            decoded = (-(((encoded - previous) & 0xFF) ^ key_byte)) & 0xFF
+        plain = decoded ^ key_byte
+        out.append(plain)
+        previous = plain
+    return bytes(out)
 
 
 def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
@@ -779,7 +787,7 @@ def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
         return []
 
     out = []
-    for call in _direct_calls(il):
+    for call in mlil.iter_calls(il, _CALL_OPS):
         target = _mlil_const(il, getattr(call, "dest", None))
         params = list(getattr(call, "params", ()) or ())
         if target is None or len(params) < 2:
@@ -795,7 +803,7 @@ def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
         spec = _recognize_string_decrypt_function(callee)
         if spec is None:
             continue
-        plaintext = decode_string_blob(bv, src_addr, spec)
+        plaintext = _decode_string_blob(bv, src_addr, spec)
         if plaintext is None:
             log_warn(
                 f"[valorant_2_6:sdecrypt] {hex(call.address)}: "
