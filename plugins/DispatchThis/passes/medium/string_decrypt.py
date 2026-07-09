@@ -4,6 +4,10 @@ from ...helpers.mlil import (
     CONST_OPS,
     LOAD_OPS,
     STORE_OPS,
+    expression_or_definitions_have_operation,
+    expression_scalar_value,
+    iter_calls,
+    op_name,
     peel_var_definitions,
     walk_expr,
     walk_expr_with_defs,
@@ -11,7 +15,6 @@ from ...helpers.mlil import (
 from ...utils.log import log_debug, log_info, log_warn
 
 
-_CALL_OPS = ("MLIL_CALL", "MLIL_CALL_SSA", "MLIL_CALL_UNTYPED")
 _CMP_OPS = (
     "MLIL_CMP_E",
     "MLIL_CMP_NE",
@@ -25,30 +28,21 @@ _DIV_OPS = ("MLIL_DIVU", "MLIL_DIVS")
 _MUL_OPS = ("MLIL_MUL",)
 
 
-def _op(expr):
-    return getattr(getattr(expr, "operation", None), "name", None)
-
-
 def _const(mlil, expr):
+    # Preserve backend first-definition peeling; helper owns scalar extraction.
     expr = peel_var_definitions(mlil, expr, max_depth=32, allowed_ops=None)
-    if _op(expr) in CONST_OPS:
-        return expr.constant
-    value = getattr(expr, "value", None)
-    value_type = getattr(getattr(value, "type", None), "name", None)
-    if value_type in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
-        return value.value
-    return None
+    return expression_scalar_value(None, expr)
 
 
 def _loads(expr):
-    return [child for child in walk_expr(expr) if _op(child) in LOAD_OPS]
+    return [child for child in walk_expr(expr) if op_name(child) in LOAD_OPS]
 
 
 def _mod_constants(mlil):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if _op(expr) not in _MOD_OPS:
+            if op_name(expr) not in _MOD_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
                 value = _const(mlil, side)
@@ -61,7 +55,7 @@ def _divisor_constants(mlil):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if _op(expr) not in _DIV_OPS:
+            if op_name(expr) not in _DIV_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
                 value = _const(mlil, side)
@@ -78,7 +72,7 @@ def _length_constants(mlil, key_modulus):
     out = set()
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if _op(expr) not in _CMP_OPS:
+            if op_name(expr) not in _CMP_OPS:
                 continue
             for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
                 value = _const(mlil, side)
@@ -96,17 +90,17 @@ def _parameters(func, mlil):
 
 
 def _has_const(expr, value):
-    return any(_op(child) in CONST_OPS and child.constant == value for child in walk_expr(expr))
+    return any(op_name(child) in CONST_OPS and child.constant == value for child in walk_expr(expr))
 
 
 def _has_remainder_index(mlil, expr, key_modulus):
     expanded = list(walk_expr_with_defs(mlil, expr))
-    if any(_op(child) in _MOD_OPS and _has_const(child, key_modulus) for child in expanded):
+    if any(op_name(child) in _MOD_OPS and _has_const(child, key_modulus) for child in expanded):
         return True
     return (
-        any(_op(child) == "MLIL_SUB" for child in expanded)
-        and any(_op(child) in _DIV_OPS and _has_const(child, key_modulus) for child in expanded)
-        and any(_op(child) in _MUL_OPS and _has_const(child, key_modulus) for child in expanded)
+        any(op_name(child) == "MLIL_SUB" for child in expanded)
+        and any(op_name(child) in _DIV_OPS and _has_const(child, key_modulus) for child in expanded)
+        and any(op_name(child) in _MUL_OPS and _has_const(child, key_modulus) for child in expanded)
     )
 
 
@@ -125,9 +119,9 @@ def _has_sample_family_loads(mlil, key_modulus):
 def _has_byte_write_from_xor(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if _op(expr) not in STORE_OPS or getattr(expr, "size", None) != 1:
+            if op_name(expr) not in STORE_OPS or getattr(expr, "size", None) != 1:
                 continue
-            if any(_op(child) == "MLIL_XOR" for child in walk_expr_with_defs(mlil, getattr(expr, "src", None))):
+            if expression_or_definitions_have_operation(mlil, getattr(expr, "src", None), "MLIL_XOR"):
                 return True
     return False
 
@@ -135,7 +129,7 @@ def _has_byte_write_from_xor(mlil):
 def _has_done_flag_store(mlil):
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if _op(expr) in STORE_OPS and _const(mlil, getattr(expr, "src", None)) == 1:
+            if op_name(expr) in STORE_OPS and _const(mlil, getattr(expr, "src", None)) == 1:
                 return True
     return False
 
@@ -225,12 +219,6 @@ def _escaped(data):
     return "".join(out)
 
 
-def _direct_calls(mlil):
-    for ins in getattr(mlil, "instructions", ()) or ():
-        if _op(ins) in _CALL_OPS:
-            yield ins
-
-
 def _comment_line(text, source_addr, dest_addr):
     return f"[decrypt] {text}, src={hex(source_addr)} dst={hex(dest_addr)}"
 
@@ -265,7 +253,7 @@ def plan_string_decrypt_calls(bv, _func, mlil, mlil_stable):
         return []
     mlil_stable = mlil_stable or {}
     facts = []
-    for call in _direct_calls(mlil):
+    for call in iter_calls(mlil, ("MLIL_CALL", "MLIL_CALL_SSA", "MLIL_CALL_UNTYPED")):
         target = _const(mlil, getattr(call, "dest", None))
         if target is None:
             log_debug(f"[sdecrypt] {hex(call.address)}: skipped unresolved indirect call")
