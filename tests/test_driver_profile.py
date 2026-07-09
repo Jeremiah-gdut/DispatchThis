@@ -76,6 +76,24 @@ class FakeMlil:
         return self.defs.get(var, [])
 
 
+class FakeBv:
+    def __init__(self):
+        self.memory = {}
+        self.functions = {}
+
+    def read(self, addr, size):
+        return self.memory.get(addr, b"")[:size]
+
+    def get_function_at(self, addr):
+        return self.functions.get(addr)
+
+
+class FakeFunc:
+    def __init__(self, start, il):
+        self.start = start
+        self.medium_level_il = il
+
+
 def const(value, size=4):
     return Expr("MLIL_CONST", constant=value, size=size)
 
@@ -90,6 +108,10 @@ def addr_of(name):
 
 def set_var(dest, src):
     return Expr("MLIL_SET_VAR", [src], dest=dest, src=src, vars_written={dest})
+
+
+def binary(op, left, right):
+    return Expr(op, [left, right], left=left, right=right)
 
 
 def store(dest, src):
@@ -108,6 +130,10 @@ def if_eq(name, token, true_idx, false_idx):
 def if_cond(true_idx, false_idx):
     cond = var("cond")
     return Expr("MLIL_IF", [cond], condition=cond, true=true_idx, false=false_idx)
+
+
+def call(dest, params):
+    return Expr("MLIL_CALL", [dest, *params], dest=dest, params=params, address=0x5000)
 
 
 def link(source, target):
@@ -180,6 +206,60 @@ def build_driver_shape():
     return FakeMlil(blocks), entry_jump, branch, real_b_jump, real_b, real_c
 
 
+def one_block(*instructions):
+    block = Block(0)
+    for ins in instructions:
+        block.add(ins)
+    return FakeMlil([block])
+
+
+def driver_blob(plaintext, key):
+    out = bytearray(key)
+    previous = 0
+    for index, plain in enumerate(plaintext):
+        key_index = index % len(key)
+        key_byte = key[key_index]
+        decoded = plain ^ key_byte
+        if ((key_index * key_byte) & 1) == 0:
+            cipher = (((decoded ^ ((~key_byte) & 0xFF)) - previous) & 0xFF)
+        else:
+            cipher = ((((-decoded) & 0xFF) ^ key_byte) + previous) & 0xFF
+        out.append(cipher)
+        previous = plain
+    return bytes(out)
+
+
+def decrypt_callee(start, key_modulus, length):
+    next_i = set_var("next_i", binary("MLIL_ADD", var("i"), const(1)))
+    divu = set_var("mod_i", binary("MLIL_DIVU", var("i"), const(key_modulus)))
+    parity = set_var("parity", binary("MLIL_AND", binary("MLIL_MUL", var("mod_i"), var("key")), const(1)))
+    mixed = set_var("mixed", binary("MLIL_XOR", var("cipher"), var("key")))
+    key_load = set_var("key", Expr("MLIL_LOAD", [var("src")], src=var("src"), size=1))
+    payload_load = set_var("cipher", Expr("MLIL_LOAD", [var("payload")], src=var("payload"), size=1))
+    byte_store = store(var("dst"), var("mixed"))
+    byte_store.size = 1
+    cond = Expr("MLIL_CMP_E", [var("next_i"), const(length)], left=var("next_i"), right=const(length))
+    done_if = Expr("MLIL_IF", [cond], condition=cond, true=0, false=0)
+    return FakeFunc(start, one_block(
+        next_i,
+        divu,
+        parity,
+        key_load,
+        payload_load,
+        mixed,
+        byte_store,
+        done_if,
+    ))
+
+
+def counter_loop_callee(start, key_modulus, length):
+    next_i = set_var("next_i", binary("MLIL_ADD", var("i"), const(1)))
+    divu = set_var("mod_i", binary("MLIL_DIVU", var("i"), const(key_modulus)))
+    cond = Expr("MLIL_CMP_E", [var("next_i"), const(length)], left=var("next_i"), right=const(length))
+    done_if = Expr("MLIL_IF", [cond], condition=cond, true=0, false=0)
+    return FakeFunc(start, one_block(next_i, divu, done_if))
+
+
 def test_driver_deflatten_hook_handles_stack_state_stores():
     il, entry_jump, branch, real_b_jump, real_b, real_c = build_driver_shape()
     func = types.SimpleNamespace(start=0x36D10)
@@ -222,6 +302,54 @@ def test_driver_deflatten_hook_skips_conditional_tail_with_real_store():
     assert all(plan.get("if_il") is not branch for plan in plans)
 
 
+def test_driver_string_decrypt_hook_recovers_clone_calls():
+    bv = FakeBv()
+    callee = decrypt_callee(0x5E334, 3, 5)
+    bv.functions[callee.start] = callee
+    bv.memory[0x7000] = driver_blob(b"drv\x00!", b"aB?")
+    caller = FakeFunc(
+        0x36D10,
+        one_block(call(const(callee.start), [const(0x6000), const(0x7000)])),
+    )
+
+    facts = driver.plan_string_decrypt_calls(bv, caller, caller.medium_level_il, {})
+
+    assert facts == [{
+        "call_addr": 0x5000,
+        "src_addr": 0x7000,
+        "dst_addr": 0x6000,
+        "plaintext": b"drv\x00!",
+    }]
+
+
+def test_driver_string_decrypt_hook_rejects_counter_loop_callee():
+    bv = FakeBv()
+    callee = counter_loop_callee(0x5000, 3, 5)
+    bv.functions[callee.start] = callee
+    bv.memory[0x7000] = driver_blob(b"drv\x00!", b"aB?")
+    caller = FakeFunc(
+        0x36D10,
+        one_block(call(const(callee.start), [const(0x6000), const(0x7000)])),
+    )
+
+    assert driver.plan_string_decrypt_calls(bv, caller, caller.medium_level_il, {}) == []
+
+
+def test_driver_string_decrypt_hook_rejects_oversized_key_modulus():
+    bv = FakeBv()
+    callee = decrypt_callee(0x5000, 4097, 5)
+    bv.functions[callee.start] = callee
+    caller = FakeFunc(
+        0x36D10,
+        one_block(call(const(callee.start), [const(0x6000), const(0x7000)])),
+    )
+
+    assert driver.plan_string_decrypt_calls(bv, caller, caller.medium_level_il, {}) == []
+
+
 if __name__ == "__main__":
     test_driver_deflatten_hook_handles_stack_state_stores()
     test_driver_deflatten_hook_skips_conditional_tail_with_real_store()
+    test_driver_string_decrypt_hook_recovers_clone_calls()
+    test_driver_string_decrypt_hook_rejects_counter_loop_callee()
+    test_driver_string_decrypt_hook_rejects_oversized_key_modulus()
