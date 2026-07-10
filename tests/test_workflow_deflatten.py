@@ -546,6 +546,55 @@ def test_deflatten_retries_without_publishing_state_after_commit_failure():
     deflatten_rewrite_results.clear()
 
 
+def test_deflatten_failures_revoke_prior_state_before_cleanup():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.globals_stable = True
+    other_function = 0x7000
+    old_commit = workflow._commit_mlil
+
+    try:
+        for rewrite_result, commit_result in (
+            ((None, 0), True),
+            ((object(), 1), False),
+        ):
+            calls.clear()
+            deflatten_rewrite_results[:] = [rewrite_result]
+            nop_state_write_calls.clear()
+            ctx = FakeContext()
+            ctx.view.session_data = {
+                "dispatchthis_state_consts": {
+                    ctx.function.start: {0xDEAD},
+                    other_function: {0xBEEF},
+                },
+                "dispatchthis_state_vars": {
+                    ctx.function.start: {"old_state"},
+                    other_function: {"other_state"},
+                },
+                "dispatchthis_mlil_stable": {
+                    ctx.function.start: True,
+                    other_function: True,
+                },
+            }
+            workflow._commit_mlil = lambda _ctx, _mlil: commit_result
+
+            workflow.deflatten_mlil(ctx)
+            for key in (
+                "dispatchthis_state_consts",
+                "dispatchthis_state_vars",
+                "dispatchthis_mlil_stable",
+            ):
+                assert ctx.function.start not in ctx.view.session_data[key]
+                assert other_function in ctx.view.session_data[key]
+            workflow.cleanup_mlil(ctx)
+            assert nop_state_write_calls == []
+    finally:
+        workflow._commit_mlil = old_commit
+
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.globals_stable = False
+    deflatten_rewrite_results.clear()
+
+
 def test_deflatten_waits_for_global_phase_stability():
     FakeWorkflowState.stable = True
     FakeWorkflowState.globals_stable = False
@@ -1468,6 +1517,7 @@ def test_noreturn_type_detection_and_fallthrough_callsite():
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_branch_mirror_state()
     test_deflatten_retries_without_publishing_state_after_commit_failure()
+    test_deflatten_failures_revoke_prior_state_before_cleanup()
     test_deflatten_waits_for_global_phase_stability()
     test_branch_resolver_reuses_branch_receipts_as_known_targets()
     test_branch_resolver_records_profile_cleanup_roots_without_target_mutation()

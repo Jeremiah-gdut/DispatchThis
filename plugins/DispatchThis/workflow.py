@@ -451,6 +451,12 @@ def deflatten_mlil(ctx: AnalysisContext):
 
     new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
     if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
+        for key in (
+            "dispatchthis_state_consts",
+            "dispatchthis_state_vars",
+            "dispatchthis_mlil_stable",
+        ):
+            bv.session_data.get(key, {}).pop(func.start, None)
         return
 
     # Stash state tokens and variables only after the replacement is installed,
