@@ -102,6 +102,47 @@ class FakeMlil:
         return self.ssa_defs.get(var)
 
 
+class CorrelatedEdge:
+    def __init__(self, source, target):
+        self.source = source
+        self.target = target
+
+
+class CorrelatedBlock:
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+        self.incoming_edges = []
+        self.outgoing_edges = []
+
+
+class CorrelatedIl:
+    def __init__(self, instructions, ssa_defs=None):
+        self.instructions = list(instructions)
+        self._by_index = {instruction.instr_index: instruction for instruction in self.instructions}
+        self.ssa_defs = ssa_defs or {}
+
+    def __getitem__(self, index):
+        return self._by_index[index]
+
+    def get_ssa_var_definition(self, var):
+        return self.ssa_defs.get(var)
+
+
+class IntType:
+    width = 4
+
+    def __str__(self):
+        return "int32_t"
+
+
+class MutablePointerType:
+    width = 8
+
+    def __str__(self):
+        return "void*"
+
+
 def const(op, value):
     return Expr(f"{op}_CONST", constant=value)
 
@@ -152,6 +193,112 @@ def store(dest, src, instr_index):
 
 def qword(bv, addr, value):
     bv.memory[addr] = value & 0xFFFFFFFFFFFFFFFF
+
+
+def correlated_store_fixture(reverse=True, mutable_pointer=False):
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.sections.append((0x5000, 0x6000, ".bss"))
+    data_vars = {
+        0x5100: types.SimpleNamespace(type=IntType()),
+        0x5200: types.SimpleNamespace(type=IntType()),
+        0x5300: types.SimpleNamespace(type=IntType()),
+    }
+    if mutable_pointer:
+        bv.sections.append((0x6100, 0x6108, ".data"))
+        data_vars[0x6100] = types.SimpleNamespace(type=MutablePointerType())
+        qword(bv, 0x6100, 0x5200)
+    bv.get_data_var_at = data_vars.get
+
+    ssa_true = CorrelatedBlock(10, 11)
+    ssa_false = CorrelatedBlock(20, 21)
+    ssa_join = CorrelatedBlock(30, 31)
+    true_edge = CorrelatedEdge(ssa_true, ssa_join)
+    false_edge = CorrelatedEdge(ssa_false, ssa_join)
+    ssa_true.outgoing_edges = [true_edge]
+    ssa_false.outgoing_edges = [false_edge]
+    ssa_join.incoming_edges = [true_edge, false_edge]
+
+    dest_true = Var("dest", 1)
+    dest_false = Var("dest", 2)
+    dest_phi = Var("dest", 3)
+    src_true = Var("src", 1)
+    src_false = Var("src", 2)
+    src_phi = Var("src", 3)
+    src_value = Var("value", 1)
+
+    dest_true_source = const("MLIL", 0x5200)
+    if mutable_pointer:
+        dest_true_source = load("MLIL", const("MLIL", 0x6100), size=8, address=0x4010)
+    dest_true_def = set_var_ssa(dest_true_source, instr_index=1, address=0x4010)
+    dest_false_def = set_var_ssa(const("MLIL", 0x5100), instr_index=2, address=0x4020)
+    src_true_def = set_var_ssa(const("MLIL", 0x5100), instr_index=3, address=0x4010)
+    src_false_def = set_var_ssa(
+        const("MLIL", 0x5200 if reverse else 0x5300),
+        instr_index=4,
+        address=0x4020,
+    )
+    for definition, block in (
+        (dest_true_def, ssa_true),
+        (dest_false_def, ssa_false),
+        (src_true_def, ssa_true),
+        (src_false_def, ssa_false),
+    ):
+        definition.il_basic_block = block
+
+    dest_phi_def = Expr("MLIL_VAR_PHI", src=[dest_true, dest_false], instr_index=5, address=0x5000)
+    src_phi_def = Expr("MLIL_VAR_PHI", src=[src_true, src_false], instr_index=6, address=0x5000)
+    dest_expr = Expr("MLIL_VAR_SSA", src=dest_phi)
+    src_addr_expr = Expr("MLIL_VAR_SSA", src=src_phi)
+    source_load = Expr(
+        "MLIL_LOAD_SSA",
+        [src_addr_expr],
+        src=src_addr_expr,
+        size=4,
+        address=0x5000,
+    )
+    src_value_def = set_var_ssa(source_load, instr_index=7, address=0x5000)
+    store_ssa = Expr(
+        "MLIL_STORE_SSA",
+        [dest_expr, Expr("MLIL_VAR_SSA", src=src_value)],
+        dest=dest_expr,
+        src=Expr("MLIL_VAR_SSA", src=src_value),
+        size=4,
+        instr_index=30,
+        address=0x5000,
+    )
+    store_ssa.il_basic_block = ssa_join
+    ssa_true_goto = Expr("MLIL_GOTO", instr_index=10, address=0x4014)
+    ssa_false_goto = Expr("MLIL_GOTO", instr_index=20, address=0x4024)
+    ssa_true_goto.il_basic_block = ssa_true
+    ssa_false_goto.il_basic_block = ssa_false
+    ssa = CorrelatedIl(
+        [ssa_true_goto, ssa_false_goto, store_ssa],
+        {
+            dest_true: dest_true_def,
+            dest_false: dest_false_def,
+            dest_phi: dest_phi_def,
+            src_true: src_true_def,
+            src_false: src_false_def,
+            src_phi: src_phi_def,
+            src_value: src_value_def,
+        },
+    )
+
+    non_ssa_join = CorrelatedBlock(40, 42)
+    pure = set_var("tmp", const("MLIL", 0), instr_index=40, address=0x5000)
+    pure.il_basic_block = non_ssa_join
+    store = Expr("MLIL_STORE", dest=var("dest"), src=var("src"), size=4, instr_index=41, address=0x6000)
+    store.il_basic_block = non_ssa_join
+    true_goto = Expr("MLIL_GOTO", instr_index=50, address=0x5014)
+    false_goto = Expr("MLIL_GOTO", instr_index=51, address=0x5024)
+    il = CorrelatedIl([pure, store, true_goto, false_goto])
+    il.ssa_form = ssa
+    store_ssa.non_ssa_form = store
+    ssa_true_goto.non_ssa_form = true_goto
+    ssa_false_goto.non_ssa_form = false_goto
+    func = types.SimpleNamespace(start=valorant.MAIN_START)
+    return valorant, bv, func, il, store, true_goto, false_goto
 
 
 def encoded_blob(plaintext, key):
@@ -286,7 +433,10 @@ def test_call_profile_accepts_external_symbol_target():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     target = 0x8956BB63505153E0
     bv = FakeBv()
-    bv.symbols[target] = types.SimpleNamespace(name="fork")
+    bv.symbols[target] = types.SimpleNamespace(
+        name="fork",
+        type=types.SimpleNamespace(name="ExternalSymbol"),
+    )
 
     decode_def = set_var("target", const("MLIL", target), instr_index=12, address=0x3200)
     call_il = Expr("MLIL_CALL", [var("target")], dest=var("target"), address=0x4200)
@@ -301,6 +451,21 @@ def test_call_profile_accepts_external_symbol_target():
     }]
 
 
+def test_call_profile_rejects_data_symbol_target():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.symbols[0] = types.SimpleNamespace(
+        name="__elf_header",
+        type=types.SimpleNamespace(name="DataSymbol"),
+    )
+
+    decode_def = set_var("target", const("MLIL", 0), instr_index=13, address=0x3300)
+    call_il = Expr("MLIL_CALL", [var("target")], dest=var("target"), address=0x4300)
+    il = FakeMlil([decode_def, call_il], {"target": [decode_def]})
+
+    assert valorant.resolve_call_gadget(bv, il) == []
+
+
 def test_global_constant_profile_plans_qword_data_loads():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
@@ -310,7 +475,7 @@ def test_global_constant_profile_plans_qword_data_loads():
 
     assert valorant.plan_global_constant_slots(bv, il) == [{
         "slot_addr": 0x12A06A0,
-        "type": valorant.CONST_SLOT_TYPE,
+        "type": "uint64_t const",
         "value": 0x123456789ABCDEF0,
         "resolved_addr": 0x56789ABCDEF0,
         "use_addr": 0,
@@ -328,14 +493,14 @@ def test_global_constant_profile_plans_expanded_qword_slot_range():
     assert valorant.plan_global_constant_slots(bv, il) == [
         {
             "slot_addr": 0x12A01E0,
-            "type": valorant.CONST_SLOT_TYPE,
+            "type": "uint64_t const",
             "value": 0x1111222233334444,
             "resolved_addr": 0x222233334444,
             "use_addr": 0,
         },
         {
             "slot_addr": 0x12A0E30,
-            "type": valorant.CONST_SLOT_TYPE,
+            "type": "uint64_t const",
             "value": 0xAAAABBBBCCCCDDDD,
             "resolved_addr": 0xBBBBCCCCDDDD,
             "use_addr": 0,
@@ -383,6 +548,80 @@ def test_global_constant_profile_plans_scalar_constant_blob_data_vars():
             "use_addr": 0x6C801C,
         },
     ]
+
+
+def test_global_constant_profile_plans_pre_blob_dword_constants():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.sections.append((0x11F5678, 0x11F56A8, ".data"))
+    qword(bv, 0x11F5678, 0xF228619E)
+    qword(bv, 0x11F56A4, 0x4518F9EC)
+    first_load = load("MLIL", const("MLIL", 0x11F5678), size=4, address=0x6C4D6C)
+    last_load = load("MLIL", const("MLIL", 0x11F56A4), size=4, address=0x6C4FA0)
+    il = FakeMlil([first_load, last_load], {})
+
+    assert valorant.plan_global_constant_slots(bv, il) == [
+        {
+            "slot_addr": 0x11F5678,
+            "type": "uint32_t const",
+            "value": 0xF228619E,
+            "resolved_addr": 0xF228619E,
+            "use_addr": 0x6C4D6C,
+        },
+        {
+            "slot_addr": 0x11F56A4,
+            "type": "uint32_t const",
+            "value": 0x4518F9EC,
+            "resolved_addr": 0x4518F9EC,
+            "use_addr": 0x6C4FA0,
+        },
+    ]
+
+
+def test_global_constant_profile_plans_verified_path_pointer_slot_only():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.sections.extend([
+        (0x11F5658, 0x11F5668, ".data"),
+        (0x29D834, 0x29D844, ".rodata"),
+    ])
+    qword(bv, 0x11F5658, 0x29D834)
+    qword(bv, 0x11F5660, 0x29D87E)
+
+    assert valorant.plan_global_constant_slots(bv, FakeMlil([], {})) == [{
+        "slot_addr": 0x11F5658,
+        "type": "char const* const",
+        "value": 0x29D834,
+        "resolved_addr": 0x29D834,
+        "use_addr": 0,
+    }]
+
+
+def test_correlated_store_profile_plans_arm_local_writes():
+    valorant, bv, func, il, store_il, true_goto, false_goto = correlated_store_fixture()
+
+    assert valorant.plan_correlated_store_rewrites(bv, func, il) == [{
+        "store": store_il,
+        "size": 4,
+        "arms": (
+            {"goto": true_goto, "dest": 0x5200, "src": 0x5100},
+            {"goto": false_goto, "dest": 0x5100, "src": 0x5200},
+        ),
+    }]
+
+
+def test_correlated_store_profile_rejects_non_swapping_phi_arms():
+    valorant, bv, func, il, _store_il, _true_goto, _false_goto = correlated_store_fixture(reverse=False)
+
+    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
+
+
+def test_correlated_store_profile_rejects_writable_pointer_load():
+    valorant, bv, func, il, _store_il, _true_goto, _false_goto = correlated_store_fixture(
+        mutable_pointer=True
+    )
+
+    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
 
 
 def test_global_constant_profile_skips_out_of_range_loads():
@@ -455,9 +694,15 @@ if __name__ == "__main__":
     test_call_profile_accepts_text_target_without_existing_function()
     test_call_profile_follows_ssa_call_destination()
     test_call_profile_accepts_external_symbol_target()
+    test_call_profile_rejects_data_symbol_target()
     test_global_constant_profile_plans_qword_data_loads()
     test_global_constant_profile_plans_expanded_qword_slot_range()
+    test_global_constant_profile_plans_verified_path_pointer_slot_only()
     test_global_constant_profile_plans_scalar_constant_blob_data_vars()
+    test_global_constant_profile_plans_pre_blob_dword_constants()
+    test_correlated_store_profile_plans_arm_local_writes()
+    test_correlated_store_profile_rejects_non_swapping_phi_arms()
+    test_correlated_store_profile_rejects_writable_pointer_load()
     test_global_constant_profile_skips_out_of_range_loads()
     test_llil_value_folding_uses_stack_spill_before_memory_read()
     test_branch_value_folding_correlates_phi_arms()

@@ -50,6 +50,10 @@ def plan_global_constant_slots(bv, il):
     return [plans[addr] for addr in sorted(plans)]
 
 
+def plan_correlated_store_rewrites(_bv, _func, _il):
+    return []
+
+
 def _driver_global_constant_slot_refs(il):
     if il is None:
         return []

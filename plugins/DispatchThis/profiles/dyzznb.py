@@ -43,6 +43,10 @@ def plan_deflatten_redirections(bv, func, il):
     return default.plan_deflatten_redirections(bv, func, il)
 
 
+def plan_correlated_store_rewrites(_bv, _func, _il):
+    return []
+
+
 def _single_llil_const(bv, ssa, expr):
     values = llil.const_values(bv, ssa, expr)
     return next(iter(values)) if len(values) == 1 else None

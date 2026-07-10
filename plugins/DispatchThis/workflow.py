@@ -3,6 +3,7 @@
 from binaryninja import AnalysisContext, Settings, SettingsScope
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
+from .passes.medium.correlated_stores import apply_correlated_stores_mlil
 from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
@@ -398,6 +399,25 @@ def resolve_globals_mlil(ctx: AnalysisContext):
         state.invalidate_globals()
     if applied:
         log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
+
+
+def recover_phi_stores_mlil(ctx: AnalysisContext):
+    func = ctx.function
+    bv = ctx.view
+    if bv.arch.name != "aarch64" or not _ensure_analysis_settings(func):
+        return
+
+    state = FunctionWorkflowState(func)
+    if not state.branch_stable(func) or not state.call_stable() or not state.global_stable():
+        return
+
+    mlil = ctx.mlil
+    if mlil is None:
+        return
+    plans = active_profile(bv).plan_correlated_store_rewrites(bv, func, mlil)
+    new_mlil, applied = apply_correlated_stores_mlil(ctx, mlil, plans)
+    if applied and new_mlil is not None and _commit_mlil(ctx, new_mlil):
+        log_info(f"[workflow] {func.name}: recovered {applied} correlated store(s)")
 
 
 def string_decrypt_mlil(ctx: AnalysisContext):

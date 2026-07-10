@@ -11,6 +11,10 @@ call_plan_results = []
 call_rewrite_calls = []
 global_plan_calls = []
 global_plan_results = []
+correlated_plan_calls = []
+correlated_plan_results = []
+correlated_rewrite_calls = []
+correlated_rewrite_results = []
 active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
@@ -55,6 +59,16 @@ def fake_plan_global_constant_slots(bv, mlil):
     return list(global_plan_results)
 
 
+def fake_plan_correlated_store_rewrites(bv, func, mlil):
+    correlated_plan_calls.append((bv, func, mlil))
+    return list(correlated_plan_results)
+
+
+def fake_apply_correlated_stores_mlil(ctx, mlil, plans):
+    correlated_rewrite_calls.append((ctx, mlil, plans))
+    return correlated_rewrite_results.pop(0) if correlated_rewrite_results else (mlil, 0)
+
+
 def fake_plan_deflatten_redirections(bv, func, mlil):
     calls.append(("compute", func.start, mlil))
     return [{"kind": "uncond", "state_tokens": {(0x1234, 8)}, "state_vars": {"state"}}]
@@ -75,6 +89,7 @@ def fake_active_profile(bv):
         resolve_branch_gadget=fake_resolve_llil_jump_plan,
         resolve_call_gadget=fake_resolve_call_gadget,
         plan_global_constant_slots=fake_plan_global_constant_slots,
+        plan_correlated_store_rewrites=fake_plan_correlated_store_rewrites,
         plan_deflatten_redirections=fake_plan_deflatten_redirections,
         plan_string_decrypt_calls=fake_plan_string_decrypt_calls,
     )
@@ -226,6 +241,9 @@ _FAKE_MODULES = {
     "plugins.DispatchThis.passes.medium.deflatten": types.SimpleNamespace(
         compute_redirections=fake_compute,
         rewrite_redirections_mlil=fake_rewrite_redirections_mlil,
+    ),
+    "plugins.DispatchThis.passes.medium.correlated_stores": types.SimpleNamespace(
+        apply_correlated_stores_mlil=fake_apply_correlated_stores_mlil,
     ),
     "plugins.DispatchThis.passes.medium.nop_pass": types.SimpleNamespace(
         nop_deflatten_state_writes=lambda *args, **kwargs: (
@@ -1408,6 +1426,31 @@ def test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify():
     FakeWorkflowState.global_receipts = {}
 
 
+def test_recover_phi_stores_uses_profile_plan_after_global_stability():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    active_profile_calls.clear()
+    correlated_plan_calls.clear()
+    correlated_plan_results[:] = [{"store": object(), "size": 4, "arms": ()}]
+    correlated_rewrite_calls.clear()
+    rewritten_mlil = object()
+    correlated_rewrite_results[:] = [(rewritten_mlil, 1)]
+    ctx = FakeContext()
+
+    workflow.recover_phi_stores_mlil(ctx)
+
+    assert active_profile_calls == [ctx.view]
+    assert correlated_plan_calls == [(ctx.view, ctx.function, ctx.mlil)]
+    assert correlated_rewrite_calls == [(ctx, ctx.mlil, correlated_plan_results)]
+    assert ctx.installed_mlil is rewritten_mlil
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    correlated_plan_results.clear()
+    correlated_rewrite_results.clear()
+
+
 def test_string_decrypt_waits_for_branch_call_and_global_stability():
     ctx = FakeContext()
     string_decrypt_calls.clear()
@@ -1542,6 +1585,7 @@ if __name__ == "__main__":
     test_global_resolver_uses_active_profile_without_workflow_state()
     test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
     test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()
+    test_recover_phi_stores_uses_profile_plan_after_global_stability()
     test_string_decrypt_waits_for_branch_call_and_global_stability()
     test_string_decrypt_does_not_require_deflatten_stability()
     test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged()

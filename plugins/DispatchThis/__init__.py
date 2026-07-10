@@ -15,6 +15,7 @@ from .workflow import (
     resolve_calls_mlil,
     translate_branches_mlil,
     resolve_globals_mlil,
+    recover_phi_stores_mlil,
     string_decrypt_mlil,
     deflatten_mlil,
     cleanup_mlil,
@@ -95,9 +96,17 @@ def register_workflows():
     workflow.register_activity(Activity(json.dumps({
         "name": "extension.DispatchThis.GlobalConstantResolver",
         "title": "DispatchThis: Resolve Global Constants",
-        "description": "Type writable-section global pointer slots as constants when they are used read-only.",
+        "description": "Type proven read-only global slots with their observed width.",
         "eligibility": _RESOLVER_ELIGIBILITY,
     }), action=resolve_globals_mlil))
+
+    # Rebuild arm-local stores after global constants have stabilized.
+    workflow.register_activity(Activity(json.dumps({
+        "name": "extension.DispatchThis.CorrelatedStoreRecovery",
+        "title": "DispatchThis: Recover Correlated Stores",
+        "description": "Move proven path-correlated global stores out of their merge block.",
+        "eligibility": _RESOLVER_ELIGIBILITY,
+    }), action=recover_phi_stores_mlil))
 
     # String decrypt (MLIL); auto eligibility surfaces the String Decrypt toggle.
     workflow.register_activity(Activity(json.dumps({
@@ -131,6 +140,7 @@ def register_workflows():
             "extension.DispatchThis.IndirectCallPatcher",
             "extension.DispatchThis.BranchConditionTranslator",
             "extension.DispatchThis.GlobalConstantResolver",
+            "extension.DispatchThis.CorrelatedStoreRecovery",
             STRING_DECRYPT_SETTING,
             DEFLATTEN_SETTING,
             "extension.DispatchThis.Cleanup"

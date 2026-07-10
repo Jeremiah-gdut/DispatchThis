@@ -22,6 +22,10 @@ def plan_global_constant_slots(bv, mlil):
     return _plan_global_constant_slots(bv, mlil)
 
 
+def plan_correlated_store_rewrites(_bv, _func, _mlil):
+    return []
+
+
 def plan_deflatten_redirections(bv, func, mlil):
     return compute_redirections(bv, func, mlil=mlil)
 

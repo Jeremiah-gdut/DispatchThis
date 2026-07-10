@@ -82,6 +82,7 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
         "extension.DispatchThis.IndirectPatcher",
         "extension.DispatchThis.IndirectCallPatcher",
         "extension.DispatchThis.GlobalConstantResolver",
+        "extension.DispatchThis.CorrelatedStoreRecovery",
     ]
     for activity_id in resolver_ids:
         identifiers = {
@@ -101,6 +102,9 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
         if args[0] == "core.function.generateHighLevelIL"
     )
     assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
+        "extension.DispatchThis.CorrelatedStoreRecovery"
+    )
+    assert high_level.index("extension.DispatchThis.CorrelatedStoreRecovery") < high_level.index(
         plugin.STRING_DECRYPT_SETTING
     )
     assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(

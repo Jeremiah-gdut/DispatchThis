@@ -90,6 +90,30 @@ def test_copy_mlil_with_instruction_rewrites_copies_unchanged_instructions(monke
     assert new_mlil.ssa
 
 
+def test_copy_mlil_with_instruction_rewrites_appends_preludes_before_source_instruction(monkeypatch):
+    monkeypatch.setattr(binaryninja, "MediumLevelILFunction", NewMLIL, raising=False)
+    rewrite = load_plugin_module("plugins.DispatchThis.passes.medium.rewrite")
+    old_mlil = OldMLIL()
+
+    new_mlil, applied = rewrite.copy_mlil_with_instruction_rewrites(
+        types.SimpleNamespace(mlil=old_mlil, llil="context-llil"),
+        {1: lambda _new_mlil, old_ins: ("rewrite", old_ins.instr_index)},
+        preludes={
+            1: lambda _new_mlil, old_ins: [("prelude", old_ins.instr_index)],
+            2: lambda _new_mlil, old_ins: [("prelude", old_ins.instr_index)],
+        },
+    )
+
+    assert applied == 2
+    assert new_mlil.appended == [
+        (("copy", 0), ("loc", 100)),
+        (("prelude", 1), ("loc", 101)),
+        (("rewrite", 1), ("loc", 101)),
+        (("prelude", 2), ("loc", 102)),
+        (("copy", 2), ("loc", 102)),
+    ]
+
+
 def test_copy_mlil_with_instruction_rewrites_rejects_missing_replacement(monkeypatch):
     monkeypatch.setattr(binaryninja, "MediumLevelILFunction", NewMLIL, raising=False)
     rewrite = load_plugin_module("plugins.DispatchThis.passes.medium.rewrite")
@@ -125,6 +149,63 @@ def test_copy_mlil_with_instruction_rewrites_rejects_callback_failure(monkeypatc
             0: lambda _new_mlil, _old_ins: "rewrite",
             1: fail,
         },
+    )
+
+    assert new_mlil is old_mlil
+    assert applied == 0
+    assert NewMLIL.instances[-1].finalized is False
+    assert NewMLIL.instances[-1].ssa is False
+
+
+def test_copy_mlil_with_instruction_rewrites_rejects_missing_prelude(monkeypatch):
+    monkeypatch.setattr(binaryninja, "MediumLevelILFunction", NewMLIL, raising=False)
+    rewrite = load_plugin_module("plugins.DispatchThis.passes.medium.rewrite")
+    old_mlil = OldMLIL()
+    NewMLIL.instances.clear()
+
+    new_mlil, applied = rewrite.copy_mlil_with_instruction_rewrites(
+        types.SimpleNamespace(mlil=old_mlil, llil="context-llil"),
+        {},
+        preludes={99: lambda _new_mlil, _old_ins: ["prelude"]},
+    )
+
+    assert new_mlil is old_mlil
+    assert applied == 0
+    assert NewMLIL.instances[-1].finalized is False
+    assert NewMLIL.instances[-1].ssa is False
+
+
+def test_copy_mlil_with_instruction_rewrites_rejects_empty_prelude(monkeypatch):
+    monkeypatch.setattr(binaryninja, "MediumLevelILFunction", NewMLIL, raising=False)
+    rewrite = load_plugin_module("plugins.DispatchThis.passes.medium.rewrite")
+    old_mlil = OldMLIL()
+    NewMLIL.instances.clear()
+
+    new_mlil, applied = rewrite.copy_mlil_with_instruction_rewrites(
+        types.SimpleNamespace(mlil=old_mlil, llil="context-llil"),
+        {},
+        preludes={1: lambda _new_mlil, _old_ins: []},
+    )
+
+    assert new_mlil is old_mlil
+    assert applied == 0
+    assert NewMLIL.instances[-1].finalized is False
+    assert NewMLIL.instances[-1].ssa is False
+
+
+def test_copy_mlil_with_instruction_rewrites_rejects_failing_prelude(monkeypatch):
+    monkeypatch.setattr(binaryninja, "MediumLevelILFunction", NewMLIL, raising=False)
+    rewrite = load_plugin_module("plugins.DispatchThis.passes.medium.rewrite")
+    old_mlil = OldMLIL()
+    NewMLIL.instances.clear()
+
+    def fail(_new_mlil, _old_ins):
+        raise RuntimeError("prelude failed")
+
+    new_mlil, applied = rewrite.copy_mlil_with_instruction_rewrites(
+        types.SimpleNamespace(mlil=old_mlil, llil="context-llil"),
+        {},
+        preludes={1: fail},
     )
 
     assert new_mlil is old_mlil
