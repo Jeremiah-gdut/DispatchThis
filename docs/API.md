@@ -1264,7 +1264,7 @@ A dict with:
 **Signature**
 
 ```python
-global_constant_fact(slot_addr, type_name, value, resolved_addr, use_addr)
+global_constant_fact(slot_addr, type_name)
 ```
 
 **Purpose**
@@ -1275,9 +1275,6 @@ Build a global constant slot recovery fact.
 
 - `slot_addr`: Address of the global slot.
 - `type_name`: Non-empty type name string to apply.
-- `value`: Raw qword value read from the slot.
-- `resolved_addr`: Address produced by applying the caller's slot formula.
-- `use_addr`: Address of the MLIL use that justified the fact.
 
 **Returns**
 
@@ -1285,17 +1282,16 @@ A dict with:
 
 - `slot_addr`: integer slot address.
 - `type`: type name string.
-- `value`: integer raw slot value.
-- `resolved_addr`: integer resolved address.
-- `use_addr`: integer use address.
 
 **Key behavior and limits**
 
-- Raises `MalformedRecoveryFact` for invalid integer fields or empty/non-string
+- Raises `MalformedRecoveryFact` for an invalid slot address or empty/non-string
   `type_name`.
-- Does not define a data variable; workflow owns BinaryView mutation and
-  receipts.
+- Does not define a data variable; workflow owns BinaryView mutation and the
+  function global-phase receipt.
 - Does not validate section, store behavior, or address validity.
+- Recognition evidence relevant to the profile, such as raw values, resolved
+  addresses, or use sites, is not part of the fact.
 
 ### `string_decrypt_fact`
 

@@ -352,16 +352,10 @@ def test_driver_global_constant_hook_plans_driver_blob_base_slot():
         {
             "slot_addr": base_slot,
             "type": "void const* const",
-            "value": values[base_slot],
-            "resolved_addr": values[base_slot] & 0xFFFFFFFFFFFF,
-            "use_addr": 0x2F6A8,
         },
         {
             "slot_addr": key_slot,
             "type": "void const* const",
-            "value": values[key_slot],
-            "resolved_addr": values[key_slot] & 0xFFFFFFFFFFFF,
-            "use_addr": 0x2F6A8,
         },
     ]
 

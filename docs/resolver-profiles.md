@@ -315,13 +315,13 @@ must be rooted in the call-target decode slice, not in unrelated constants.
 {
     "slot_addr": 0xA43D70,
     "type": "uint8_t const* const",
-    "value": 0x12345678,
-    "resolved_addr": 0xA49C30,
-    "use_addr": 0x8E127C,
 }
 ```
 
-Workflow owns `BinaryView.define_user_data_var` and global receipts.
+Evidence relevant to the binary shape, such as an observed value, resolved
+address, or use site, remains private to the profile.
+Workflow owns `BinaryView.define_user_data_var` and function global-phase
+receipts.
 
 `plan_deflatten_redirections(bv, func, mlil)` returns deflatten redirection
 plans:

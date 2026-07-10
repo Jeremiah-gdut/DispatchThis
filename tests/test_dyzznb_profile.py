@@ -84,9 +84,6 @@ def test_global_profile_returns_constant_slot_facts():
     assert dyzznb.plan_global_constant_slots(bv, il) == [{
         "slot_addr": 0xA43D70,
         "type": dyzznb.CONST_SLOT_TYPE,
-        "value": 0x5F88806BDE3FE98C,
-        "resolved_addr": 0xA49C30,
-        "use_addr": 0x8E127C,
     }]
 
 

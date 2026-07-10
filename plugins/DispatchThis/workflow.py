@@ -21,7 +21,6 @@ from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
 
 
-GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
 _ANALYSIS_SETTINGS = (
     ("analysis.limits.maxFunctionSize", 0),
     ("analysis.limits.expressionValueComputeMaxDepth", 99999),
@@ -358,7 +357,6 @@ def resolve_globals_mlil(ctx: AnalysisContext):
             state.invalidate_globals()
         return
 
-    receipts = bv.session_data.setdefault(GLOBAL_CONSTANT_RECEIPTS, {})
     slot_types = {}
     applied = 0
     changed = False
@@ -367,13 +365,11 @@ def resolve_globals_mlil(ctx: AnalysisContext):
         slot_addr = plan["slot_addr"]
         type_name = plan["type"]
         if (
-            receipts.get(slot_addr) == type_name
-            and state.global_receipts.get(slot_addr) == type_name
+            state.global_receipts.get(slot_addr) == type_name
             and _global_type_applied(bv, slot_addr, type_name)
         ):
             continue
         if _global_type_applied(bv, slot_addr, type_name):
-            receipts[slot_addr] = type_name
             changed = state.mark_global_slot(slot_addr, type_name) or changed
             continue
         try:
@@ -385,7 +381,6 @@ def resolve_globals_mlil(ctx: AnalysisContext):
                 log_warn(f"[workflow] {func.name}: failed to verify global const slot @ {hex(slot_addr)}")
                 failed = True
                 continue
-            receipts[slot_addr] = type_name
             state.mark_global_slot(slot_addr, type_name)
             applied += 1
         except Exception as e:  # noqa: BLE001

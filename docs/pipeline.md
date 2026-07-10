@@ -82,8 +82,9 @@ cleanup rooted at the resolved branch sites.
 `plan_global_constant_slots` recognizes narrow writable-section global pointer slots that
 are only used as read-only constant bases. The workflow callback applies the
 BinaryView-level `define_user_data_var` mutation with a `uint8_t const* const` type,
-records a view-level receipt so several functions do not retype the same slot, and marks
-the current function's global phase stable only after its slot receipts still verify.
+treats the current data-variable type as view-level truth, and records a per-function
+receipt. The current function's global phase becomes stable only after its receipts
+still match the BinaryView types.
 
 The first scope is intentionally narrow: a qword slot in `.data`, a nonzero constant
 offset chain, a valid resolved address, and no store to the slot in the known direct-ref
@@ -149,7 +150,6 @@ overlay after Binary Ninja reanalysis.
 | `dispatchthis_state_consts` | `{start: set(state_value)}` - for state-write NOP |
 | `dispatchthis_state_vars` | `{start: set(var)}` - state var + aliases |
 | `dispatchthis_tag_cleanup_pending` | `set(start)` - view-level analysis-completion callbacks pending |
-| `dispatchthis_global_constant_slots` | `{slot_addr: type_string}` - view-level global constant type receipts |
 
 Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`;
 see [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md)

@@ -127,9 +127,6 @@ def test_global_constant_slot_is_planned_from_pointer_base_load():
         {
             "slot_addr": 0xA43D70,
             "type": CONST_SLOT_TYPE,
-            "value": 0x5F88806BDE3FE98C,
-            "resolved_addr": 0xA49C30,
-            "use_addr": 0x8E127C,
         }
     ]
 
@@ -178,9 +175,6 @@ def test_global_constant_slot_is_planned_from_call_argument_pointer():
         {
             "slot_addr": 0xA45660,
             "type": CONST_SLOT_TYPE,
-            "value": 0x4A6309F1F5DCFBC9,
-            "resolved_addr": 0xA20C2A,
-            "use_addr": 0x925378,
         }
     ]
 

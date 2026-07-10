@@ -45,8 +45,8 @@ def plan_global_constant_slots(bv, il):
         plan["slot_addr"]: plan
         for plan in valorant_2_6.plan_global_constant_slots(bv, il)
     }
-    for slot_addr, use_addr in _driver_global_constant_slot_refs(il):
-        _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr)
+    for slot_addr in _driver_global_constant_slot_refs(il):
+        _add_driver_global_constant_plan(plans, bv, slot_addr)
     return [plans[addr] for addr in sorted(plans)]
 
 
@@ -57,19 +57,18 @@ def plan_correlated_store_rewrites(_bv, _func, _il):
 def _driver_global_constant_slot_refs(il):
     if il is None:
         return []
-    refs = {}
+    refs = set()
     for call in mlil.iter_calls(il, _DIRECT_CALL_OPS):
         params = list(getattr(call, "params", ()) or ())
         if len(params) < 2:
             continue
-        use_addr = getattr(call, "address", 0)
         for expr in mlil.walk_expr_with_defs(il, params[1], max_depth=32):
             for slot_addr, _offset in mlil.load_slot_offsets(il, expr, address_mask=_U48):
-                refs.setdefault(slot_addr, use_addr)
-    return refs.items()
+                refs.add(slot_addr)
+    return refs
 
 
-def _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr):
+def _add_driver_global_constant_plan(plans, bv, slot_addr):
     if slot_addr in plans:
         return
     data_var = bv.get_data_var_at(slot_addr)
@@ -81,13 +80,7 @@ def _add_driver_global_constant_plan(plans, bv, slot_addr, use_addr):
     value = memory.read_qword_slot(bv, slot_addr)
     if value is None:
         return
-    plans[slot_addr] = facts.global_constant_fact(
-        slot_addr,
-        _CONST_PTR_TYPE,
-        value,
-        value & _U48,
-        use_addr,
-    )
+    plans[slot_addr] = facts.global_constant_fact(slot_addr, _CONST_PTR_TYPE)
 
 
 def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):

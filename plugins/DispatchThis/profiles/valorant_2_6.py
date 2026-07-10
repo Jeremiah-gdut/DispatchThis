@@ -63,7 +63,6 @@ def plan_deflatten_redirections(bv, func, il):
 def _iter_scalar_constant_loads(bv, il):
     start, end = _SCALAR_CONSTANT_BLOB_RANGE
     for ins in getattr(il, "instructions", ()) or ():
-        ins_addr = getattr(ins, "address", 0)
         for expr in mlil.walk_expr(ins):
             if _op(expr) not in _LOAD_OPS:
                 continue
@@ -74,7 +73,7 @@ def _iter_scalar_constant_loads(bv, il):
             for addr in _values(bv, il, expr.src):
                 addr = ((addr + offset) & U48)
                 if start <= addr and addr + width <= end:
-                    yield addr, width, getattr(expr, "address", ins_addr)
+                    yield addr, width
 
 
 def _add_global_constant_plan(plans, bv, slot_addr, type_name):
@@ -85,16 +84,10 @@ def _add_global_constant_plan(plans, bv, slot_addr, type_name):
     value = memory.read_qword_slot(bv, slot_addr)
     if value is None:
         return
-    plans[slot_addr] = facts.global_constant_fact(
-        slot_addr,
-        type_name,
-        value,
-        value & U48,
-        0,
-    )
+    plans[slot_addr] = facts.global_constant_fact(slot_addr, type_name)
 
 
-def _add_scalar_constant_plan(plans, bv, slot_addr, width, use_addr):
+def _add_scalar_constant_plan(plans, bv, slot_addr, width):
     type_name = _SCALAR_CONST_TYPES.get(width)
     if type_name is None or not memory.in_section(bv, slot_addr, _CONST_DATA_SECTIONS):
         return
@@ -104,13 +97,7 @@ def _add_scalar_constant_plan(plans, bv, slot_addr, width, use_addr):
     value = memory.read_uint_le(bv, slot_addr, width)
     if value is None:
         return
-    plans[slot_addr] = facts.global_constant_fact(
-        slot_addr,
-        type_name,
-        value,
-        value & U48,
-        use_addr,
-    )
+    plans[slot_addr] = facts.global_constant_fact(slot_addr, type_name)
 
 
 def _op(expr):
@@ -517,8 +504,8 @@ def plan_global_constant_slots(bv, il):
         _add_global_constant_plan(plans, bv, slot_addr, GLOBAL_QWORD_CONST_TYPE)
     for slot_addr, type_name in _GLOBAL_POINTER_CONST_SLOTS.items():
         _add_global_constant_plan(plans, bv, slot_addr, type_name)
-    for slot_addr, width, use_addr in _iter_scalar_constant_loads(bv, il):
-        _add_scalar_constant_plan(plans, bv, slot_addr, width, use_addr)
+    for slot_addr, width in _iter_scalar_constant_loads(bv, il):
+        _add_scalar_constant_plan(plans, bv, slot_addr, width)
     return [plans[addr] for addr in sorted(plans)]
 
 

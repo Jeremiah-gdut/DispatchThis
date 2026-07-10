@@ -67,13 +67,10 @@ def call_fact(call_il, target, decode_def=None, cleanup_roots=None, call_addr=No
     }
 
 
-def global_constant_fact(slot_addr, type_name, value, resolved_addr, use_addr):
+def global_constant_fact(slot_addr, type_name):
     return {
         "slot_addr": _require_int("slot_addr", slot_addr),
         "type": _require_text("type", type_name),
-        "value": _require_int("value", value),
-        "resolved_addr": _require_int("resolved_addr", resolved_addr),
-        "use_addr": _require_int("use_addr", use_addr),
     }
 
 

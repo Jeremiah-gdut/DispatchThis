@@ -120,12 +120,9 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
         "decode_def": decode_def,
         "cleanup_roots": {1, 2},
     }
-    assert facts.global_constant_fact(0xA43D70, "uint8_t const* const", 0x10, 0x20, 0x30) == {
+    assert facts.global_constant_fact(0xA43D70, "uint8_t const* const") == {
         "slot_addr": 0xA43D70,
         "type": "uint8_t const* const",
-        "value": 0x10,
-        "resolved_addr": 0x20,
-        "use_addr": 0x30,
     }
     assert facts.string_decrypt_fact(0x9000, 0xA000, 0xB000, bytearray(b"hello")) == {
         "call_addr": 0x9000,
@@ -147,6 +144,6 @@ def test_fact_builders_reject_malformed_required_fields():
     with pytest.raises(facts.MalformedRecoveryFact, match="call_addr"):
         facts.call_fact(object(), 0x5000)
     with pytest.raises(facts.MalformedRecoveryFact, match="slot_addr"):
-        facts.global_constant_fact(None, "uint8_t const* const", 0x10, 0x20, 0x30)
+        facts.global_constant_fact(None, "uint8_t const* const")
     with pytest.raises(facts.MalformedRecoveryFact, match="plaintext"):
         facts.string_decrypt_fact(0x9000, 0xA000, 0xB000, "hello")

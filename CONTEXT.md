@@ -91,6 +91,12 @@ such as an indirect branch target, indirect call target, or global constant slot
 Workflow callbacks decide how and when to submit recovery facts to Binary Ninja.
 _Avoid_: profile action, Binary Ninja mutation request
 
+**Global constant recovery fact**:
+A recovery fact that identifies a global data slot and the const-qualified type it
+should receive. Values, resolved addresses, and use sites that justified recognition
+remain resolver-profile evidence rather than part of the recovery fact.
+_Avoid_: global constant audit record, global constant mutation receipt
+
 **Recovery backend**:
 The workflow or pass layer that consumes recovery facts and applies stable
 Binary Ninja analysis effects, such as CFG recovery, call-target application, IL

@@ -50,7 +50,7 @@ def _refs_store_slot(bv, current_mlil, slot_addr):
     return False
 
 
-def _plan_for_slot(bv, mlil, slot_addr, offset, use_addr):
+def _plan_for_slot(bv, mlil, slot_addr, offset):
     if offset == 0:
         return None
     if not _plain_ptr_var(bv, slot_addr) or not in_section(bv, slot_addr, ".data"):
@@ -64,7 +64,7 @@ def _plan_for_slot(bv, mlil, slot_addr, offset, use_addr):
     if _refs_store_slot(bv, mlil, slot_addr):
         log_warn(f"[gconst] {hex(slot_addr)}: skipped, known reference writes to slot")
         return None
-    return global_constant_fact(slot_addr, CONST_SLOT_TYPE, value, resolved_addr, use_addr)
+    return global_constant_fact(slot_addr, CONST_SLOT_TYPE)
 
 
 def plan_global_constant_slots(bv, mlil):
@@ -73,10 +73,10 @@ def plan_global_constant_slots(bv, mlil):
         return []
 
     plans = {}
-    for _expr, use_addr, slot_addr, offset in iter_load_slot_offsets(mlil, address_mask=U48):
+    for _expr, _use_addr, slot_addr, offset in iter_load_slot_offsets(mlil, address_mask=U48):
         if slot_addr in plans:
             continue
-        plan = _plan_for_slot(bv, mlil, slot_addr, offset, use_addr)
+        plan = _plan_for_slot(bv, mlil, slot_addr, offset)
         if plan is not None:
             plans[slot_addr] = plan
 

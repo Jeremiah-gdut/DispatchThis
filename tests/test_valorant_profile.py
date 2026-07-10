@@ -476,9 +476,6 @@ def test_global_constant_profile_plans_qword_data_loads():
     assert valorant.plan_global_constant_slots(bv, il) == [{
         "slot_addr": 0x12A06A0,
         "type": "uint64_t const",
-        "value": 0x123456789ABCDEF0,
-        "resolved_addr": 0x56789ABCDEF0,
-        "use_addr": 0,
     }]
 
 
@@ -494,16 +491,10 @@ def test_global_constant_profile_plans_expanded_qword_slot_range():
         {
             "slot_addr": 0x12A01E0,
             "type": "uint64_t const",
-            "value": 0x1111222233334444,
-            "resolved_addr": 0x222233334444,
-            "use_addr": 0,
         },
         {
             "slot_addr": 0x12A0E30,
             "type": "uint64_t const",
-            "value": 0xAAAABBBBCCCCDDDD,
-            "resolved_addr": 0xBBBBCCCCDDDD,
-            "use_addr": 0,
         },
     ]
 
@@ -529,23 +520,14 @@ def test_global_constant_profile_plans_scalar_constant_blob_data_vars():
         {
             "slot_addr": 0x11F5700,
             "type": "uint8_t const",
-            "value": 0x88,
-            "resolved_addr": 0x88,
-            "use_addr": 0x6C8024,
         },
         {
             "slot_addr": 0x11F575B,
             "type": "uint16_t const",
-            "value": 0x6677,
-            "resolved_addr": 0x6677,
-            "use_addr": 0x6C8020,
         },
         {
             "slot_addr": 0x11F5774,
             "type": "uint32_t const",
-            "value": 0x11223344,
-            "resolved_addr": 0x11223344,
-            "use_addr": 0x6C801C,
         },
     ]
 
@@ -564,16 +546,10 @@ def test_global_constant_profile_plans_pre_blob_dword_constants():
         {
             "slot_addr": 0x11F5678,
             "type": "uint32_t const",
-            "value": 0xF228619E,
-            "resolved_addr": 0xF228619E,
-            "use_addr": 0x6C4D6C,
         },
         {
             "slot_addr": 0x11F56A4,
             "type": "uint32_t const",
-            "value": 0x4518F9EC,
-            "resolved_addr": 0x4518F9EC,
-            "use_addr": 0x6C4FA0,
         },
     ]
 
@@ -591,9 +567,6 @@ def test_global_constant_profile_plans_verified_path_pointer_slot_only():
     assert valorant.plan_global_constant_slots(bv, FakeMlil([], {})) == [{
         "slot_addr": 0x11F5658,
         "type": "char const* const",
-        "value": 0x29D834,
-        "resolved_addr": 0x29D834,
-        "use_addr": 0,
     }]
 
 

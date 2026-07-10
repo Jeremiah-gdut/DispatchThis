@@ -1307,7 +1307,7 @@ def test_branch_cleanup_runs_on_translated_mlil():
     set_roots_before_results.clear()
 
 
-def test_global_resolver_uses_active_profile_without_workflow_state():
+def test_global_resolver_uses_active_profile_without_view_receipt():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.global_receipts = {}
@@ -1320,9 +1320,6 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     global_plan_results[:] = [{
         "slot_addr": 0xA43D70,
         "type": "uint64_t",
-        "value": 0x1234,
-        "resolved_addr": 0x5000,
-        "use_addr": 0x4000,
     }]
 
     workflow.resolve_globals_mlil(ctx)
@@ -1330,7 +1327,7 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     assert active_profile_calls == [ctx.view]
     assert global_plan_calls == [(ctx.view, ctx.mlil)]
     assert ctx.typed_globals == [(0xA43D70, "uint64_t")]
-    assert ctx.view.session_data[workflow.GLOBAL_CONSTANT_RECEIPTS] == {0xA43D70: "uint64_t"}
+    assert "dispatchthis_global_constant_slots" not in ctx.view.session_data
     assert FakeWorkflowState.global_slots == [(0xA43D70, "uint64_t")]
     assert FakeWorkflowState.global_stable_marked is False
 
@@ -1347,7 +1344,7 @@ def test_global_resolver_uses_active_profile_without_workflow_state():
     global_plan_results.clear()
 
 
-def test_global_resolver_applies_profile_type():
+def test_global_resolver_ignores_stale_view_receipt():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.global_receipts = {}
@@ -1357,13 +1354,12 @@ def test_global_resolver_applies_profile_type():
     active_profile_calls.clear()
     global_plan_calls.clear()
     ctx = FakeContext()
+    stale_receipt = {0xDEAD: "stale"}
+    ctx.view.session_data["dispatchthis_global_constant_slots"] = stale_receipt.copy()
     global_plan_results[:] = [
         {
             "slot_addr": 0x11F57B8,
             "type": "void const* const",
-            "value": 0x1234,
-            "resolved_addr": 0x1234,
-            "use_addr": 0,
         },
     ]
 
@@ -1372,9 +1368,7 @@ def test_global_resolver_applies_profile_type():
     assert ctx.typed_globals == [
         (0x11F57B8, "void const* const"),
     ]
-    assert ctx.view.session_data[workflow.GLOBAL_CONSTANT_RECEIPTS] == {
-        0x11F57B8: "void const* const",
-    }
+    assert ctx.view.session_data["dispatchthis_global_constant_slots"] == stale_receipt
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
@@ -1397,7 +1391,6 @@ def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
     assert active_profile_calls == [ctx.view]
     assert global_plan_calls == [(ctx.view, ctx.mlil)]
     assert ctx.typed_globals == []
-    assert workflow.GLOBAL_CONSTANT_RECEIPTS not in ctx.view.session_data
     assert FakeWorkflowState.global_stable_marked is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
