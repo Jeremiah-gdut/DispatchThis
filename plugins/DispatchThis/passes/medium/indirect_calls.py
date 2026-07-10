@@ -163,8 +163,3 @@ def apply_indirect_call_rewrites(bv, mlil, plans):
         mlil.generate_ssa_form()
         log_info(f"[icall] {mlil.source_function.name}: rewrote {applied} indirect call(s)")
     return applied
-
-
-def patch_indirect_calls(bv, mlil):
-    """Resolve and rewrite indirect calls in the current MLIL only."""
-    return apply_indirect_call_rewrites(bv, mlil, plan_indirect_calls(bv, mlil))

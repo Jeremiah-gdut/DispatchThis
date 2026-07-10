@@ -1,6 +1,6 @@
 """Recover if/else branches hidden behind resolved indirect-branch switches."""
 
-from binaryninja import ILSourceLocation, MediumLevelILLabel
+from binaryninja import ILSourceLocation
 
 from ...helpers.mlil import cleanup_roots_for_expr, walk_expr
 from ...utils.log import log_info, log_warn
@@ -11,12 +11,6 @@ U48 = 0xFFFFFFFFFFFF
 U64 = 0xFFFFFFFFFFFFFFFF
 _CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
 _LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", "MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
-
-
-def _label(idx):
-    label = MediumLevelILLabel()
-    label.operand = idx
-    return label
 
 
 def _const(expr):

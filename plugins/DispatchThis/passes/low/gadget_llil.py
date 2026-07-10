@@ -305,15 +305,3 @@ def apply_llil_jump_rewrites(bv, llil, plan):
         llil.finalize()
         llil.generate_ssa_form()
     return applied
-
-
-def resolve_and_rewrite_llil_jumps(bv, llil, known_targets=None):
-    """Compatibility wrapper: resolve and apply current-LLIL rewrites only."""
-    plan = resolve_llil_jump_plan(bv, llil, known_targets)
-    apply_llil_jump_rewrites(bv, llil, plan)
-    resolved = {}
-    for item in plan:
-        if item["newly_resolved"]:
-            targets = item["targets"]
-            resolved[item["source"]] = targets[0] if len(targets) == 1 else targets
-    return resolved

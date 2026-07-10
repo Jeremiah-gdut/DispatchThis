@@ -29,10 +29,6 @@ class FakeILSourceLocation:
         return ("loc", getattr(instr, "expr_index", None))
 
 
-class FakeMediumLevelILLabel:
-    pass
-
-
 class FakeLogger:
     def __init__(self, *_args, **_kwargs):
         pass
@@ -112,7 +108,6 @@ for name, value in {
     "Logger": FakeLogger,
     "MediumLevelILJump": object,
     "MediumLevelILFunction": object,
-    "MediumLevelILLabel": FakeMediumLevelILLabel,
     "Settings": FakeSettings,
     "SettingsScope": types.SimpleNamespace(SettingsResourceScope="resource"),
     "Workflow": FakeWorkflow,
