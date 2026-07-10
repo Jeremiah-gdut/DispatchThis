@@ -2,18 +2,18 @@
 
 ``compute_redirections`` -- read-only analysis recovering dispatcher state-token
 transitions to determine which jumps/branches to re-point.
-``apply_redirections_il`` -- rewrites MLIL in place; only meaningful inside a workflow activity.
+``rewrite_redirections_mlil`` -- creates an atomic replacement MLIL function.
 """
 
 from collections import deque
 
 from binaryninja import (
     ILSourceLocation,
-    MediumLevelILLabel,
 )
 
 from ...helpers import mlil as mlil_helpers
 from ...utils.log import log_info, log_warn, log_debug
+from .rewrite import copied_label_for_source, copy_mlil_with_instruction_rewrites
 
 
 def _last(mlil, bb):
@@ -458,66 +458,48 @@ def compute_redirections(bv, func, mlil=None):
     return redirections
 
 
-def _label(operand):
-    lbl = MediumLevelILLabel()
-    lbl.operand = operand
-    return lbl
+def _copy_condition(mlil, condition):
+    copy_to = getattr(condition, "copy_to", None)
+    return copy_to(mlil) if copy_to is not None else mlil.copy_expr(condition)
 
 
-def _apply_uncond(mlil, r):
-    """Replace an unconditional gadget jump with ``goto next_block``."""
-    jump = r["jump"]
-    target_idx = r["target_bb"].start
-    mlil.replace_expr(
-        jump.expr_index,
-        mlil.goto(_label(target_idx), ILSourceLocation.from_instruction(jump)),
-    )
-    log_info(
-        f"[deflat] {r['obb'].start}: redirect {hex(jump.address)} -> "
-        f"{target_idx} ({hex(mlil[target_idx].address)})"
-    )
-    return 1
+def _replacement_for_redirection(redirection):
+    kind = redirection.get("kind")
+    if kind == "uncond":
+        def replace(mlil, jump):
+            return mlil.goto(
+                copied_label_for_source(mlil, redirection["target_bb"].start),
+                ILSourceLocation.from_instruction(jump),
+            )
+
+        return redirection.get("jump"), replace
+
+    if kind == "if_else":
+        def replace(mlil, if_il):
+            return mlil.if_expr(
+                _copy_condition(mlil, if_il.condition),
+                copied_label_for_source(mlil, redirection["true_target"].start),
+                copied_label_for_source(mlil, redirection["false_target"].start),
+                ILSourceLocation.from_instruction(if_il),
+            )
+
+        return redirection.get("if_il"), replace
+
+    return None, None
 
 
-def _apply_if_else(mlil, r):
-    """Replace a state-selecting program branch with direct true/false OBB edges."""
-    if_il = r["if_il"]
-    loc = ILSourceLocation.from_instruction(if_il)
-    mlil.replace_expr(
-        if_il.expr_index,
-        mlil.if_expr(
-            mlil.copy_expr(if_il.condition),
-            _label(r["true_target"].start),
-            _label(r["false_target"].start),
-            loc,
-        ),
-    )
-    log_info(
-        f"[deflat] {r['obb'].start}: branch @ {hex(if_il.address)} -> "
-        f"true {r['true_target'].start} ({hex(mlil[r['true_target'].start].address)}) / "
-        f"false {r['false_target'].start} ({hex(mlil[r['false_target'].start].address)})"
-    )
-    return 1
+def rewrite_redirections_mlil(ctx, mlil, redirections):
+    """Create an atomic replacement MLIL function for planned redirections."""
+    if mlil is None or not redirections:
+        return mlil, 0
 
+    replacements = {}
+    for redirection in redirections:
+        source, replacement = _replacement_for_redirection(redirection)
+        instr_index = getattr(source, "instr_index", None)
+        if replacement is None or instr_index is None or instr_index in replacements:
+            return None, 0
+        replacements[instr_index] = replacement
 
-def apply_redirections_il(mlil, redirections, finalize=True):
-    """Rewrite each redirection's terminating jump in MLIL. Returns the number of rewrites applied."""
-    handlers = {
-        "uncond": _apply_uncond,
-        "if_else": _apply_if_else,
-    }
-    applied = 0
-    for r in redirections:
-        handler = handlers.get(r["kind"])
-        if handler is None:
-            continue
-        try:
-            applied += handler(mlil, r)
-        except Exception as e:  # noqa: BLE001
-            anchor = r.get("jump") or r.get("if_il") or r.get("tail_goto")
-            where = anchor.address if anchor is not None else 0
-            log_warn(f"[deflat] failed to rewrite {hex(where)}: {e}")
-    if applied and finalize:
-        mlil.finalize()
-        mlil.generate_ssa_form()
-    return applied
+    new_mlil, applied = copy_mlil_with_instruction_rewrites(ctx, replacements, mlil=mlil)
+    return (new_mlil, applied) if applied == len(redirections) else (None, 0)

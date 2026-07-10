@@ -4,7 +4,7 @@ from binaryninja import ILSourceLocation, MediumLevelILLabel
 
 from ...helpers.mlil import cleanup_roots_for_expr, walk_expr
 from ...utils.log import log_info, log_warn
-from .rewrite import copy_mlil_with_instruction_rewrites
+from .rewrite import copied_label_for_source, copy_mlil_with_instruction_rewrites
 
 
 U48 = 0xFFFFFFFFFFFF
@@ -281,21 +281,12 @@ def _condition_for_plan(mlil, plan):
     )
 
 
-def _label_for_source(mlil, instr_index):
-    get_label = getattr(mlil, "get_label_for_source_instruction", None)
-    if get_label is not None:
-        label = get_label(instr_index)
-        if label is not None:
-            return label
-    raise ValueError(f"no copied MLIL label for source instruction {instr_index}")
-
-
 def _replacement_for_plan(plan):
     def replace(new_mlil, jump_il):
         return new_mlil.if_expr(
             _condition_for_plan(new_mlil, plan),
-            _label_for_source(new_mlil, plan["true"]),
-            _label_for_source(new_mlil, plan["false"]),
+            copied_label_for_source(new_mlil, plan["true"]),
+            copied_label_for_source(new_mlil, plan["false"]),
             ILSourceLocation.from_instruction(jump_il),
         )
 

@@ -84,10 +84,11 @@ Eight workflow activities are inserted per function. One is the no-op
 5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
 6. **String decrypt** (MLIL, *opt-in*) - waits for branch, call, and global phases to
    stabilize for the current function, then annotates recognized direct decrypt calls.
-7. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and rewrites each
-   original basic block's dispatcher jump into a direct `goto` to the real successor.
-   Conditional transitions are reconstructed when each branch arm selects one dispatcher
-   state token.
+7. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and builds an atomic
+   replacement MLIL where each original basic block's dispatcher jump becomes a direct
+   `goto` to the real successor. Conditional transitions preserve their original condition
+   and point both arms at recovered original blocks; state-write cleanup data is published
+   only after Binary Ninja installs that replacement.
 8. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
    recorded by deflattening.
 
@@ -108,7 +109,8 @@ as a named resolver profile instead of widening `default`.
 
 Designed for **Binary Ninja 5.3 or newer** and tested on **5.3.9757
 (a99f2380)**. Exact patch and build versions are not enforced; releases before
-5.3 are unsupported.
+5.3 are unsupported. Control-flow rewrites use Binary Ninja's copy-transform APIs and
+`AnalysisContext.set_mlil_function`; legacy MLIL assignment fallbacks are unsupported.
 
 ## License
 

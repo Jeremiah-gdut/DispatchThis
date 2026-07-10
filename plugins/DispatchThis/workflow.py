@@ -2,7 +2,7 @@
 
 from binaryninja import AnalysisContext
 
-from .passes.medium.deflatten import apply_redirections_il
+from .passes.medium.deflatten import rewrite_redirections_mlil
 from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
@@ -405,9 +405,12 @@ def deflatten_mlil(ctx: AnalysisContext):
     if not redirections:
         return
 
-    # Stash state tokens and variables so cleanup can NOP state writes. The
-    # cleanup pass still consumes integer constants, so keep the value component
-    # here; deflatten matching itself uses full (value, width) tokens.
+    new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
+    if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
+        return
+
+    # Stash state tokens and variables only after the replacement is installed,
+    # so cleanup never consumes an unpublished deflatten plan.
     state_tokens = set()
     state_vars = set()
     for plan in redirections:
@@ -416,15 +419,9 @@ def deflatten_mlil(ctx: AnalysisContext):
     state_consts = {value for value, _size in state_tokens}
     bv.session_data.setdefault("dispatchthis_state_consts", {})[func.start] = state_consts
     bv.session_data.setdefault("dispatchthis_state_vars", {})[func.start] = state_vars
+    bv.session_data.setdefault("dispatchthis_mlil_stable", {})[func.start] = True
     log_info(f"[workflow] {func.name}: recorded {len(state_tokens)} dispatcher state token(s)")
-
-    applied = apply_redirections_il(mlil, redirections)
-
-    if applied:
-        _commit_mlil(ctx, mlil)
-        mlil_stable = bv.session_data.setdefault("dispatchthis_mlil_stable", {})
-        log_info(f"{func.name} has been deflattened")
-        mlil_stable[func.start] = True
+    log_info(f"{func.name} has been deflattened")
 
 
 def cleanup_mlil(ctx: AnalysisContext):

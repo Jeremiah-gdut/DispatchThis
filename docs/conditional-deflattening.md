@@ -22,9 +22,10 @@ For a candidate original basic block, `_plan_conditional`:
 - resolves the single state token written by each arm;
 - maps those tokens back to target original blocks.
 
-If both arms resolve to different known targets, `apply_redirections_il` replaces the
-candidate `MLIL_IF` with an `if` whose true and false labels point directly at the real
-successors.
+If both arms resolve to different known targets, `rewrite_redirections_mlil` copies the
+candidate `MLIL_IF` condition into a replacement MLIL function and uses copied
+source-block labels for its true and false real-successor edges. The whole replacement is
+discarded if any selected transition cannot be emitted.
 
 ## Limits
 

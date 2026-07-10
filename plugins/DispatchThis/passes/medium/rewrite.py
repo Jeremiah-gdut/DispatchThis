@@ -7,6 +7,15 @@ def _instruction_index(ins, fallback):
     return getattr(ins, "instr_index", fallback)
 
 
+def copied_label_for_source(mlil, instr_index):
+    get_label = getattr(mlil, "get_label_for_source_instruction", None)
+    if get_label is not None:
+        label = get_label(instr_index)
+        if label is not None:
+            return label
+    raise ValueError(f"no copied MLIL label for source instruction {instr_index}")
+
+
 def copy_mlil_with_instruction_rewrites(ctx, replacements, mlil=None):
     """Copy MLIL and replace selected top-level instructions.
 

@@ -291,7 +291,7 @@ def test_copy_rewrite_requires_copied_target_labels():
     mlil = types.SimpleNamespace(get_label_for_source_instruction=lambda _idx: None)
 
     try:
-        branch_conditions._label_for_source(mlil, 10)
+        branch_conditions.copied_label_for_source(mlil, 10)
     except ValueError as e:
         assert "source instruction 10" in str(e)
     else:

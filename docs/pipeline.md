@@ -113,12 +113,15 @@ the CFG - and the recovered state machine - would be incomplete).
 - The active resolver profile's `plan_deflatten_redirections` identifies the
   binary-specific dispatcher/state-write shape and maps state tokens to target
   original blocks. The default profile delegates to `compute_redirections`.
-- `apply_redirections_il` rewrites each original basic block's dispatcher terminator into
-  a direct `goto` to the real successor. Conditional transitions are reconstructed when each
-  branch arm selects exactly one known state token - see
-  [`conditional-deflattening.md`](conditional-deflattening.md).
-- The resolved dispatcher state values and the state variable's alias set are recorded to
-  `session_data` so the cleanup can NOP the state writes precisely (by value and by var).
+- `rewrite_redirections_mlil` uses the MLIL copy-transform backend to build an atomic
+  replacement: copied source-block labels direct each original block to its planned real
+  successor, and conditional transitions copy their original condition - see
+  [`conditional-deflattening.md`](conditional-deflattening.md). Any rejected redirection
+  discards the entire replacement.
+- The workflow installs the replacement through `AnalysisContext.set_mlil_function` before
+  recording the resolved dispatcher state values and state-variable aliases in
+  `session_data`. A failed installation leaves those maps unpublished so the next run can
+  retry.
 
 ### 7. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
 

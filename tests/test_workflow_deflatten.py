@@ -22,6 +22,7 @@ set_roots_before_calls = []
 set_roots_before_results = []
 string_decrypt_calls = []
 string_decrypt_results = []
+deflatten_rewrite_results = []
 
 
 def fake_compute(_bv, func, mlil=None):
@@ -29,9 +30,9 @@ def fake_compute(_bv, func, mlil=None):
     return [{"kind": "uncond", "state_tokens": {(0x1234, 8)}, "state_vars": {"state"}}]
 
 
-def fake_apply(mlil, plans):
-    calls.append(("apply", mlil, plans))
-    return 1
+def fake_rewrite_redirections_mlil(ctx, mlil, plans):
+    calls.append(("rewrite", ctx, mlil, plans))
+    return deflatten_rewrite_results.pop(0) if deflatten_rewrite_results else (mlil, 1)
 
 
 def fake_resolve_llil_jump_plan(_bv, llil, known_targets=None):
@@ -224,7 +225,7 @@ def forbidden_plan_global_constant_slots(*_args, **_kwargs):
 _FAKE_MODULES = {
     "plugins.DispatchThis.passes.medium.deflatten": types.SimpleNamespace(
         compute_redirections=fake_compute,
-        apply_redirections_il=fake_apply,
+        rewrite_redirections_mlil=fake_rewrite_redirections_mlil,
     ),
     "plugins.DispatchThis.passes.medium.nop_pass": types.SimpleNamespace(
         nop_deflatten_state_writes=lambda *args, **kwargs: (
@@ -314,6 +315,7 @@ class FakeContext:
         self.view.define_user_data_var = define_user_data_var
         self._mlil = object()
         self.committed = False
+        self.installed_mlil = None
 
     @property
     def mlil(self):
@@ -324,7 +326,8 @@ class FakeContext:
         self.committed = value is self._mlil
 
     def set_mlil_function(self, mlil):
-        self.committed = mlil is self._mlil
+        self.installed_mlil = mlil
+        self.committed = True
 
 
 def test_deflatten_workflow_runs_without_branch_mirror_state():
@@ -332,18 +335,72 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     FakeWorkflowState.globals_stable = True
     calls.clear()
     active_profile_calls.clear()
+    deflatten_rewrite_results.clear()
     ctx = FakeContext()
+    replacement = object()
+    deflatten_rewrite_results[:] = [(replacement, 1)]
+    old_commit = workflow._commit_mlil
 
-    workflow.deflatten_mlil(ctx)
+    def commit_after_state_is_empty(ctx_arg, mlil_arg):
+        assert ctx_arg.view.session_data == {}
+        return old_commit(ctx_arg, mlil_arg)
+
+    workflow._commit_mlil = commit_after_state_is_empty
+
+    try:
+        workflow.deflatten_mlil(ctx)
+    finally:
+        workflow._commit_mlil = old_commit
 
     assert active_profile_calls == [ctx.view]
     assert calls[0] == ("compute", ctx.function.start, ctx.mlil)
-    assert calls[1][0] == "apply"
+    assert calls[1][0] == "rewrite"
+    assert calls[1][1] is ctx
+    assert calls[1][2] is ctx.mlil
     assert ctx.committed is True
+    assert ctx.installed_mlil is replacement
+    assert ctx.view.session_data["dispatchthis_state_consts"][ctx.function.start] == {0x1234}
+    assert ctx.view.session_data["dispatchthis_state_vars"][ctx.function.start] == {"state"}
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     assert "dispatchthis_llil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
     FakeWorkflowState.globals_stable = False
+    deflatten_rewrite_results.clear()
+
+
+def test_deflatten_retries_without_publishing_state_after_commit_failure():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.globals_stable = True
+    calls.clear()
+    deflatten_rewrite_results.clear()
+    ctx = FakeContext()
+    first_replacement = object()
+    second_replacement = object()
+    deflatten_rewrite_results[:] = [(first_replacement, 1), (second_replacement, 1)]
+    old_commit = workflow._commit_mlil
+    commits = []
+    install_results = [False, True]
+    workflow._commit_mlil = lambda ctx_arg, mlil_arg: (
+        commits.append((ctx_arg, mlil_arg)),
+        install_results.pop(0),
+    )[1]
+
+    try:
+        workflow.deflatten_mlil(ctx)
+        assert "dispatchthis_state_consts" not in ctx.view.session_data
+        assert "dispatchthis_state_vars" not in ctx.view.session_data
+        assert "dispatchthis_mlil_stable" not in ctx.view.session_data
+        workflow.deflatten_mlil(ctx)
+    finally:
+        workflow._commit_mlil = old_commit
+
+    assert commits == [(ctx, first_replacement), (ctx, second_replacement)]
+    assert ctx.view.session_data["dispatchthis_state_consts"][ctx.function.start] == {0x1234}
+    assert ctx.view.session_data["dispatchthis_state_vars"][ctx.function.start] == {"state"}
+    assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.globals_stable = False
+    deflatten_rewrite_results.clear()
 
 
 def test_deflatten_waits_for_global_phase_stability():
@@ -1243,6 +1300,7 @@ def test_noreturn_type_detection_and_fallthrough_callsite():
 
 if __name__ == "__main__":
     test_deflatten_workflow_runs_without_branch_mirror_state()
+    test_deflatten_retries_without_publishing_state_after_commit_failure()
     test_deflatten_waits_for_global_phase_stability()
     test_branch_resolver_reuses_branch_receipts_as_known_targets()
     test_branch_resolver_records_profile_cleanup_roots_without_target_mutation()

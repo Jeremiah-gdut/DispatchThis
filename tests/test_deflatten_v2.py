@@ -6,7 +6,7 @@ from conftest import load_plugin_module
 deflatten = load_plugin_module("plugins.DispatchThis.passes.medium.deflatten")
 
 compute_redirections = deflatten.compute_redirections
-apply_redirections_il = deflatten.apply_redirections_il
+rewrite_redirections_mlil = deflatten.rewrite_redirections_mlil
 
 
 class Op:
@@ -96,6 +96,23 @@ class FakeMlil:
 
     def generate_ssa_form(self):
         self.ssa_generated = True
+
+
+class CopiedMlil:
+    def __init__(self):
+        self.outputs = {}
+
+    def get_label_for_source_instruction(self, instr_index):
+        return types.SimpleNamespace(operand=("copied-label", instr_index))
+
+    def goto(self, label, loc):
+        return ("goto", label.operand, loc)
+
+    def if_expr(self, cond, true_label, false_label, loc):
+        return ("if", cond, true_label.operand, false_label.operand, loc)
+
+    def copy_expr(self, expr):
+        return ("copy", expr)
 
 
 class FakeFunc:
@@ -417,13 +434,27 @@ def test_compute_redirections_allows_nested_pure_condition_in_branch_tail():
     assert cond["false_token"] == (0x3333000033330003, 8)
 
 
-def test_apply_redirections_rewrites_unconditional_and_conditional_transitions():
+def test_rewrite_redirections_emits_copied_label_edges(monkeypatch):
+    assert not hasattr(deflatten, "apply_redirections_il")
     func, chooser, obb2, obb3 = build_cond_function()
     uncond_jump = goto(200)
     source = Block(200, uncond_jump)
     func.mlil._by_index[200] = uncond_jump
+    ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
+    copied = CopiedMlil()
 
-    applied = apply_redirections_il(
+    def fake_copy(ctx_arg, replacements, mlil=None):
+        assert ctx_arg is ctx
+        assert mlil is func.mlil
+        assert set(replacements) == {uncond_jump.instr_index, chooser[10].instr_index}
+        copied.outputs[uncond_jump.instr_index] = replacements[uncond_jump.instr_index](copied, uncond_jump)
+        copied.outputs[chooser[10].instr_index] = replacements[chooser[10].instr_index](copied, chooser[10])
+        return copied, 2
+
+    monkeypatch.setattr(deflatten, "copy_mlil_with_instruction_rewrites", fake_copy, raising=False)
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        ctx,
         func.mlil,
         [
             {"kind": "uncond", "jump": uncond_jump, "target_bb": obb2, "obb": source},
@@ -437,16 +468,57 @@ def test_apply_redirections_rewrites_unconditional_and_conditional_transitions()
         ],
     )
 
+    assert new_mlil is copied
     assert applied == 2
-    assert func.mlil.replacements == [
-        (uncond_jump.expr_index, ("goto", obb2.start, ("loc", uncond_jump.expr_index))),
-        (
-            chooser[10].expr_index,
-            ("if", ("copy", chooser[10].condition), obb2.start, obb3.start, ("loc", chooser[10].expr_index)),
+    assert copied.outputs == {
+        uncond_jump.instr_index: (
+            "goto",
+            ("copied-label", obb2.start),
+            ("loc", uncond_jump.expr_index),
         ),
-    ]
-    assert func.mlil.finalized is True
-    assert func.mlil.ssa_generated is True
+        chooser[10].instr_index: (
+            "if",
+            ("copy", chooser[10].condition),
+            ("copied-label", obb2.start),
+            ("copied-label", obb3.start),
+            ("loc", chooser[10].expr_index),
+        ),
+    }
+
+
+def test_rewrite_redirections_rejects_a_partial_multi_redirection_batch(monkeypatch):
+    func, chooser, obb2, obb3 = build_cond_function()
+    uncond_jump = goto(200)
+    source = Block(200, uncond_jump)
+    func.mlil._by_index[200] = uncond_jump
+    ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
+
+    def reject(ctx_arg, replacements, mlil=None):
+        assert ctx_arg is ctx
+        assert mlil is func.mlil
+        assert set(replacements) == {uncond_jump.instr_index, chooser[10].instr_index}
+        return "partial", 1
+
+    monkeypatch.setattr(deflatten, "copy_mlil_with_instruction_rewrites", reject, raising=False)
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        ctx,
+        func.mlil,
+        [
+            {"kind": "uncond", "jump": uncond_jump, "target_bb": obb2, "obb": source},
+            {
+                "kind": "if_else",
+                "if_il": chooser[10],
+                "true_target": obb2,
+                "false_target": obb3,
+                "obb": chooser,
+            },
+        ],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert func.mlil.replacements == []
 
 
 if __name__ == "__main__":
@@ -458,4 +530,5 @@ if __name__ == "__main__":
     test_compute_redirections_recovers_entry_state_transition()
     test_compute_redirections_recovers_conditional_two_branch_transition()
     test_compute_redirections_allows_nested_pure_condition_in_branch_tail()
-    test_apply_redirections_rewrites_unconditional_and_conditional_transitions()
+    test_rewrite_redirections_emits_copied_label_edges()
+    test_rewrite_redirections_rejects_a_partial_multi_redirection_batch()

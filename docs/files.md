@@ -34,7 +34,8 @@ DispatchThis/
 │       ├── global_constants.py MLIL global constant slot planner.
 │       ├── string_decrypt.py   MLIL direct-call string decrypt recognizer/commenter.
 │       ├── phase_cleanup.py    One-shot branch/call target-decode cleanup.
-│       ├── deflatten.py        Computes and applies dispatcher state-token redirections.
+│       ├── rewrite.py          Atomic MLIL copy-transform backend for control-flow rewrites.
+│       ├── deflatten.py        Computes dispatcher plans and builds replacement MLIL.
 │       └── nop_pass.py         Deflatten state-write NOPing.
 ├── docs/                       This documentation.
 │   ├── API.md                  Helper API reference for resolver profiles.
@@ -109,8 +110,10 @@ control flow or remove deflatten state writes.
 
 ### `passes/medium/deflatten.py`
 `compute_redirections` identifies the dominant dispatcher comparison cluster, maps state
-tokens to target blocks, and returns terminator re-pointings; `apply_redirections_il`
-rewrites the terminators. Handles unconditional and simple conditional transitions; see
+tokens to target blocks, and returns terminator re-pointings;
+`rewrite_redirections_mlil` turns all selected plans into one atomic replacement MLIL
+function. The workflow installs it before publishing deflatten state maps. Handles
+unconditional and simple conditional transitions; see
 [`conditional-deflattening.md`](conditional-deflattening.md).
 
 ### `passes/medium/nop_pass.py`
