@@ -303,7 +303,10 @@ def _replacement_for_plan(plan):
 
 
 def translate_indirect_branch_conditions(bv, ctx, mlil):
-    """Translate resolved two-target MLIL_JUMP_TO gadgets back to MLIL_IF."""
+    """Translate resolved two-target MLIL_JUMP_TO gadgets back to MLIL_IF.
+
+    A ``None`` replacement reports that selected translations were rejected.
+    """
     plans = []
     for ins in list(mlil.instructions):
         plan = _plan_for_jump(bv, mlil, ins)
@@ -321,19 +324,19 @@ def translate_indirect_branch_conditions(bv, ctx, mlil):
     for jump_il, plan in plans:
         instr_index = getattr(jump_il, "instr_index", None)
         if instr_index is None:
-            log_warn(f"[branch-conditions] skipped {hex(jump_il.address)} without instruction index")
-            continue
+            log_warn(f"[branch-conditions] rejected translation at {hex(jump_il.address)} without instruction index")
+            return None, 0, set()
         replacements[instr_index] = _replacement_for_plan(plan)
     if not replacements:
-        return mlil, 0, set()
+        return None, 0, set()
 
     try:
         new_mlil, applied = copy_mlil_with_instruction_rewrites(ctx, replacements, mlil=mlil)
     except Exception as e:  # noqa: BLE001
         log_warn(f"[branch-conditions] failed to translate branch conditions: {e}")
-        return mlil, 0, set()
+        return None, 0, set()
 
     if applied:
         log_info(f"[branch-conditions] translated {applied} indirect branch switch(es) to if/else")
         return new_mlil, applied, cleanup_roots
-    return mlil, 0, set()
+    return None, 0, set()

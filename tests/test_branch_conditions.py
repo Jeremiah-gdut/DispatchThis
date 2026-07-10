@@ -232,9 +232,59 @@ def test_translate_branch_conditions_does_not_cleanup_when_copy_rewrite_fails(mo
         mlil,
     )
 
-    assert new_mlil is mlil
+    assert new_mlil is None
     assert applied == 0
     assert cleanup_roots == set()
+
+
+def test_translate_branch_conditions_rejects_plan_without_instruction_index(monkeypatch):
+    indexed = types.SimpleNamespace(
+        operation=Op("MLIL_JUMP_TO"),
+        instr_index=7,
+        address=0x1000,
+    )
+    unindexed = types.SimpleNamespace(
+        operation=Op("MLIL_JUMP_TO"),
+        address=0x2000,
+    )
+    mlil = types.SimpleNamespace(instructions=[indexed, unindexed])
+    plans = {
+        id(indexed): {
+            "condition_var": "first",
+            "condition_size": 8,
+            "condition_value": 1,
+            "true": 10,
+            "false": 20,
+            "cleanup_roots": {31},
+        },
+        id(unindexed): {
+            "condition_var": "second",
+            "condition_size": 8,
+            "condition_value": 1,
+            "true": 30,
+            "false": 40,
+            "cleanup_roots": {32},
+        },
+    }
+    copy_calls = []
+
+    monkeypatch.setattr(branch_conditions, "_plan_for_jump", lambda _bv, _mlil, ins: plans[id(ins)])
+    monkeypatch.setattr(
+        branch_conditions,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: (copy_calls.append(True), ("partial", 1))[1],
+    )
+
+    new_mlil, applied, cleanup_roots = branch_conditions.translate_indirect_branch_conditions(
+        None,
+        types.SimpleNamespace(mlil=mlil, llil=object()),
+        mlil,
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert cleanup_roots == set()
+    assert copy_calls == []
 
 
 def test_copy_rewrite_requires_copied_target_labels():
@@ -255,4 +305,5 @@ if __name__ == "__main__":
     test_assigned_target_var_plan_does_not_require_same_source_if()
     test_translate_branch_conditions_builds_copy_rewrite()
     test_translate_branch_conditions_does_not_cleanup_when_copy_rewrite_fails()
+    test_translate_branch_conditions_rejects_plan_without_instruction_index()
     test_copy_rewrite_requires_copied_target_labels()

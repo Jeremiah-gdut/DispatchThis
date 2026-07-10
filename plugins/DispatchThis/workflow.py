@@ -26,14 +26,11 @@ GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
 def _commit_mlil(ctx, mlil):
     try:
         ctx.set_mlil_function(mlil)
-        return
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        ctx.mlil = mlil
+        return True
     except Exception as e:  # noqa: BLE001
         func = ctx.function
         log_warn(f"[workflow] {func.name}: failed to commit MLIL changes: {e}")
+        return False
 
 
 def _schedule_tag_cleanup(bv, func_start):
@@ -277,6 +274,8 @@ def translate_branches_mlil(ctx: AnalysisContext):
         return
 
     new_mlil, n, cleanup_roots = translate_indirect_branch_conditions(bv, ctx, mlil)
+    if new_mlil is None:
+        return
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
         mlil = new_mlil
@@ -286,12 +285,11 @@ def translate_branches_mlil(ctx: AnalysisContext):
         cleanup_roots.update(state.branch_cleanup_root_indices())
         cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
         cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
-        if cleaned:
-            state.invalidate_branch_cleanup()
-        elif branch_cleanup_needed:
-            state.mark_branch_cleanup_done()
-    if n or cleaned:
-        _commit_mlil(ctx, mlil)
+    installed = _commit_mlil(ctx, mlil) if n or cleaned else True
+    if cleaned:
+        state.invalidate_branch_cleanup()
+    elif branch_cleanup_needed and (not n or installed):
+        state.mark_branch_cleanup_done()
 
 
 def resolve_globals_mlil(ctx: AnalysisContext):

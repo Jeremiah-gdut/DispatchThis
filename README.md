@@ -6,7 +6,7 @@ constants, decrypted string comments, and flattened dispatcher edges at the IL
 level. It does not patch bytes.
 
 ![license: MIT](https://img.shields.io/badge/license-MIT-green)
-![Binary Ninja 5.3.9757](https://img.shields.io/badge/Binary%20Ninja-5.3.9757-black)
+![Binary Ninja 5.3+](https://img.shields.io/badge/Binary%20Ninja-5.3%2B-black)
 
 ## What it does
 
@@ -106,10 +106,9 @@ as a named resolver profile instead of widening `default`.
 
 ## Compatibility
 
-Built and tested on **Binary Ninja 5.3.9757 (a99f2380)**. The workflow and IL-rewriting
-features it depends on were introduced in **3.3.3996 (2023-01-18)**, which is effectively
-the minimum version required to support IL re-writes. It has only been exercised on 5.3.9757,
-however, so earlier releases may behave differently.
+Designed for **Binary Ninja 5.3 or newer** and tested on **5.3.9757
+(a99f2380)**. Exact patch and build versions are not enforced; releases before
+5.3 are unsupported.
 
 ## License
 
