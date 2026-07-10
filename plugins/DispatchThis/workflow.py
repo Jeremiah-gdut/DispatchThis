@@ -116,29 +116,42 @@ def _remove_plan_target_user_functions(bv, func, plan):
                 log_warn(f"[workflow] {func.name}: failed to remove target function @ {hex(target)}: {e}")
 
 
-def _resolve_pending_branches_from_function_llil(ctx, state):
+def _converge_branches(ctx, state, plan_llil, coverage_llil, rewrite_llil=False, announce_stable=False):
     func = ctx.function
     bv = ctx.view
-    llil = getattr(func, "low_level_il", None)
-    if llil is None:
-        return False
-
-    plan = active_profile(bv).resolve_branch_gadget(bv, llil, state.branch_targets())
+    jump_sources = {jump.address for jump in iter_llil_indirect_jumps(coverage_llil)}
+    plan = active_profile(bv).resolve_branch_gadget(bv, plan_llil, state.branch_targets())
+    if rewrite_llil:
+        apply_llil_jump_rewrites(bv, plan_llil, plan)
     _remove_plan_target_user_functions(bv, func, plan)
+
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
     mutations = _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots)
     if mutations:
-        log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
-        return True
+        return mutations
 
-    jump_sources = {jump.address for jump in iter_llil_indirect_jumps(llil)}
     mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
     covered = set(resolved_targets) | mapped
     if not FunctionWorkflowState.unmapped_unresolved_sources(func) and jump_sources <= covered:
+        if announce_stable:
+            log_info(f"All of {func.name}'s indirect jumps have been resolved")
         state.mark_branch_stable()
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
+    return mutations
+
+
+def _resolve_pending_branches_from_function_llil(ctx, state):
+    func = ctx.function
+    llil = getattr(func, "low_level_il", None)
+    if llil is None:
+        return False
+
+    mutations = _converge_branches(ctx, state, llil, llil)
+    if mutations:
+        log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
+        return True
     return False
 
 
@@ -158,34 +171,22 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = ctx.llil
-    jump_sources = {jump.address for jump in iter_llil_indirect_jumps(llil)}
     mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
     func_llil = getattr(func, "low_level_il", None)
     plan_llil = func_llil if mapped and func_llil is not None else llil
-    profile = active_profile(bv)
-    plan = profile.resolve_branch_gadget(bv, plan_llil, state.branch_targets())
-    if plan_llil is llil:
-        apply_llil_jump_rewrites(bv, llil, plan)
-    _remove_plan_target_user_functions(bv, func, plan)
-
-    resolved_targets = {item["source"]: item["targets"] for item in plan}
-    cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
-    mutations = _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots)
+    mutations = _converge_branches(
+        ctx,
+        state,
+        plan_llil,
+        llil,
+        rewrite_llil=plan_llil is llil,
+        announce_stable=True,
+    )
 
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
     if mutations:
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} indirect branch target update(s)")
         return
-
-    covered = set(resolved_targets) | mapped
-    if (
-        not FunctionWorkflowState.unmapped_unresolved_sources(func)
-        and jump_sources <= covered
-    ):
-        log_info(f"All of {func.name}'s indirect jumps have been resolved")
-        state.mark_branch_stable()
-        clear_resolved_indirect_branch_tags(func)
-        _schedule_tag_cleanup(bv, func.start)
 
 
 def resolve_calls_mlil(ctx: AnalysisContext):

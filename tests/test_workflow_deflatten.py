@@ -527,6 +527,30 @@ def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
     branch_iter_items.clear()
 
 
+def test_branch_resolver_checks_coverage_before_llil_rewrite():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_iter_items[:] = [types.SimpleNamespace(address=0x1000)]
+    ctx = FakeContext()
+    ctx.llil = "context-llil"
+    ctx.view.add_analysis_completion_event = lambda _callback: None
+    old_rewrite = workflow.apply_llil_jump_rewrites
+    workflow.apply_llil_jump_rewrites = lambda *_args: branch_iter_items.clear()
+
+    try:
+        workflow.resolve_jumps_llil(ctx)
+    finally:
+        workflow.apply_llil_jump_rewrites = old_rewrite
+
+    assert FakeWorkflowState.marked_stable is False
+    branch_iter_items.clear()
+
+
 def test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping():
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
