@@ -167,8 +167,19 @@ for the workflow coordination rules:
 | `global.stable` | global constant resolving has reached its current fixpoint for this function |
 | `global.receipts` | `{slot_addr: type_string}` verified as global constant data-var types for this function |
 
-## Analysis limits
+## Analysis environment
 
-The plugin raises several Binary Ninja analysis limits at import (max function size,
-expression-value compute depth, max analysis time, max update count) because flattened
-functions are large and need many reanalysis passes to reach a fixpoint.
+On Binary Ninja 5.3+, the earliest eligible resolver callback establishes the required
+analysis environment on the current Function, not when DispatchThis is imported. It uses
+`SettingsResourceScope` to override inherited values only when needed, then reads all of
+them back before profile recognition or recovery work. A failed write or verification skips
+that workflow run; Function overrides are intentionally left in place after DispatchThis is
+disabled.
+
+| Setting | Required value |
+| --- | --- |
+| `analysis.limits.maxFunctionSize` | `0` (unlimited) |
+| `analysis.limits.expressionValueComputeMaxDepth` | `99999` |
+| `analysis.limits.maxFunctionAnalysisTime` | `600000` ms |
+| `analysis.limits.maxFunctionUpdateCount` | `1024` |
+| `analysis.outlining.builtins` | `false` |

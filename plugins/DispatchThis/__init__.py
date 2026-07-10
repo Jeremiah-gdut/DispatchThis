@@ -6,7 +6,7 @@ obfuscated functions. All passes are opt-in per-function via Function Analysis s
 """
 
 import json
-from binaryninja import Activity, Workflow, Settings
+from binaryninja import Activity, Workflow
 from .utils.log import log_info, log_warn
 from .profiles import register_profile_settings
 from .ui import register_ui_commands
@@ -138,17 +138,6 @@ def register_workflows():
     workflow.register()
     log_warn("DispatchThis's workflow has been registered!")
 
-
-# Raise analysis limits for large flattened functions.
-Settings().set_integer("analysis.limits.maxFunctionSize", 0)
-Settings().set_integer("analysis.limits.expressionValueComputeMaxDepth", 99999)
-Settings().set_integer("analysis.limits.maxFunctionAnalysisTime", 600000)
-# Keep this finite so non-enrolled complex functions cannot analyze forever.
-Settings().set_integer("analysis.limits.maxFunctionUpdateCount", 1024)
-
-# Prevent BN from lowering 32-bit state writes into __builtin_strncpy intrinsics,
-# which the MLIL_STORE/SET_VAR matcher won't recognize.
-Settings().set_bool("analysis.outlining.builtins", False)
 
 register_profile_settings()
 register_workflows()

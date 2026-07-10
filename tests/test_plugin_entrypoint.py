@@ -33,7 +33,7 @@ class CapturedWorkflow:
 
 
 class CapturedSettings:
-    integer_values = {}
+    writes = []
 
     def register_group(self, *_args, **_kwargs):
         return True
@@ -42,10 +42,12 @@ class CapturedSettings:
         return True
 
     def set_integer(self, key, value, *_args, **_kwargs):
-        self.integer_values[key] = value
+        self.writes.append(("integer", key, value))
+        return True
 
-    def set_bool(self, *_args, **_kwargs):
-        pass
+    def set_bool(self, key, value, *_args, **_kwargs):
+        self.writes.append(("bool", key, value))
+        return True
 
 
 class CapturedPluginCommand:
@@ -59,7 +61,7 @@ class CapturedPluginCommand:
 def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monkeypatch):
     monkeypatch.setattr(binaryninja, "Activity", CapturedActivity)
     monkeypatch.setattr(binaryninja, "Workflow", CapturedWorkflow)
-    CapturedSettings.integer_values = {}
+    CapturedSettings.writes = []
     monkeypatch.setattr(binaryninja, "Settings", CapturedSettings)
     CapturedPluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", CapturedPluginCommand, raising=False)
@@ -104,7 +106,7 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(
         plugin.DEFLATTEN_SETTING
     )
-    assert CapturedSettings.integer_values["analysis.limits.maxFunctionUpdateCount"] == 1024
+    assert CapturedSettings.writes == []
     names = [item[0] for item in CapturedPluginCommand.registered]
     assert "DispatchThis\\Toggle Resolver" in names
     assert "DispatchThis\\Disable All" in names

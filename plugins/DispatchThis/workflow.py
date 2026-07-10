@@ -1,6 +1,6 @@
 """Workflow activity callbacks for DispatchThis."""
 
-from binaryninja import AnalysisContext
+from binaryninja import AnalysisContext, Settings, SettingsScope
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
 from .passes.medium.nop_pass import nop_deflatten_state_writes
@@ -21,6 +21,35 @@ from .workflow_state import FunctionWorkflowState
 
 
 GLOBAL_CONSTANT_RECEIPTS = "dispatchthis_global_constant_slots"
+_ANALYSIS_SETTINGS = (
+    ("analysis.limits.maxFunctionSize", 0),
+    ("analysis.limits.expressionValueComputeMaxDepth", 99999),
+    ("analysis.limits.maxFunctionAnalysisTime", 600000),
+    ("analysis.limits.maxFunctionUpdateCount", 1024),
+    ("analysis.outlining.builtins", False),
+)
+
+
+def _ensure_analysis_settings(func):
+    try:
+        settings = Settings()
+        for key, value in _ANALYSIS_SETTINGS:
+            getter = settings.get_bool if isinstance(value, bool) else settings.get_integer
+            setter = settings.set_bool if isinstance(value, bool) else settings.set_integer
+            if getter(key, func) == value:
+                continue
+            if not setter(key, value, func, SettingsScope.SettingsResourceScope):
+                log_warn(f"[workflow] {func.name}: failed to set {key}")
+                return False
+        for key, value in _ANALYSIS_SETTINGS:
+            getter = settings.get_bool if isinstance(value, bool) else settings.get_integer
+            if getter(key, func) != value:
+                log_warn(f"[workflow] {func.name}: failed to verify {key}")
+                return False
+    except Exception as e:  # noqa: BLE001
+        log_warn(f"[workflow] {func.name}: failed to configure analysis settings: {e}")
+        return False
+    return True
 
 
 def _commit_mlil(ctx, mlil):
@@ -158,11 +187,14 @@ def _resolve_pending_branches_from_function_llil(ctx, state):
 def resolve_jumps_llil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
-    state = FunctionWorkflowState(func)
 
     if bv.arch.name != "aarch64":
         log_debug(f"[dispatchthis] {func.name}: skipping non-aarch64 view")
         return
+    if not _ensure_analysis_settings(func):
+        return
+
+    state = FunctionWorkflowState(func)
 
     if state.branch_stable(func):
         clear_resolved_indirect_branch_tags(func)
@@ -192,6 +224,9 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 def resolve_calls_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
+    if not _ensure_analysis_settings(func):
+        return
+
     state = FunctionWorkflowState(func)
 
     if not state.branch_stable(func):
@@ -263,6 +298,8 @@ def translate_branches_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return
+    if not _ensure_analysis_settings(func):
+        return
 
     state = FunctionWorkflowState(func)
     if not state.branch_stable(func):
@@ -298,6 +335,8 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     bv = ctx.view
 
     if bv.arch.name != "aarch64":
+        return
+    if not _ensure_analysis_settings(func):
         return
 
     state = FunctionWorkflowState(func)
@@ -367,6 +406,8 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return 0
+    if not _ensure_analysis_settings(func):
+        return 0
 
     state = FunctionWorkflowState(func)
     if not state.branch_stable(func):
@@ -389,6 +430,8 @@ def deflatten_mlil(ctx: AnalysisContext):
     bv = ctx.view
     mlil = ctx.mlil
     if mlil is None:
+        return
+    if not _ensure_analysis_settings(func):
         return
 
     # Eligibility (the Deflatten per-function toggle) gates whether this activity
@@ -430,6 +473,8 @@ def cleanup_mlil(ctx: AnalysisContext):
     bv = ctx.view
     mlil = ctx.mlil
     if mlil is None:
+        return
+    if not _ensure_analysis_settings(func):
         return
 
     # Skip until deflatten has stabilized; reapply every pass since MLIL rewrites are reverted by each regeneration.

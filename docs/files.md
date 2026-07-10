@@ -3,12 +3,11 @@
 ```
 DispatchThis/
 ├── __init__.py                 Plugin entry point: registers the workflow + activities,
-│                               the settings, the analysis-limit overrides, and the
-│                               Function Analysis setting activities.
+│                               profile settings, and Function Analysis setting activities.
 ├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
 │                               MLIL call/global resolve, branch translation,
 │                               string decrypt, deflatten, phase cleanup,
-│                               and deflatten cleanup) and their gating.
+│                               deflatten cleanup, and Function-scoped analysis gating.
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── ui.py                       Function context-menu commands and shortcuts for
 │                               selecting profiles and toggling workflow settings.
@@ -57,12 +56,13 @@ DispatchThis/
 Clones `core.function.metaAnalysis`, registers the activities and their insertion
 points, surfaces the `analysis.plugins.dispatchThis.indirectJumpsCalls`,
 `analysis.plugins.dispatchThis.stringDecrypt`, and `analysis.plugins.dispatchThis.deflatten`
-Function Analysis settings, and raises analysis limits for large flattened functions.
+Function Analysis settings. It does not change Binary Ninja analysis settings at import.
 
 ### `workflow.py`
 The activity callbacks invoked by the workflow per function. Each reads the relevant IL
 off the `AnalysisContext`, calls into a pass module, and owns reanalysis-triggering Binary
-Ninja edits plus the phase/session receipts that gate them.
+Ninja edits plus the phase/session receipts that gate them. The earliest resolver callback
+also verifies DispatchThis's required Function-scoped analysis environment before recovery.
 
 ### `workflow_state.py`
 Owns `Function.session_data["dispatchthis_workflow_state"]`: indirect branch, indirect

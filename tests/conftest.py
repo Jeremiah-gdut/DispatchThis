@@ -81,10 +81,21 @@ class FakeSettings:
         return True
 
     def set_integer(self, *_args, **_kwargs):
-        pass
+        return True
 
     def set_bool(self, *_args, **_kwargs):
-        pass
+        return True
+
+    def get_integer(self, key, *_args, **_kwargs):
+        return {
+            "analysis.limits.maxFunctionSize": 0,
+            "analysis.limits.expressionValueComputeMaxDepth": 99999,
+            "analysis.limits.maxFunctionAnalysisTime": 600000,
+            "analysis.limits.maxFunctionUpdateCount": 1024,
+        }.get(key, 0)
+
+    def get_bool(self, *_args, **_kwargs):
+        return False
 
     def get_string(self, *_args, **_kwargs):
         return ""

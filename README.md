@@ -111,6 +111,9 @@ Designed for **Binary Ninja 5.3 or newer** and tested on **5.3.9757
 (a99f2380)**. Exact patch and build versions are not enforced; releases before
 5.3 are unsupported. Control-flow rewrites use Binary Ninja's copy-transform APIs and
 `AnalysisContext.set_mlil_function`; legacy MLIL assignment fallbacks are unsupported.
+For each enabled function, the earliest resolver callback verifies DispatchThis's
+required analysis environment at Function scope; those overrides remain in place after
+the plugin is disabled.
 
 ## License
 

@@ -330,6 +330,149 @@ class FakeContext:
         self.committed = True
 
 
+class FakeAnalysisSettings:
+    def __init__(self, ignore_key=None, fail_key=None):
+        self.ignore_key = ignore_key
+        self.fail_key = fail_key
+        self.values = {}
+        self.reads = []
+        self.writes = []
+
+    def get_integer(self, key, resource=None):
+        self.reads.append(("integer", key, resource))
+        return self.values.get((key, id(resource)))
+
+    def get_bool(self, key, resource=None):
+        self.reads.append(("bool", key, resource))
+        return self.values.get((key, id(resource)))
+
+    def set_integer(self, key, value, resource=None, scope=None):
+        return self._set("integer", key, value, resource, scope)
+
+    def set_bool(self, key, value, resource=None, scope=None):
+        return self._set("bool", key, value, resource, scope)
+
+    def _set(self, kind, key, value, resource, scope):
+        self.writes.append((kind, key, value, resource, scope))
+        if key == self.fail_key:
+            return False
+        if key != self.ignore_key:
+            self.values[(key, id(resource))] = value
+        return True
+
+
+def _branch_settings_context():
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.unmapped = set()
+    FakeWorkflowState.marked_stable = False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.updates = {}
+    active_profile_calls.clear()
+    branch_plan_calls.clear()
+    branch_plan_results.clear()
+    branch_iter_items.clear()
+    ctx = FakeContext()
+    ctx.llil = object()
+    ctx.view.add_analysis_completion_event = lambda _callback: None
+    return ctx
+
+
+def test_branch_resolver_configures_function_scoped_analysis_settings(monkeypatch):
+    settings = FakeAnalysisSettings()
+    ctx = _branch_settings_context()
+    monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
+    monkeypatch.setattr(
+        workflow,
+        "SettingsScope",
+        types.SimpleNamespace(SettingsResourceScope="function"),
+        raising=False,
+    )
+
+    workflow.resolve_jumps_llil(ctx)
+
+    expected = [
+        ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
+        ("integer", "analysis.limits.expressionValueComputeMaxDepth", 99999, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionAnalysisTime", 600000, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionUpdateCount", 1024, ctx.function, "function"),
+        ("bool", "analysis.outlining.builtins", False, ctx.function, "function"),
+    ]
+    assert settings.writes == expected
+    assert all(settings.reads.count((kind, key, ctx.function)) >= 2 for kind, key, *_ in expected)
+    assert active_profile_calls == [ctx.view]
+
+    settings.writes.clear()
+    workflow.resolve_jumps_llil(ctx)
+
+    assert settings.writes == []
+
+
+def test_branch_resolver_stops_before_profile_when_settings_do_not_verify(monkeypatch):
+    settings = FakeAnalysisSettings(ignore_key="analysis.limits.maxFunctionSize")
+    ctx = _branch_settings_context()
+    monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
+    monkeypatch.setattr(
+        workflow,
+        "SettingsScope",
+        types.SimpleNamespace(SettingsResourceScope="function"),
+        raising=False,
+    )
+
+    workflow.resolve_jumps_llil(ctx)
+
+    assert settings.writes == [
+        ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
+        ("integer", "analysis.limits.expressionValueComputeMaxDepth", 99999, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionAnalysisTime", 600000, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionUpdateCount", 1024, ctx.function, "function"),
+        ("bool", "analysis.outlining.builtins", False, ctx.function, "function"),
+    ]
+    assert active_profile_calls == []
+    assert branch_plan_calls == []
+    assert FakeWorkflowState.marked_stable is False
+
+
+def test_branch_resolver_stops_before_profile_when_setting_write_fails(monkeypatch):
+    settings = FakeAnalysisSettings(fail_key="analysis.limits.maxFunctionSize")
+    ctx = _branch_settings_context()
+    monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
+    monkeypatch.setattr(
+        workflow,
+        "SettingsScope",
+        types.SimpleNamespace(SettingsResourceScope="function"),
+        raising=False,
+    )
+
+    workflow.resolve_jumps_llil(ctx)
+
+    assert settings.writes == [
+        ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
+    ]
+    assert active_profile_calls == []
+    assert branch_plan_calls == []
+    assert FakeWorkflowState.marked_stable is False
+
+
+def test_call_phase_stops_before_pending_branch_recovery_when_settings_fail(monkeypatch):
+    settings = FakeAnalysisSettings(ignore_key="analysis.limits.maxFunctionSize")
+    ctx = _branch_settings_context()
+    ctx.function.low_level_il = "function-llil"
+    branch_plan_results["function-llil"] = [{"source": 0x3000, "targets": (0x4000,)}]
+    monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
+    monkeypatch.setattr(
+        workflow,
+        "SettingsScope",
+        types.SimpleNamespace(SettingsResourceScope="function"),
+        raising=False,
+    )
+
+    workflow.resolve_calls_mlil(ctx)
+
+    assert active_profile_calls == []
+    assert branch_plan_calls == []
+    assert FakeWorkflowState.marked_stable is False
+
+
 def test_deflatten_workflow_runs_without_branch_mirror_state():
     FakeWorkflowState.stable = True
     FakeWorkflowState.globals_stable = True
