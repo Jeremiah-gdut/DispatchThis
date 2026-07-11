@@ -196,16 +196,6 @@ def _jump_parts(bv, ssa, jump_il):
     return (slot, table_base_key & U48, key & U48, {o & U48 for o in offsets})
 
 
-def parse_jump_gadget(bv, ssa, jump_il):
-    """Return one decoded gadget tuple for compatibility with single-target callers."""
-    parsed = _jump_parts(bv, ssa, jump_il)
-    if parsed is None:
-        return None
-    slot, table_base_key, key, offsets = parsed
-    offset = sorted(offsets)[0]
-    return (slot, table_base_key, key, offset)
-
-
 def parse_jump_gadget_targets(bv, ssa, jump_il):
     """Return every decoded table target tuple for this branch gadget."""
     parsed = _jump_parts(bv, ssa, jump_il)
@@ -213,13 +203,6 @@ def parse_jump_gadget_targets(bv, ssa, jump_il):
         return None
     slot, table_base_key, key, offsets = parsed
     return [(slot, table_base_key, key, offset) for offset in sorted(offsets)]
-
-
-def resolve_llil_jump_target(bv, ssa, jump_il):
-    """Decode the concrete target of one decode-gadget ``LLIL_JUMP`` by parsing
-    its gadget and decoding the jump table. Returns an ``int`` or ``None``."""
-    targets = resolve_llil_jump_targets(bv, ssa, jump_il)
-    return None if not targets else targets[0]
 
 
 def resolve_llil_jump_targets(bv, ssa, jump_il):

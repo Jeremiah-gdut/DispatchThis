@@ -18,8 +18,6 @@ correlated_rewrite_results = []
 active_profile_calls = []
 branch_iter_items = []
 clear_tag_calls = []
-nop_state_write_results = []
-nop_state_write_calls = []
 cleanup_decode_calls = []
 cleanup_decode_results = []
 set_roots_before_calls = []
@@ -31,7 +29,7 @@ deflatten_rewrite_results = []
 
 def fake_compute(_bv, func, mlil=None):
     calls.append(("compute", func.start, mlil))
-    return [{"kind": "uncond", "state_tokens": {(0x1234, 8)}, "state_vars": {"state"}}]
+    return [{"kind": "uncond"}]
 
 
 def fake_rewrite_redirections_mlil(ctx, mlil, plans):
@@ -71,7 +69,7 @@ def fake_apply_correlated_stores_mlil(ctx, mlil, plans):
 
 def fake_plan_deflatten_redirections(bv, func, mlil):
     calls.append(("compute", func.start, mlil))
-    return [{"kind": "uncond", "state_tokens": {(0x1234, 8)}, "state_vars": {"state"}}]
+    return [{"kind": "uncond"}]
 
 
 def fake_plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
@@ -244,12 +242,6 @@ _FAKE_MODULES = {
     ),
     "plugins.DispatchThis.passes.medium.correlated_stores": types.SimpleNamespace(
         apply_correlated_stores_mlil=fake_apply_correlated_stores_mlil,
-    ),
-    "plugins.DispatchThis.passes.medium.nop_pass": types.SimpleNamespace(
-        nop_deflatten_state_writes=lambda *args, **kwargs: (
-            nop_state_write_calls.append((args, kwargs)),
-            nop_state_write_results.pop(0) if nop_state_write_results else 0,
-        )[1],
     ),
     "plugins.DispatchThis.passes.medium.indirect_calls": types.SimpleNamespace(
         apply_indirect_call_rewrites=fake_apply_indirect_call_rewrites,
@@ -520,8 +512,6 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     assert calls[1][2] is ctx.mlil
     assert ctx.committed is True
     assert ctx.installed_mlil is replacement
-    assert ctx.view.session_data["dispatchthis_state_consts"][ctx.function.start] == {0x1234}
-    assert ctx.view.session_data["dispatchthis_state_vars"][ctx.function.start] == {"state"}
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     assert "dispatchthis_llil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
@@ -548,23 +538,19 @@ def test_deflatten_retries_without_publishing_state_after_commit_failure():
 
     try:
         workflow.deflatten_mlil(ctx)
-        assert "dispatchthis_state_consts" not in ctx.view.session_data
-        assert "dispatchthis_state_vars" not in ctx.view.session_data
         assert "dispatchthis_mlil_stable" not in ctx.view.session_data
         workflow.deflatten_mlil(ctx)
     finally:
         workflow._commit_mlil = old_commit
 
     assert commits == [(ctx, first_replacement), (ctx, second_replacement)]
-    assert ctx.view.session_data["dispatchthis_state_consts"][ctx.function.start] == {0x1234}
-    assert ctx.view.session_data["dispatchthis_state_vars"][ctx.function.start] == {"state"}
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.globals_stable = False
     deflatten_rewrite_results.clear()
 
 
-def test_deflatten_failures_revoke_prior_state_before_cleanup():
+def test_deflatten_failures_revoke_prior_stability():
     FakeWorkflowState.stable = True
     FakeWorkflowState.globals_stable = True
     other_function = 0x7000
@@ -573,21 +559,13 @@ def test_deflatten_failures_revoke_prior_state_before_cleanup():
     try:
         for rewrite_result, commit_result in (
             ((None, 0), True),
+            ((object(), 0), True),
             ((object(), 1), False),
         ):
             calls.clear()
             deflatten_rewrite_results[:] = [rewrite_result]
-            nop_state_write_calls.clear()
             ctx = FakeContext()
             ctx.view.session_data = {
-                "dispatchthis_state_consts": {
-                    ctx.function.start: {0xDEAD},
-                    other_function: {0xBEEF},
-                },
-                "dispatchthis_state_vars": {
-                    ctx.function.start: {"old_state"},
-                    other_function: {"other_state"},
-                },
                 "dispatchthis_mlil_stable": {
                     ctx.function.start: True,
                     other_function: True,
@@ -596,15 +574,9 @@ def test_deflatten_failures_revoke_prior_state_before_cleanup():
             workflow._commit_mlil = lambda _ctx, _mlil: commit_result
 
             workflow.deflatten_mlil(ctx)
-            for key in (
-                "dispatchthis_state_consts",
-                "dispatchthis_state_vars",
-                "dispatchthis_mlil_stable",
-            ):
-                assert ctx.function.start not in ctx.view.session_data[key]
-                assert other_function in ctx.view.session_data[key]
-            workflow.cleanup_mlil(ctx)
-            assert nop_state_write_calls == []
+            stable = ctx.view.session_data["dispatchthis_mlil_stable"]
+            assert ctx.function.start not in stable
+            assert stable[other_function] is True
     finally:
         workflow._commit_mlil = old_commit
 
@@ -623,6 +595,53 @@ def test_deflatten_waits_for_global_phase_stability():
 
     assert calls == []
     FakeWorkflowState.stable = False
+
+
+def test_deflatten_early_returns_revoke_prior_stability():
+    other_function = 0x7000
+    old_ensure = workflow._ensure_analysis_settings
+    old_active_profile = workflow.active_profile
+
+    def assert_revoked(ctx):
+        ctx.view.session_data = {
+            "dispatchthis_mlil_stable": {
+                ctx.function.start: True,
+                other_function: True,
+            },
+        }
+        workflow.deflatten_mlil(ctx)
+        stable = ctx.view.session_data["dispatchthis_mlil_stable"]
+        assert ctx.function.start not in stable
+        assert stable[other_function] is True
+
+    try:
+        FakeWorkflowState.stable = True
+        FakeWorkflowState.globals_stable = True
+        no_mlil = FakeContext()
+        no_mlil._mlil = None
+        assert_revoked(no_mlil)
+
+        workflow._ensure_analysis_settings = lambda _func: False
+        assert_revoked(FakeContext())
+        workflow._ensure_analysis_settings = old_ensure
+
+        FakeWorkflowState.stable = False
+        assert_revoked(FakeContext())
+
+        FakeWorkflowState.stable = True
+        FakeWorkflowState.globals_stable = False
+        assert_revoked(FakeContext())
+
+        FakeWorkflowState.globals_stable = True
+        workflow.active_profile = lambda _bv: types.SimpleNamespace(
+            plan_deflatten_redirections=lambda *_args: []
+        )
+        assert_revoked(FakeContext())
+    finally:
+        workflow._ensure_analysis_settings = old_ensure
+        workflow.active_profile = old_active_profile
+        FakeWorkflowState.stable = False
+        FakeWorkflowState.globals_stable = False
 
 
 def test_branch_resolver_reuses_branch_receipts_as_known_targets():
@@ -1505,41 +1524,6 @@ def test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged():
     FakeWorkflowState.globals_stable = False
 
 
-def test_cleanup_waits_for_deflatten_stability():
-    ctx = FakeContext()
-    ctx.view.session_data["dispatchthis_mlil_stable"] = {}
-    nop_state_write_calls.clear()
-
-    workflow.cleanup_mlil(ctx)
-
-    assert nop_state_write_calls == []
-    assert ctx.committed is False
-
-
-def test_cleanup_commits_when_deflatten_state_writes_are_nopped():
-    ctx = FakeContext()
-    ctx.view.session_data["dispatchthis_mlil_stable"] = {ctx.function.start: True}
-    nop_state_write_calls.clear()
-    nop_state_write_results[:] = [1]
-
-    workflow.cleanup_mlil(ctx)
-
-    assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
-    assert ctx.committed is True
-
-
-def test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped():
-    ctx = FakeContext()
-    ctx.view.session_data["dispatchthis_mlil_stable"] = {ctx.function.start: True}
-    nop_state_write_calls.clear()
-    nop_state_write_results[:] = [0]
-
-    workflow.cleanup_mlil(ctx)
-
-    assert nop_state_write_calls == [((ctx.view, ctx.function), {"mlil": ctx.mlil})]
-    assert ctx.committed is False
-
-
 def test_noreturn_type_detection_and_fallthrough_callsite():
     block = types.SimpleNamespace(start=0, end=2, outgoing_edges=[])
     first = types.SimpleNamespace(instr_index=10, il_basic_block=block)
@@ -1549,40 +1533,3 @@ def test_noreturn_type_detection_and_fallthrough_callsite():
     assert workflow._type_is_noreturn("void() __noreturn")
     assert workflow._call_has_fallthrough(mlil, first)
     assert not workflow._call_has_fallthrough(mlil, call)
-
-if __name__ == "__main__":
-    test_deflatten_workflow_runs_without_branch_mirror_state()
-    test_deflatten_retries_without_publishing_state_after_commit_failure()
-    test_deflatten_failures_revoke_prior_state_before_cleanup()
-    test_deflatten_waits_for_global_phase_stability()
-    test_branch_resolver_reuses_branch_receipts_as_known_targets()
-    test_branch_resolver_records_profile_cleanup_roots_without_target_mutation()
-    test_branch_resolver_preserves_cleanup_roots_when_fact_omits_optional_field()
-    test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps()
-    test_branch_resolver_does_not_stabilize_unparsed_later_jump_after_partial_mapping()
-    test_branch_resolver_uses_function_llil_fallback_for_newly_discovered_jump()
-    test_branch_resolver_schedules_tag_cleanup_once_while_pending()
-    test_call_phase_submits_pending_function_llil_branches_before_call_work()
-    test_call_resolver_uses_active_profile_without_workflow_state()
-    test_call_profile_hook_miss_does_not_fallback_to_default_resolver()
-    test_call_cleanup_respects_one_shot_receipt()
-    test_call_cleanup_replays_when_receipt_is_stale_in_current_mlil()
-    test_call_cleanup_retries_after_current_mlil_was_changed()
-    test_branch_cleanup_respects_one_shot_receipt()
-    test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil()
-    test_branch_cleanup_merges_profile_translation_and_fallback_roots()
-    test_commit_mlil_reports_result_without_assignment_fallback()
-    test_branch_cleanup_retries_when_replacement_install_fails()
-    test_branch_cleanup_retries_when_translation_is_rejected()
-    test_branch_cleanup_confirms_no_change_without_mlil_install()
-    test_global_resolver_uses_active_profile_without_workflow_state()
-    test_global_profile_hook_miss_does_not_fallback_to_default_resolver()
-    test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify()
-    test_recover_phi_stores_uses_profile_plan_after_global_stability()
-    test_string_decrypt_waits_for_branch_call_and_global_stability()
-    test_string_decrypt_does_not_require_deflatten_stability()
-    test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged()
-    test_cleanup_waits_for_deflatten_stability()
-    test_cleanup_commits_when_deflatten_state_writes_are_nopped()
-    test_cleanup_does_not_commit_when_no_deflatten_state_writes_are_nopped()
-    test_noreturn_type_detection_and_fallthrough_callsite()

@@ -91,6 +91,18 @@ such as an indirect branch target, indirect call target, or global constant slot
 Workflow callbacks decide how and when to submit recovery facts to Binary Ninja.
 _Avoid_: profile action, Binary Ninja mutation request
 
+**Recovered target set**:
+The complete set of concrete control-flow destinations supported by current
+recovery evidence. Consumers preserve every target unless the evidence proves
+that exactly one target is valid.
+_Avoid_: first target, preferred target
+
+**Implicit target pruning**:
+Silently selecting one member of a recovered target set without semantic proof
+that the other members are invalid. It can erase valid CFG edges and is never a
+safe single-target convenience.
+_Avoid_: pick first, best-effort target
+
 **Global constant recovery fact**:
 A recovery fact that identifies a global data slot and the const-qualified type it
 should receive. Values, resolved addresses, and use sites that justified recognition
@@ -135,9 +147,48 @@ The flattened control-flow router that chooses the next original block from a st
 
 **Dispatcher cluster**:
 A connected set of dispatcher comparison blocks that route by comparing state
-tokens. For current samples, identify it from equality comparisons whose
-variables trace back to the same state variable; graph shape validates the
-cluster but is not the primary signal.
+tokens. Identify it from variable/constant equality, inequality, or signed or
+unsigned ordering comparisons whose variables have unique row-local direct-copy
+chains ending at the same state input; graph shape validates the cluster but is
+not the primary signal.
+
+**Dispatcher comparison chain**:
+The unique sequence of direct, equal-width variable copies earlier in one
+dispatcher row that feeds its comparison and ends at the shared state input.
+An arbitrary definition elsewhere that traces to state is not equivalent because
+the comparison value may be stale on another entry path.
+
+**Exact whole-variable read**:
+An `MLIL_VAR` or `MLIL_VAR_SSA` use of an entire variable. Field, split, and
+aliased forms remain important may-read/may-alias evidence, but they are not
+proof that a dispatcher comparison or pointer copy carries the complete value.
+_Avoid_: treating `VAR_FIELD` as a direct copy
+
+**Variable identity**:
+The equality/identity of Binary Ninja's underlying Variable, SSAVariable, or
+register object after explicit wrapper normalization. A display name is not
+identity because distinct storage objects can render the same `str`/`repr`.
+_Avoid_: string-keyed bindings, same-name fallback
+
+**Resolved dispatcher predicate**:
+A predicate-variable IF whose defining comparison is a current instruction
+earlier in the same dispatcher row. Copy-chain ordering is measured at that
+comparison, not at the later IF, so a post-comparison state copy is never replay
+evidence.
+
+**State address escape**:
+Publishing `ADDRESS_OF` or `ADDRESS_OF_FIELD` of the dispatcher state, directly
+or through variable/holder definitions, into memory or an unknown
+memory-effecting operation. Once stored or retained, a later unknown operation
+or non-exact store can recover and mutate the state even without an explicit
+pointer argument.
+
+**Concrete dispatcher replay**:
+Routing one recovered `(state_token, width)` through the actual dispatcher CFG by
+evaluating each comparison with its original operand order and bitvector
+signedness. This proves a target for that token without constructing symbolic
+state intervals.
+_Avoid_: symbolic range recovery, assumed comparison arm
 
 **State variable**:
 The value consumed by the dispatcher to select the next original block.
@@ -153,15 +204,32 @@ _Avoid_: OBB outside short code comments
 **Deflattening**:
 Reconnecting original basic blocks directly after dispatcher-controlled successors are recovered.
 
+**Obsolete state write**:
+A dispatcher-state assignment or store proved unnecessary because its owning
+transition is redirected directly to the recovered successor. A deflatten plan
+identifies it by exact current-MLIL instruction index; matching token values or
+variables elsewhere are not cleanup evidence.
+_Avoid_: state-token scan, function-wide cleanup match
+
+**Atomic deflatten replacement**:
+One MLIL copy-transform containing every selected dispatcher-exit or conditional
+rewrite and every exact obsolete-state-write NOP. If any selected rewrite cannot
+be applied, none of the replacement is installed.
+
 **Unconditional transition**:
-A recovered original-block successor selected by a single state token write.
+A recovered original-block successor selected by one concrete state token; the
+region may contain multiple state writes only when all of them resolve to that
+same token.
 
 **Conditional transition**:
 A recovered original-block successor set selected from multiple state tokens by
 program control flow, such as a branch/state-selection diamond. For the current sample
 family it carries two branch outcomes, each with its own state token and target
 original basic block. Deflattening rewrites conditional transitions when both
-branch outcomes resolve.
+branch outcomes resolve, every path establishes its token, and the rewritten
+region is private. It preserves arm execution when distinct dispatcher exits
+exist; otherwise it shortcuts the condition only with complete state-channel
+bypass proof.
 
 **Workflow phase**:
 A named stage of per-function recovery work whose result controls whether later recovery work may run.
@@ -170,4 +238,8 @@ A named stage of per-function recovery work whose result controls whether later 
 A Binary Ninja function-state edit that can schedule function analysis again and therefore can re-enter the workflow.
 
 **Phase cleanup**:
-Dead IL removal that runs after its owning workflow phase reaches stability. Its receipt is marked done only after the current IL has no phase-owned cleanup changes left, so Binary Ninja reanalysis can replay erased cleanup overlays.
+Dead target-decode IL removal for the indirect branch or call phase after its
+owning workflow phase reaches stability. Its receipt is marked done only after
+the current IL has no phase-owned cleanup changes left, so Binary Ninja
+reanalysis can replay erased cleanup overlays. Deflatten state-write NOPs belong
+to the atomic deflatten replacement, not phase cleanup.

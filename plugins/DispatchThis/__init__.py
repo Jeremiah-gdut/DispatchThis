@@ -7,7 +7,7 @@ obfuscated functions. All passes are opt-in per-function via Function Analysis s
 
 import json
 from binaryninja import Activity, Workflow
-from .utils.log import log_info, log_warn
+from .utils.log import log_warn
 from .profiles import register_profile_settings
 from .ui import register_ui_commands
 from .workflow import (
@@ -18,7 +18,6 @@ from .workflow import (
     recover_phi_stores_mlil,
     string_decrypt_mlil,
     deflatten_mlil,
-    cleanup_mlil,
 )
 
 # Activity names double as per-function setting identifiers (BN ``eligibility.auto``
@@ -42,11 +41,6 @@ _RESOLVE_OR_DEFLATTEN = {
         {"type": "setting", "identifier": DEFLATTEN_SETTING, "value": True},
     ],
     "logicalOperator": "or",
-}
-_DEFLATTEN_ONLY = {
-    "predicates": [
-        {"type": "setting", "identifier": DEFLATTEN_SETTING, "value": True},
-    ],
 }
 
 
@@ -128,14 +122,6 @@ def register_workflows():
         "eligibility": {"auto": {"default": False}},
     }), action=deflatten_mlil))
 
-    # Cleanup (MLIL), gated on the Deflatten toggle only.
-    workflow.register_activity(Activity(json.dumps({
-        "name": "extension.DispatchThis.Cleanup",
-        "title": "DispatchThis: Cleanup",
-        "description": "NOP dispatcher state writes recorded by deflattening.",
-        "eligibility": _DEFLATTEN_ONLY,
-    }), action=cleanup_mlil))
-
     workflow.insert("core.function.generateHighLevelIL", [
             "extension.DispatchThis.IndirectCallPatcher",
             "extension.DispatchThis.BranchConditionTranslator",
@@ -143,7 +129,6 @@ def register_workflows():
             "extension.DispatchThis.CorrelatedStoreRecovery",
             STRING_DECRYPT_SETTING,
             DEFLATTEN_SETTING,
-            "extension.DispatchThis.Cleanup"
     ])
     workflow.register()
     log_warn("DispatchThis's workflow has been registered!")

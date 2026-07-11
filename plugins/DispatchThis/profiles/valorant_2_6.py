@@ -199,9 +199,7 @@ def _values_for_phi_operand(
 def _bound_value(bindings, var):
     if not bindings:
         return None
-    if var in bindings:
-        return bindings[var]
-    return bindings.get(str(var))
+    return bindings.get(var)
 
 
 def _values(bv, il, expr, depth=0, max_depth=64, seen=None, bindings=None, memory_read_allowed=None):
@@ -384,7 +382,7 @@ def _branch_values(bv, ssa, dest):
     out = set()
     phi_reg = phi_regs[0]
     for value in _values(bv, ssa, _definition(ssa, phi_reg)):
-        bindings = {phi_reg: value, str(phi_reg): value}
+        bindings = {phi_reg: value}
         out.update(_values(bv, ssa, dest, bindings=bindings))
     return out
 
@@ -563,7 +561,8 @@ def _plan_correlated_store(bv, il, ssa, store):
     if not _pure_join_prefix(il, non_ssa_store):
         return None
 
-    memory_read_allowed = lambda address, size: _read_only_global_load(bv, address, size)
+    def memory_read_allowed(address, size):
+        return _read_only_global_load(bv, address, size)
     arms = []
     for arm_index, goto in enumerate(non_ssa_gotos):
         bindings = _phi_bindings(bv, ssa, phi_defs, arm_index, memory_read_allowed)
@@ -605,7 +604,7 @@ def _plan_correlated_store(bv, il, ssa, store):
 def _store_phi_defs(ssa, store):
     out = {}
     seen_exprs = set()
-    seen_vars = set()
+    seen_vars = []
 
     def visit(expr, depth=0):
         if expr is None or depth > 64:
@@ -613,10 +612,9 @@ def _store_phi_defs(ssa, store):
         op = _op(expr)
         if op == "MLIL_VAR_SSA":
             var = expr.src
-            key = str(var)
-            if key in seen_vars:
+            if any(var == seen for seen in seen_vars):
                 return
-            seen_vars.add(key)
+            seen_vars.append(var)
             definition = _ssa_var_definition(ssa, var)
             if _op(definition) == "MLIL_VAR_PHI":
                 out[var] = definition
@@ -650,7 +648,7 @@ def _peel_ssa_value(ssa, expr):
         if _op(expr) == "MLIL_VAR_SSA":
             expr = getattr(_ssa_var_definition(ssa, expr.src), "src", None)
             continue
-        if _op(expr) in ("MLIL_SET_VAR_SSA", "MLIL_SET_VAR", "MLIL_SET_VAR_FIELD_SSA", "MLIL_SET_VAR_FIELD"):
+        if _op(expr) in ("MLIL_SET_VAR_SSA", "MLIL_SET_VAR", "MLIL_SET_VAR_SSA_FIELD", "MLIL_SET_VAR_FIELD"):
             expr = getattr(expr, "src", None)
             continue
         return expr
@@ -694,7 +692,6 @@ def _phi_bindings(bv, ssa, phi_defs, arm_index, memory_read_allowed=None):
             return None
         value = next(iter(values))
         bindings[var] = value
-        bindings[str(var)] = value
     return bindings
 
 

@@ -4,7 +4,6 @@ from binaryninja import AnalysisContext, Settings, SettingsScope
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
 from .passes.medium.correlated_stores import apply_correlated_stores_mlil
-from .passes.medium.nop_pass import nop_deflatten_state_writes
 from .passes.medium.indirect_calls import apply_indirect_call_rewrites
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode
@@ -443,6 +442,8 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 def deflatten_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
+    bv.session_data.get("dispatchthis_mlil_stable", {}).pop(func.start, None)
+
     mlil = ctx.mlil
     if mlil is None:
         return
@@ -466,46 +467,7 @@ def deflatten_mlil(ctx: AnalysisContext):
 
     new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
     if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
-        for key in (
-            "dispatchthis_state_consts",
-            "dispatchthis_state_vars",
-            "dispatchthis_mlil_stable",
-        ):
-            bv.session_data.get(key, {}).pop(func.start, None)
         return
 
-    # Stash state tokens and variables only after the replacement is installed,
-    # so cleanup never consumes an unpublished deflatten plan.
-    state_tokens = set()
-    state_vars = set()
-    for plan in redirections:
-        state_tokens.update(plan.get("state_tokens", ()))
-        state_vars.update(plan.get("state_vars", ()))
-    state_consts = {value for value, _size in state_tokens}
-    bv.session_data.setdefault("dispatchthis_state_consts", {})[func.start] = state_consts
-    bv.session_data.setdefault("dispatchthis_state_vars", {})[func.start] = state_vars
     bv.session_data.setdefault("dispatchthis_mlil_stable", {})[func.start] = True
-    log_info(f"[workflow] {func.name}: recorded {len(state_tokens)} dispatcher state token(s)")
     log_info(f"{func.name} has been deflattened")
-
-
-def cleanup_mlil(ctx: AnalysisContext):
-    func = ctx.function
-    bv = ctx.view
-    mlil = ctx.mlil
-    if mlil is None:
-        return
-    if not _ensure_analysis_settings(func):
-        return
-
-    # Skip until deflatten has stabilized; reapply every pass since MLIL rewrites are reverted by each regeneration.
-    mlil_stable = bv.session_data.setdefault("dispatchthis_mlil_stable", {})
-    if not mlil_stable.get(func.start):
-        log_debug(f"[workflow] {func.name}: deflattener has not run yet, skipping cleanup")
-        return
-
-    state_writes = nop_deflatten_state_writes(bv, func, mlil=mlil)
-    if state_writes:
-        _commit_mlil(ctx, mlil)
-
-    log_info(f"{func.name} has been cleaned")

@@ -25,6 +25,7 @@ capabilities:
   branch_gadget:
   call_gadget:
   global_constants:
+  correlated_stores:
   deflatten:
   string_decrypt:
 
@@ -46,6 +47,12 @@ global_constants:
   mlil_excerpt:
   notes:
   resolved_addr:
+
+correlated_stores:
+  join_store_addr:
+  mlil_excerpt:
+  notes:
+  predecessor_arms:
 
 deflatten:
   dispatcher_state:
@@ -113,6 +120,8 @@ Supported:
 - branch gadget: yes
 - indirect call gadget: yes
 - global constants: no-op
+- correlated stores: no-op
+- deflatten: no-op
 - string decrypt: no-op
 
 Validation:
@@ -174,8 +183,9 @@ Use the helper modules by IL level and purpose:
   `const_values` for PHI-aware constant candidate sets.
 - `mlil`: direct/indirect call iteration, variable definition peeling,
   constant/value extraction, single-value constant folding, expression walking
-  and operation queries, variable/state-token normalization, address/slot
-  extraction, store checks, and cleanup-root discovery.
+  and operation queries, variable/state-token normalization, concrete dispatcher
+  comparison parsing/evaluation, address/slot extraction, store checks, and
+  cleanup-root discovery.
 - `memory`: explicit-width little-endian reads, section checks, and target or
   address validation.
 - `facts`: branch, call, global constant, and string decrypt recovery-fact
@@ -254,7 +264,7 @@ Each profile module must expose:
 ```python
 PROFILE_ID = "dyzznb_main_202607"
 PROFILE_NAME = "DYZZNB main 2026-07"
-PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals and strings."
+PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals, correlated stores, and strings."
 
 def resolve_branch_gadget(bv, llil, known_targets=None):
     return []
@@ -263,6 +273,9 @@ def resolve_call_gadget(bv, mlil):
     return []
 
 def plan_global_constant_slots(bv, mlil):
+    return []
+
+def plan_correlated_store_rewrites(bv, func, mlil):
     return []
 
 def plan_deflatten_redirections(bv, func, mlil):
@@ -323,24 +336,103 @@ address, or use site, remains private to the profile.
 Workflow owns `BinaryView.define_user_data_var` and function global-phase
 receipts.
 
+`plan_correlated_store_rewrites(bv, func, mlil)` returns plans for moving a
+join-block store back into the predecessor arms that own its correlated values:
+
+```python
+{
+    "store": store_il,
+    "size": 4,
+    "arms": (
+        {"goto": true_goto, "dest": 0xA000, "src": 0xB000},
+        {"goto": false_goto, "dest": 0xB000, "src": 0xA000},
+    ),
+}
+```
+
+The profile proves the PHI-arm correlation and concrete addresses. The backend
+owns the atomic MLIL copy-transform.
+
 `plan_deflatten_redirections(bv, func, mlil)` returns deflatten redirection
 plans:
 
 ```python
 {
     "kind": "uncond",
-    "jump": jump_il,
+    "exit_jumps": (jump_il,),
     "target_bb": target_block,
     "obb": original_block,
-    "state_var": state_var,
-    "state_vars": {state_var},
-    "state_tokens": {(0x1234, 4)},
+    "state_token": (0x1234, 4),
+    "obsolete_state_writes": {123},
 }
 ```
 
-Profiles recognize the binary-specific dispatcher/state-write shape. Workflow
-owns applying those plans through the deflatten backend, recording state tokens
-for cleanup, and marking `dispatchthis_mlil_stable`.
+Profiles recognize the binary-specific dispatcher/state-write shape. Every
+unconditional plan must include all private dispatcher exits for that original
+region, and concrete token replay from every exit must prove the same target.
+For conditional plans, every path in each arm must terminate at a dispatcher
+entry and establish the same token, assignments must stay on the
+state-selection dependency chain, and
+multiple valid candidates must be rejected rather than ordered implicitly.
+Supported variable/constant dispatcher comparisons are `E`, `NE`, and signed or
+unsigned `LT`, `LE`, `GT`, and `GE`; comparison operand order and token width are
+part of the evidence. Profiles do not need to solve symbolic intervals.
+
+`obsolete_state_writes` is a `set[int]` of exact current-MLIL instruction
+indices proved redundant because of that plan's redirection. Target proof and
+cleanup proof are independent: an uncertain target produces no plan, while
+uncertain cleanup produces a valid plan with an empty set. The backend validates
+and applies every selected exit/conditional rewrite and every exact NOP in one
+atomic copy-transform. Workflow publishes `dispatchthis_mlil_stable` only after
+installing that replacement; it does not publish token/variable cleanup maps.
+An external entry into a selected conditional arm rejects the plan because the
+exit mutation would affect an unproved foreign path. Profiles that recognize
+state stores through pointers must require one complete, unique definition
+chain to `&state`, with each definition dominating its use; historical
+assignment to a pointer variable is not sufficient.
+
+Conditional plans set `rewrite_mode` to `arm_exits` when `exit_targets` can
+redirect distinct arm GOTOs directly from the state-selection tails while
+preserving their execution. `rewrite_mode: condition` shortcuts `if_il` and is
+valid only with complete private cleanup plus proof that the skipped state
+channel has no non-dispatcher observer. Profiles must reject a condition
+shortcut when that stronger proof is unavailable.
+
+Profiles must not classify arbitrary assignment blocks as dispatcher routing.
+Only NOP/GOTO routing and direct copies among proved state-dependency variables
+may be replayed as token-preserving. Selected comparison rows obey the same
+restriction, and dispatcher-derived temporaries must not be observed outside
+the dispatcher.
+
+The comparison variable must have one unique, equal-width whole-variable
+`MLIL_VAR`/`MLIL_VAR_SSA` direct-copy chain
+earlier in its own dispatcher row. All selected rows must end those chains at
+the same state input. A definition elsewhere that merely traces back to state is
+not sufficient because the comparison may consume a stale value. Treat
+`SET_VAR_FIELD`, `SET_VAR_SPLIT`, aliased writes, and `STORE_STRUCT` as possible
+state mutations; if the resulting token cannot be proved exactly, reject the
+transition. Treat `ADDRESS_OF_FIELD` as an address escape just like
+`ADDRESS_OF`.
+
+If an IF condition is a predicate variable, map its SSA definition through
+`non_ssa_form`, verify the exact current non-SSA instruction earlier in the same
+row, and use that comparison instruction
+as the copy-chain use point. A state copy performed after the comparison cannot
+justify replay. Calls, syscalls, and intrinsics that receive a possible state
+pointer invalidate the token even if an earlier write was constant. A state
+address stored into memory also makes later unknown calls possible mutations,
+even without an explicit pointer argument. Exact zero-offset pointer copies may
+be supported when their unique, width-preserving definition chain dominates the
+store; field values, truncating copies, and other pointer arithmetic remain
+possible mutations and must reject the transition.
+
+Profiles and shared helpers must key variables/registers by Binary Ninja's real
+identity/equality, not by display names from `str` or `repr`. Auxiliary
+comparison rows may be treated as dispatcher blocks only after their full prefix
+passes routing-purity validation; otherwise they remain visible to observer
+proofs. Address escape includes a pointer stored in memory or retained through
+an addressed holder. After escape, unknown effects and non-exact stores reject
+the transition; `MLIL_UNIMPL` and `MLIL_UNIMPL_MEM` reject unconditionally.
 
 `plan_string_decrypt_calls(bv, func, mlil, mlil_stable)` returns string facts:
 

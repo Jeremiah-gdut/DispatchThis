@@ -116,15 +116,23 @@ def test_deflatten_profile_helpers_normalize_mlil_shapes():
 
     assert mlil_helpers.op_name(None) is None
     assert mlil_helpers.op_name(add(const(1), const(2))) == "MLIL_ADD"
-    assert mlil_helpers.same_var(NamedVar("state"), NamedVar("state"))
+    state = NamedVar("state")
+    assert mlil_helpers.same_var(state, state)
     assert not mlil_helpers.same_var(NamedVar("state"), NamedVar("other"))
 
     assert mlil_helpers.var_from_expr(var("state")) == "state"
     assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_FIELD", src="state")) == "state"
     ssa_var = types.SimpleNamespace(var="state")
     assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_SSA", src=ssa_var)) == "state"
-    assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_FIELD_SSA", src=ssa_var)) == "state"
+    assert mlil_helpers.var_from_expr(Expr("MLIL_VAR_SSA_FIELD", src=ssa_var)) == "state"
     assert mlil_helpers.var_from_expr(const(1)) is None
+    assert mlil_helpers.addressed_var(Expr("MLIL_ADDRESS_OF", src="state")) == "state"
+    assert (
+        mlil_helpers.addressed_var(
+            Expr("MLIL_ADDRESS_OF_FIELD", src="state", offset=4)
+        )
+        == "state"
+    )
 
     assert mlil_helpers.state_token(Expr("MLIL_CONST", constant=0x123456789, size=4)) == (
         0x23456789,
@@ -138,6 +146,134 @@ def test_deflatten_profile_helpers_normalize_mlil_shapes():
         0xFFFFFFFFFFFFFFFF,
         8,
     )
+
+
+def test_instruction_write_detection_covers_partial_split_and_aliased_forms():
+    ssa_state = types.SimpleNamespace(var="state")
+    mutations = (
+        Expr("MLIL_SET_VAR_FIELD", dest="state", offset=0, src=const(1)),
+        Expr("MLIL_SET_VAR_SPLIT", high="high", low="state", src=const(1)),
+        Expr(
+            "MLIL_SET_VAR_ALIASED",
+            dest=ssa_state,
+            prev=ssa_state,
+            src=const(1),
+        ),
+        Expr(
+            "MLIL_SET_VAR_ALIASED_FIELD",
+            dest=ssa_state,
+            prev=ssa_state,
+            offset=0,
+            src=const(1),
+        ),
+    )
+
+    assert all(
+        mlil_helpers.instruction_writes_variable(instruction, "state")
+        for instruction in mutations
+    )
+
+
+def test_same_var_does_not_merge_distinct_variables_with_the_same_display_name():
+    class NamedVariable:
+        def __init__(self, identity):
+            self.identity = identity
+
+        def __eq__(self, other):
+            return self is other
+
+        __hash__ = object.__hash__
+
+        def __str__(self):
+            return "state"
+
+    first = NamedVariable(1)
+    second = NamedVariable(2)
+
+    assert not mlil_helpers.same_var(first, second)
+
+
+def test_instruction_read_detection_covers_split_and_aliased_forms():
+    ssa_state = types.SimpleNamespace(var="state")
+    reads = (
+        Expr("MLIL_VAR_SPLIT", high="state", low="other"),
+        Expr("MLIL_VAR_SPLIT_SSA", high=ssa_state, low=ssa_state),
+        Expr("MLIL_VAR_ALIASED", src=ssa_state),
+        Expr("MLIL_VAR_ALIASED_FIELD", src=ssa_state, offset=0),
+    )
+
+    assert all(
+        mlil_helpers.instruction_reads_variable(read, "state")
+        for read in reads
+    )
+
+
+def test_address_may_alias_follows_variable_field_definitions_without_depth_cutoff():
+    address = Expr("MLIL_ADDRESS_OF_FIELD", src="state", offset=0)
+    definition = Expr(
+        "MLIL_SET_VAR_FIELD",
+        [address],
+        dest="holder",
+        offset=0,
+        src=address,
+    )
+    expression = Expr("MLIL_VAR_FIELD", src="holder", offset=0)
+    mlil = FakeMlil(defs={"holder": [definition]})
+
+    assert mlil_helpers.expression_may_address_variable(mlil, expression, "state")
+
+
+def test_address_may_escape_through_address_of_pointer_holder():
+    state_address = Expr("MLIL_ADDRESS_OF_FIELD", src="state", offset=0)
+    holder_definition = Expr(
+        "MLIL_SET_VAR",
+        [state_address],
+        dest="holder",
+        src=state_address,
+    )
+    holder_address = Expr("MLIL_ADDRESS_OF", src="holder")
+    retain = Expr(
+        "MLIL_CALL",
+        [holder_address],
+        params=[holder_address],
+    )
+    mlil = FakeMlil([retain], defs={"holder": [holder_definition]})
+
+    assert mlil_helpers.variable_address_escapes(mlil, "state")
+
+
+def test_address_alias_worklist_keeps_distinct_same_named_variables():
+    class NamedVariable:
+        def __init__(self, identity):
+            self.identity = identity
+
+        def __eq__(self, other):
+            return self is other
+
+        __hash__ = object.__hash__
+
+        def __repr__(self):
+            return "<var state>"
+
+        def __str__(self):
+            return "state"
+
+    unrelated = NamedVariable(1)
+    pointer = NamedVariable(2)
+    address = Expr("MLIL_ADDRESS_OF", src="state")
+    definitions = {
+        unrelated: [Expr("MLIL_SET_VAR", src=const(0), dest=unrelated)],
+        pointer: [Expr("MLIL_SET_VAR", [address], src=address, dest=pointer)],
+    }
+    expression = Expr(
+        "MLIL_ADD",
+        [var(unrelated), var(pointer)],
+        left=var(unrelated),
+        right=var(pointer),
+    )
+    mlil = FakeMlil(defs=definitions)
+
+    assert mlil_helpers.expression_may_address_variable(mlil, expression, "state")
 
 
 def test_iter_indirect_calls_skips_direct_constant_destinations():

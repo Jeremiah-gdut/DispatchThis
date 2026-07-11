@@ -2,6 +2,7 @@ import types
 from importlib import import_module
 
 import conftest  # noqa: F401
+import pytest
 
 
 driver = import_module("plugins.DispatchThis.profiles.driver_2_6")
@@ -124,6 +125,10 @@ def addr_of(name):
     return Expr("MLIL_ADDRESS_OF", src=name)
 
 
+def addr_of_field(name, offset=0):
+    return Expr("MLIL_ADDRESS_OF_FIELD", src=name, offset=offset)
+
+
 def set_var(dest, src, address=0x1000):
     return Expr("MLIL_SET_VAR", [src], dest=dest, src=src, vars_written={dest}, address=address)
 
@@ -149,6 +154,11 @@ def if_eq(name, token, true_idx, false_idx):
     return Expr("MLIL_IF", [cond], condition=cond, true=true_idx, false=false_idx)
 
 
+def if_compare(name, op, bound, true_idx, false_idx):
+    cond = Expr(op, [var(name), const(bound)], left=var(name), right=const(bound))
+    return Expr("MLIL_IF", [cond], condition=cond, true=true_idx, false=false_idx)
+
+
 def if_cond(true_idx, false_idx):
     cond = var("cond")
     return Expr("MLIL_IF", [cond], condition=cond, true=true_idx, false=false_idx)
@@ -164,7 +174,7 @@ def link(source, target):
     target.incoming_edges.append(edge)
 
 
-def build_driver_shape():
+def build_driver_shape(range_dispatch=False):
     entry = Block(0)
     row_a = Block(10)
     row_b = Block(20)
@@ -183,15 +193,27 @@ def build_driver_shape():
 
     row_a.add(set_var("x0", var("state")))
     row_a.add(set_var("temp0", var("x0")))
-    row_a.add(if_eq("temp0", 0x1111, real_a.start, row_b.start))
+    row_a.add(
+        if_compare("temp0", "MLIL_CMP_ULT", 0x1800, real_a.start, row_b.start)
+        if range_dispatch
+        else if_eq("temp0", 0x1111, real_a.start, row_b.start)
+    )
 
     row_b.add(set_var("x1", var("state")))
     row_b.add(set_var("temp1", var("x1")))
-    row_b.add(if_eq("temp1", 0x2222, real_b.start, row_c.start))
+    row_b.add(
+        if_compare("temp1", "MLIL_CMP_ULT", 0x2800, real_b.start, row_c.start)
+        if range_dispatch
+        else if_eq("temp1", 0x2222, real_b.start, row_c.start)
+    )
 
     row_c.add(set_var("x2", var("state")))
     row_c.add(set_var("temp2", var("x2")))
-    row_c.add(if_eq("temp2", 0x3333, real_c.start, loop.start))
+    row_c.add(
+        if_compare("temp2", "MLIL_CMP_ULT", 0x3800, real_c.start, loop.start)
+        if range_dispatch
+        else if_eq("temp2", 0x3333, real_c.start, loop.start)
+    )
 
     branch = real_a.add(if_cond(true_tail.start, false_tail.start))
     true_tail.add(set_var("next", const(0x2222)))
@@ -289,19 +311,45 @@ def test_driver_deflatten_hook_handles_stack_state_stores():
     plans = driver.plan_deflatten_redirections(None, func, il)
 
     entry_plan = next(plan for plan in plans if plan.get("entry"))
-    assert entry_plan["jump"] is entry_jump
+    assert entry_plan["exit_jumps"] == (entry_jump,)
     assert entry_plan["target_bb"].start == 40
-    assert entry_plan["state_tokens"] == {(0x1111, 4)}
+    assert entry_plan["state_token"] == (0x1111, 4)
 
     conditional = next(plan for plan in plans if plan["kind"] == "if_else")
     assert conditional["if_il"] is branch
     assert conditional["true_target"].start == real_b.start
     assert conditional["false_target"].start == real_c.start
-    assert conditional["state_tokens"] == {(0x2222, 4), (0x3333, 4)}
+    assert conditional["true_token"] == (0x2222, 4)
+    assert conditional["false_token"] == (0x3333, 4)
+    conditional_store = next(
+        ins
+        for ins in il.instructions
+        if ins.operation.name == "MLIL_STORE" and ins.il_basic_block.start == 70
+    )
+    assert conditional["obsolete_state_writes"] == {conditional_store.instr_index}
 
-    uncond = next(plan for plan in plans if plan.get("jump") is real_b_jump)
+    uncond = next(plan for plan in plans if real_b_jump in plan.get("exit_jumps", ()))
     assert uncond["target_bb"].start == real_c.start
-    assert uncond["state_tokens"] == {(0x3333, 4)}
+    assert uncond["state_token"] == (0x3333, 4)
+
+
+def test_driver_deflatten_hook_routes_stack_tokens_through_range_dispatcher():
+    il, entry_jump, branch, real_b_jump, real_b, real_c = build_driver_shape(
+        range_dispatch=True
+    )
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    entry_plan = next(plan for plan in plans if plan.get("entry"))
+    assert entry_plan["exit_jumps"] == (entry_jump,)
+    assert entry_plan["target_bb"].start == 40
+    conditional = next(plan for plan in plans if plan["kind"] == "if_else")
+    assert conditional["if_il"] is branch
+    assert conditional["true_target"].start == real_b.start
+    assert conditional["false_target"].start == real_c.start
+    uncond = next(plan for plan in plans if real_b_jump in plan.get("exit_jumps", ()))
+    assert uncond["target_bb"].start == real_c.start
 
 
 def test_driver_deflatten_hook_skips_conditional_tail_with_real_store():
@@ -322,6 +370,589 @@ def test_driver_deflatten_hook_skips_conditional_tail_with_real_store():
     plans = driver.plan_deflatten_redirections(None, func, il)
 
     assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_deflatten_hook_rejects_conditional_tail_writing_other_state():
+    il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    true_tail = next(bb for bb in il.basic_blocks if bb.start == 50)
+    tail_goto = true_tail.instructions[-1]
+    other_write = set_var("other_state", const(0x4444))
+    other_write.instr_index = tail_goto.instr_index
+    other_write.il_basic_block = true_tail
+    tail_goto.instr_index += 1
+    true_tail.instructions.insert(-1, other_write)
+    true_tail.end += 1
+    il.instructions.append(other_write)
+    il.by_index[other_write.instr_index] = other_write
+    il.by_index[tail_goto.instr_index] = tail_goto
+    il.defs["other_state"] = [other_write]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_conditional_rejects_arm_with_external_entry():
+    il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    true_tail = next(bb for bb in il.basic_blocks if bb.start == 50)
+    external = Block(200)
+    external_jump = external.add(goto())
+    link(external, true_tail)
+    il.basic_blocks.append(external)
+    il.instructions.append(external_jump)
+    il.by_index[external_jump.instr_index] = external_jump
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_conditional_rejects_state_observed_outside_dispatcher():
+    il, _entry_jump, branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    observed = set_var("observed", var("state"))
+    observed.instr_index = tail.instr_index
+    observed.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, observed)
+    real_b.end += 1
+    il.instructions.append(observed)
+    il.by_index[observed.instr_index] = observed
+    il.by_index[tail.instr_index] = tail
+    il.defs["observed"] = [observed]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_transition_rejects_path_without_state_token_definition():
+    il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    false_tail = next(bb for bb in il.basic_blocks if bb.start == 60)
+    false_definition = false_tail.instructions[0]
+    false_definition.operation = Op("MLIL_NOP")
+    il.defs["next"].remove(false_definition)
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not branch.il_basic_block for plan in plans)
+
+
+def test_driver_deflatten_hook_rejects_conditional_arm_with_looping_exit_path():
+    il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    store_tail = next(bb for bb in il.basic_blocks if bb.start == 70)
+    loop = next(bb for bb in il.basic_blocks if bb.start == 100)
+    old_jump = store_tail.instructions[-1]
+    loop_or_dispatch = if_cond(loop.start, store_tail.start)
+    loop_or_dispatch.instr_index = old_jump.instr_index
+    loop_or_dispatch.il_basic_block = store_tail
+    store_tail.instructions[-1] = loop_or_dispatch
+    il.instructions[il.instructions.index(old_jump)] = loop_or_dispatch
+    il.by_index[loop_or_dispatch.instr_index] = loop_or_dispatch
+    old_edge = store_tail.outgoing_edges.pop()
+    old_edge.target.incoming_edges.remove(old_edge)
+    link(store_tail, loop)
+    link(store_tail, store_tail)
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_state_pointer_redefinition_invalidates_state_store():
+    il, entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    entry = next(bb for bb in il.basic_blocks if bb.start == 0)
+    other_pointer = set_var("state_ptr", const(0xDEADBEEF))
+    other_pointer.instr_index = entry_jump.instr_index
+    other_pointer.il_basic_block = entry
+    entry_jump.instr_index += 1
+    entry.instructions.insert(-1, other_pointer)
+    entry.end += 1
+    il.instructions.append(other_pointer)
+    il.by_index[other_pointer.instr_index] = other_pointer
+    il.by_index[entry_jump.instr_index] = entry_jump
+    il.defs["state_ptr"].append(other_pointer)
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_transition_rejects_ambiguous_state_pointer_store():
+    il, entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    entry = next(bb for bb in il.basic_blocks if bb.start == 0)
+    other_pointer = set_var("state_ptr", const(0xDEADBEEF))
+    other_pointer.instr_index = entry_jump.instr_index
+    other_pointer.il_basic_block = entry
+    entry_jump.instr_index += 1
+    entry.instructions.insert(-1, other_pointer)
+    entry.end += 1
+    il.instructions.append(other_pointer)
+    il.by_index[other_pointer.instr_index] = other_pointer
+    il.by_index[entry_jump.instr_index] = entry_jump
+    il.defs["state_ptr"].append(other_pointer)
+
+    state_write = set_var("state", const(0x3333))
+    state_write.instr_index = real_b.start
+    state_write.il_basic_block = real_b
+    for ins in real_b.instructions:
+        ins.instr_index += 1
+        il.by_index[ins.instr_index] = ins
+    real_b.instructions.insert(0, state_write)
+    real_b.end += 1
+    il.instructions.append(state_write)
+    il.by_index[state_write.instr_index] = state_write
+    il.defs["state"].append(state_write)
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_state_pointer_definition_must_dominate_store():
+    il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    entry = next(bb for bb in il.basic_blocks if bb.start == 0)
+    old_definition = entry.instructions[1]
+    old_definition.operation = Op("MLIL_NOP")
+    il.defs["state_ptr"].remove(old_definition)
+    real_c = next(bb for bb in il.basic_blocks if bb.start == 90)
+    tail = real_c.instructions[-1]
+    late_definition = set_var("state_ptr", addr_of("state"))
+    late_definition.instr_index = tail.instr_index
+    late_definition.il_basic_block = real_c
+    tail.instr_index += 1
+    real_c.instructions.insert(-1, late_definition)
+    real_c.end += 1
+    il.instructions.append(late_definition)
+    il.by_index[late_definition.instr_index] = late_definition
+    il.by_index[tail.instr_index] = tail
+    il.defs["state_ptr"] = [late_definition]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_dispatcher_alias_observer_rejects_redirection():
+    il, _entry_jump, branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    observed = set_var("observed", var("temp0"))
+    observed.instr_index = tail.instr_index
+    observed.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, observed)
+    real_b.end += 1
+    il.instructions.append(observed)
+    il.by_index[observed.instr_index] = observed
+    il.by_index[tail.instr_index] = tail
+    il.defs["observed"] = [observed]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_dispatcher_alias_definition_must_cover_every_entry():
+    il, entry_jump, _branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    entry = next(bb for bb in il.basic_blocks if bb.start == 0)
+    row_a = next(bb for bb in il.basic_blocks if bb.start == 10)
+    alias_definition = row_a.instructions.pop(1)
+    row_if = row_a.instructions[-1]
+    row_if.instr_index -= 1
+    row_a.end -= 1
+    il.by_index[row_if.instr_index] = row_if
+
+    alias_definition.instr_index = entry_jump.instr_index
+    alias_definition.il_basic_block = entry
+    entry_jump.instr_index += 1
+    entry.instructions.insert(-1, alias_definition)
+    entry.end += 1
+    il.by_index[alias_definition.instr_index] = alias_definition
+    il.by_index[entry_jump.instr_index] = entry_jump
+    func = types.SimpleNamespace(start=0x36D10)
+
+    assert driver.plan_deflatten_redirections(None, func, il) == []
+
+
+def test_driver_transition_rejects_struct_store_to_state():
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    struct_store = Expr(
+        "MLIL_STORE_STRUCT",
+        [var("ptr_b"), const(0x1111)],
+        dest=var("ptr_b"),
+        offset=0,
+        src=const(0x1111),
+    )
+    struct_store.instr_index = tail.instr_index
+    struct_store.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, struct_store)
+    real_b.end += 1
+    il.instructions.append(struct_store)
+    il.by_index[struct_store.instr_index] = struct_store
+    il.by_index[tail.instr_index] = tail
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_transition_rejects_arithmetic_state_pointer_store():
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    pointer_copy, state_store, tail = real_b.instructions
+    state_write = set_var("state", const(0x2222))
+    arithmetic_pointer = set_var(
+        "q",
+        binary("MLIL_ADD", var("ptr_b"), const(0)),
+    )
+    state_store.dest = var("q")
+    state_store.children = [state_store.dest, state_store.src]
+    real_b.instructions = [
+        state_write,
+        pointer_copy,
+        arithmetic_pointer,
+        state_store,
+        tail,
+    ]
+    real_b.end = real_b.start + len(real_b.instructions)
+    for index, instruction in enumerate(real_b.instructions, real_b.start):
+        instruction.instr_index = index
+        instruction.il_basic_block = real_b
+        il.by_index[index] = instruction
+    il.instructions.extend((state_write, arithmetic_pointer))
+    il.defs.setdefault("state", []).append(state_write)
+    il.defs["q"] = [arithmetic_pointer]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_transition_rejects_field_value_as_exact_state_pointer():
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    pointer_copy = real_b.instructions[0]
+    field_pointer = Expr(
+        "MLIL_VAR_FIELD",
+        src="state_ptr",
+        offset=4,
+        size=8,
+    )
+    pointer_copy.src = field_pointer
+    pointer_copy.children = [field_pointer]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_transition_rejects_truncated_state_pointer_copy():
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    pointer_copy = real_b.instructions[0]
+    pointer_copy.size = 4
+    pointer_copy.src.size = 8
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_transition_accepts_exact_zero_offset_state_pointer_store():
+    il, _entry_jump, _branch, real_b_jump, real_b, real_c = build_driver_shape()
+    pointer_copy, state_store, tail = real_b.instructions
+    arithmetic_pointer = set_var(
+        "q",
+        binary("MLIL_ADD", var("ptr_b"), const(0)),
+    )
+    state_store.dest = var("q")
+    state_store.children = [state_store.dest, state_store.src]
+    real_b.instructions = [pointer_copy, arithmetic_pointer, state_store, tail]
+    real_b.end = real_b.start + len(real_b.instructions)
+    for index, instruction in enumerate(real_b.instructions, real_b.start):
+        instruction.instr_index = index
+        instruction.il_basic_block = real_b
+        il.by_index[index] = instruction
+    il.instructions.append(arithmetic_pointer)
+    il.defs["q"] = [arithmetic_pointer]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    plan = next(plan for plan in plans if real_b_jump in plan.get("exit_jumps", ()))
+    assert plan["target_bb"] is real_c
+    assert plan["state_token"] == (0x3333, 4)
+
+
+def test_driver_conditional_rejects_partial_state_write_in_successor():
+    il, _entry_jump, branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    partial_write = Expr(
+        "MLIL_SET_VAR_FIELD",
+        [const(0x1111)],
+        dest="state",
+        offset=0,
+        src=const(0x1111),
+    )
+    partial_write.instr_index = tail.instr_index
+    partial_write.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, partial_write)
+    real_b.end += 1
+    il.instructions.append(partial_write)
+    il.by_index[partial_write.instr_index] = partial_write
+    il.by_index[tail.instr_index] = tail
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_transition_rejects_state_address_passed_to_call():
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    state_call = call(const(0x5000), [addr_of_field("state", 0)])
+    state_call.instr_index = tail.instr_index
+    state_call.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, state_call)
+    real_b.end += 1
+    il.instructions.append(state_call)
+    il.by_index[state_call.instr_index] = state_call
+    il.by_index[tail.instr_index] = tail
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+@pytest.mark.parametrize("operation", ["MLIL_UNIMPL", "MLIL_UNIMPL_MEM"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_driver_transition_rejects_unmodeled_instruction(operation, nested):
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    unmodeled_expr = Expr(operation)
+    unmodeled = (
+        set_var("unmodeled_result", unmodeled_expr)
+        if nested
+        else unmodeled_expr
+    )
+    unmodeled.instr_index = tail.instr_index
+    unmodeled.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, unmodeled)
+    real_b.end += 1
+    il.instructions.append(unmodeled)
+    il.by_index[unmodeled.instr_index] = unmodeled
+    il.by_index[tail.instr_index] = tail
+    if nested:
+        il.defs["unmodeled_result"] = [unmodeled]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+@pytest.mark.parametrize(
+    "mutate_op",
+    ["MLIL_CALL", "MLIL_UNIMPL_MEM", "MLIL_TRAP", "MLIL_BP"],
+)
+def test_driver_transition_rejects_unknown_effect_after_retained_state_address(
+    mutate_op,
+):
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    entry = il.basic_blocks[0]
+    entry_tail = entry.instructions[-1]
+    register = call(const(0x5000), [addr_of_field("state", 0)])
+    register.instr_index = entry_tail.instr_index
+    register.il_basic_block = entry
+    entry_tail.instr_index += 1
+    entry.instructions.insert(-1, register)
+    entry.end += 1
+
+    mutate_tail = real_b.instructions[-1]
+    mutate = (
+        call(const(0x6000), [])
+        if mutate_op == "MLIL_CALL"
+        else Expr(mutate_op)
+    )
+    mutate.instr_index = mutate_tail.instr_index
+    mutate.il_basic_block = real_b
+    mutate_tail.instr_index += 1
+    real_b.instructions.insert(-1, mutate)
+    real_b.end += 1
+
+    il.instructions.extend((register, mutate))
+    for instruction in (register, entry_tail, mutate, mutate_tail):
+        il.by_index[instruction.instr_index] = instruction
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+@pytest.mark.parametrize("hidden_source_kind", ["token", "address"])
+def test_driver_transition_rejects_store_through_reloaded_state_address(
+    hidden_source_kind,
+):
+    il, _entry_jump, _branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    publish = store(const(0x9000), addr_of_field("state", 0))
+    pointer_definition = set_var(
+        "escaped_pointer",
+        load(const(0x9000), size=8),
+    )
+    hidden_state_write = store(
+        var("escaped_pointer"),
+        (
+            const(0x1111)
+            if hidden_source_kind == "token"
+            else addr_of_field("state", 0)
+        ),
+    )
+    for offset, instruction in enumerate(
+        (publish, pointer_definition, hidden_state_write),
+    ):
+        instruction.instr_index = tail.instr_index + offset
+        instruction.il_basic_block = real_b
+        il.by_index[instruction.instr_index] = instruction
+    tail.instr_index += 3
+    il.by_index[tail.instr_index] = tail
+    real_b.instructions[-1:-1] = [publish, pointer_definition, hidden_state_write]
+    real_b.end += 3
+    il.instructions.extend((publish, pointer_definition, hidden_state_write))
+    il.defs["escaped_pointer"] = [pointer_definition]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("obb") is not real_b for plan in plans)
+
+
+def test_driver_conditional_rejects_state_field_address_escape():
+    il, _entry_jump, branch, _real_b_jump, real_b, _real_c = build_driver_shape()
+    tail = real_b.instructions[-1]
+    observed = set_var("observed", addr_of_field("state", 4))
+    observed.instr_index = tail.instr_index
+    observed.il_basic_block = real_b
+    tail.instr_index += 1
+    real_b.instructions.insert(-1, observed)
+    real_b.end += 1
+    il.instructions.append(observed)
+    il.by_index[observed.instr_index] = observed
+    il.by_index[tail.instr_index] = tail
+    il.defs["observed"] = [observed]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(plan.get("if_il") is not branch for plan in plans)
+
+
+def test_driver_dispatcher_row_rejects_unrelated_assignment():
+    il, _entry_jump, _branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    row_a = next(bb for bb in il.basic_blocks if bb.start == 10)
+    tail = row_a.instructions[-1]
+    important = set_var("important", const(1))
+    important.instr_index = tail.instr_index
+    important.il_basic_block = row_a
+    tail.instr_index += 1
+    row_a.instructions.insert(-1, important)
+    row_a.end += 1
+    il.instructions.append(important)
+    il.by_index[important.instr_index] = important
+    il.by_index[tail.instr_index] = tail
+    il.defs["important"] = [important]
+    func = types.SimpleNamespace(start=0x36D10)
+
+    assert driver.plan_deflatten_redirections(None, func, il) == []
+
+
+def test_driver_analysis_does_not_hide_impure_non_dominant_comparison_row():
+    il, _entry_jump, _branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    extra_row = Block(110)
+    alias = extra_row.add(set_var("extra_state", var("state")))
+    extra_row.add(call(const(0x5000), []))
+    left = var("extra_state")
+    right = const(0x1111000011110001, size=8)
+    condition = Expr(
+        "MLIL_CMP_E",
+        [left, right],
+        left=left,
+        right=right,
+    )
+    extra_row.add(
+        Expr(
+            "MLIL_IF",
+            [condition],
+            condition=condition,
+            true=80,
+            false=100,
+        )
+    )
+    il.basic_blocks.append(extra_row)
+    il.instructions.extend(extra_row.instructions)
+    for instruction in extra_row:
+        il.by_index[instruction.instr_index] = instruction
+    il.defs["extra_state"] = [alias]
+
+    analysis = driver._analyze_driver_dispatcher(il)
+
+    assert analysis is not None
+    assert extra_row.start not in analysis["dispatcher_starts"]
+
+
+def test_driver_entry_rejects_external_entry_into_intermediate_region():
+    il, entry_jump, _branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
+    entry = next(bb for bb in il.basic_blocks if bb.start == 0)
+    dispatcher = next(bb for bb in il.basic_blocks if bb.start == 10)
+    old_edge = entry.outgoing_edges.pop()
+    old_edge.target.incoming_edges.remove(old_edge)
+    middle = Block(200)
+    middle.add(set_var("middle_value", const(1)))
+    middle.add(goto())
+    exit_tail = Block(210)
+    exit_tail.add(set_var("exit_value", const(2)))
+    exit_tail.add(goto())
+    external = Block(220)
+    external.add(goto())
+    link(entry, middle)
+    link(middle, exit_tail)
+    link(exit_tail, dispatcher)
+    link(external, middle)
+    for block in (middle, exit_tail, external):
+        il.basic_blocks.append(block)
+        for instruction in block:
+            il.instructions.append(instruction)
+            il.by_index[instruction.instr_index] = instruction
+            if instruction.operation.name == "MLIL_SET_VAR":
+                il.defs.setdefault(instruction.dest, []).append(instruction)
+    func = types.SimpleNamespace(start=0x36D10)
+
+    plans = driver.plan_deflatten_redirections(None, func, il)
+
+    assert all(not plan.get("entry") for plan in plans)
+    assert entry_jump not in {
+        jump
+        for plan in plans
+        for jump in plan.get("exit_jumps", ())
+    }
 
 
 def test_driver_global_constant_hook_plans_driver_blob_base_slot():

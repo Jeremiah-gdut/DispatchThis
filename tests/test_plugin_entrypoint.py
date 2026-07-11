@@ -77,6 +77,7 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     assert all("OBB" not in description for description in descriptions)
     assert configs[plugin.STRING_DECRYPT_SETTING]["title"] == "String Decrypt"
     assert configs[plugin.STRING_DECRYPT_SETTING]["eligibility"] == {"auto": {"default": False}}
+    assert "extension.DispatchThis.Cleanup" not in configs
 
     resolver_ids = [
         "extension.DispatchThis.IndirectPatcher",
@@ -110,6 +111,7 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(
         plugin.DEFLATTEN_SETTING
     )
+    assert "extension.DispatchThis.Cleanup" not in high_level
     assert CapturedSettings.writes == []
     names = [item[0] for item in CapturedPluginCommand.registered]
     assert "DispatchThis\\Toggle Resolver" in names

@@ -6,15 +6,17 @@ DispatchThis/
 │                               profile settings, and Function Analysis setting activities.
 ├── workflow.py                 The workflow activity callbacks (LLIL jump resolve,
 │                               MLIL call/global resolve, branch translation,
-│                               string decrypt, deflatten, phase cleanup,
-│                               deflatten cleanup, and Function-scoped analysis gating.
+│                               correlated stores, string decrypt, deflatten,
+│                               phase cleanup, and Function-scoped analysis gating).
 ├── workflow_state.py           Function-scoped workflow phase receipts and stability.
 ├── ui.py                       Function context-menu commands and shortcuts for
 │                               selecting profiles and toggling workflow settings.
 ├── profiles/
 │   ├── __init__.py             Bundled resolver profile registry and contract validation.
 │   ├── default.py              Built-in resolver profile for the current binary.
-│   └── dyzznb.py               Bundled resolver profile for the dyzznb sample.
+│   ├── driver_2_6.py           Bundled profile for the driver 2.6 sample.
+│   ├── dyzznb.py               Bundled resolver profile for the dyzznb sample.
+│   └── valorant_2_6.py         Bundled profile for the Valorant 2.6 sample.
 ├── helpers/
 │   ├── __init__.py             Stable profile-helper import surface.
 │   ├── llil.py                 LLIL indirect-jump, definition, and constant helpers.
@@ -30,12 +32,13 @@ DispatchThis/
 │   │                           including opaque-predicate offset selection.
 │   └── medium/
 │       ├── indirect_calls.py   MLIL indirect-call decode fold and current-IL rewrites.
+│       ├── branch_conditions.py Resolved switch-to-if reconstruction.
 │       ├── global_constants.py MLIL global constant slot planner.
+│       ├── correlated_stores.py Atomic path-correlated store reconstruction.
 │       ├── string_decrypt.py   MLIL direct-call string decrypt recognizer/commenter.
 │       ├── phase_cleanup.py    One-shot branch/call target-decode cleanup.
 │       ├── rewrite.py          Atomic MLIL copy-transform backend for control-flow rewrites.
-│       ├── deflatten.py        Computes dispatcher plans and builds replacement MLIL.
-│       └── nop_pass.py         Deflatten state-write NOPing.
+│       └── deflatten.py        Computes dispatcher plans and atomically rewrites exits/state writes.
 ├── docs/                       This documentation.
 │   ├── API.md                  Helper API reference for resolver profiles.
 │   ├── conditional-deflattening.md
@@ -98,6 +101,11 @@ adjustments, receipts, and call-target phase cleanup.
 Finds `.data` qword slots that are used as read-only constant pointer bases and returns
 type-mutation plans for the workflow callback.
 
+### `passes/medium/correlated_stores.py`
+Applies profile-proved path-correlated global-store plans in one MLIL copy-transform:
+concrete stores are inserted before their owning predecessor gotos and the merged store is
+NOPed. The workflow runs it only after global constant recovery is stable.
+
 ### `passes/medium/string_decrypt.py`
 Scans the current function's MLIL direct calls, recognizes calls to deflattened
 sample-family string decrypt functions, decodes the source blob, and writes function-level
@@ -110,12 +118,10 @@ control flow or remove deflatten state writes.
 
 ### `passes/medium/deflatten.py`
 `compute_redirections` identifies the dominant dispatcher comparison cluster, maps state
-tokens to target blocks, and returns terminator re-pointings;
-`rewrite_redirections_mlil` turns all selected plans into one atomic replacement MLIL
-function. The workflow installs it before publishing deflatten state maps. Handles
-unconditional and simple conditional transitions; see
+tokens to target blocks by concrete CFG replay, and returns terminator re-pointings with
+exact `obsolete_state_writes` instruction indices. `rewrite_redirections_mlil` turns every
+selected exit or explicit conditional arm-exit/condition rewrite and exact state-write NOP into one atomic replacement
+MLIL function. Equality, inequality, and signed/unsigned ordering dispatchers are
+supported through fail-closed concrete replay; symbolic interval solving is not. Handles unconditional and simple conditional
+transitions; see
 [`conditional-deflattening.md`](conditional-deflattening.md).
-
-### `passes/medium/nop_pass.py`
-`nop_deflatten_state_writes` runs after the deflattener and NOPs dispatcher state writes
-using the state tokens and variables recorded by the workflow.

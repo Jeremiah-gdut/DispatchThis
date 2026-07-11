@@ -429,6 +429,14 @@ def test_call_profile_follows_ssa_call_destination():
     }]
 
 
+def test_peel_ssa_value_uses_binary_ninja_ssa_field_write_name():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    value = Expr("MLIL_CONST", constant=0x42)
+    definition = Expr("MLIL_SET_VAR_SSA_FIELD", [value], src=value)
+
+    assert valorant._peel_ssa_value(None, definition) is value
+
+
 def test_call_profile_accepts_external_symbol_target():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     target = 0x8956BB63505153E0
@@ -648,6 +656,26 @@ def test_value_folding_preserves_bindings_through_direct_phi_expr():
     ssa = FakeSSA({selected: set_reg(reg(bound), 1)})
 
     assert valorant._values(None, ssa, phi(selected), bindings={bound: 0x77}) == {0x77}
+
+
+def test_binding_lookup_does_not_merge_distinct_same_named_variables():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+
+    class NamedVariable:
+        def __eq__(self, other):
+            return self is other
+
+        __hash__ = object.__hash__
+
+        def __str__(self):
+            return "state"
+
+    first = NamedVariable()
+    second = NamedVariable()
+
+    bindings = {first: 0x77, str(first): 0x77}
+
+    assert valorant._bound_value(bindings, second) is None
 
 
 def test_string_decoder_stays_profile_local():

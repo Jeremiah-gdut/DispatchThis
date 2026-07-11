@@ -183,8 +183,8 @@ Generic same-arm PHI evaluator for profiles with their own value folder.
 - `ssa`: LLIL SSA function-like object supporting register definition lookup.
 - `expr`: The LLIL expression to evaluate.
 - `value_func`: Callable with signature `value_func(operand, bindings=None)`.
-  It must return a `set[int]`. `bindings` maps PHI registers, and their string
-  names, to the arm value selected by the helper.
+  It must return a `set[int]`. `bindings` maps the real PHI register objects to
+  the arm value selected by the helper; display names are never identity keys.
 - `max_depth`: Maximum recursive expression/definition depth when collecting
   PHI registers.
 
@@ -201,12 +201,14 @@ fall back to their normal value folder on `None`.
   selected operand to fold to exactly one value.
 - Assumes sibling PHIs use matching operand order for the same predecessor
   edges; callers should fall back when that shape is not known.
+- Keeps distinct same-named register objects separate.
 - Does not mutate IL or workflow state.
 
 ## `mlil`
 
 MLIL helpers inspect medium-level IL for call targets, global slot analysis,
-expression walking, operation queries, and cleanup-root collection.
+expression walking, operation queries, concrete dispatcher comparisons, and
+cleanup-root collection.
 
 ### Constants
 
@@ -243,9 +245,10 @@ same_var(left, right)
 
 **Purpose**
 
-Compare Binary Ninja variable-like objects by direct equality, falling back to
-their string form. This is useful when matching state variables across related
-MLIL objects whose wrappers do not compare equal.
+Compare Binary Ninja variable-like objects only by their real equality/identity.
+Display names are deliberately not a fallback: distinct variables may render
+with the same name. SSA/aliased wrappers must be normalized explicitly before
+calling this helper.
 
 ### `var_from_expr`
 
@@ -257,8 +260,146 @@ var_from_expr(expr)
 
 **Purpose**
 
-Return the underlying variable from `MLIL_VAR`, `MLIL_VAR_FIELD`,
-`MLIL_VAR_SSA`, or `MLIL_VAR_FIELD_SSA`; otherwise return `None`.
+Return the underlying base variable from full, field, SSA-field, or aliased
+variable-read forms; otherwise return `None`. This broad helper is for observer
+and may-alias analysis, not proof that an expression contains a complete value.
+
+### `direct_var_from_expr`
+
+**Signature**
+
+```python
+direct_var_from_expr(expr)
+```
+
+**Purpose**
+
+Return the underlying variable only for a whole `MLIL_VAR` or `MLIL_VAR_SSA`
+read. Dispatcher copy chains and exact pointer proofs use this narrower helper
+so a field, split, or aliased value cannot stand in for the complete state.
+
+### `addressed_var`
+
+**Signature**
+
+```python
+addressed_var(expr)
+```
+
+**Purpose**
+
+Return the variable named by `MLIL_ADDRESS_OF` or
+`MLIL_ADDRESS_OF_FIELD`; otherwise return `None`. This explicit check is needed
+because Binary Ninja does not reliably include field-address operations in the
+generic address-taken metadata.
+
+### `instruction_writes_variable`
+
+**Signature**
+
+```python
+instruction_writes_variable(instruction, variable)
+```
+
+**Purpose**
+
+Conservatively detect full, field, split, SSA, or aliased writes to one
+variable. The helper combines `vars_written` with explicit operation fields so
+`SET_VAR_FIELD`, `SET_VAR_SPLIT`, and `SET_VAR_ALIASED(_FIELD)` cannot be
+silently treated as read-only.
+
+### `instruction_reads_variable`
+
+**Signature**
+
+```python
+instruction_reads_variable(instruction, variable)
+```
+
+**Purpose**
+
+Conservatively detect full, field, split, SSA, or aliased reads of one variable.
+The helper combines explicit expression forms with `vars_read`, so observer
+proofs do not miss reads that Binary Ninja exposes only as variable operands.
+
+### `expression_may_address_variable`
+
+**Signature**
+
+```python
+expression_may_address_variable(mlil, expression, variable)
+```
+
+**Purpose**
+
+Conservatively follow expression trees and all available full, field, split,
+SSA, or aliased variable definitions to decide whether `ADDRESS_OF` or
+`ADDRESS_OF_FIELD` of one variable can reach an expression. Traversal is
+cycle-guarded by real variable equality without a fixed depth cutoff; an
+incomplete definition query is treated as a possible alias. Taking the address
+of a holder also follows that holder's definitions, so `holder = &state;
+call(&holder)` is recognized. This is a may-alias guard, not proof that a pointer
+is an exact store destination.
+
+### `variable_address_escapes`
+
+**Signature**
+
+```python
+variable_address_escapes(mlil, variable)
+```
+
+**Purpose**
+
+Return whether an explicit store publishes, or an unknown memory-effecting
+operation receives and can retain, a direct or definition-derived address of one
+variable. Deflatten planners use this function-level fact so later no-argument
+calls or unresolved stores cannot silently recover and mutate dispatcher state.
+
+### `current_non_ssa_instruction`
+
+**Signature**
+
+```python
+current_non_ssa_instruction(mlil, ssa_instruction)
+```
+
+**Purpose**
+
+Map an SSA instruction through `non_ssa_form`, require a non-negative exact
+instruction index, and verify the operation, expression identity, and address
+against current non-SSA MLIL. Return `None` when any identity check fails.
+
+### `has_unknown_memory_effect`
+
+**Signature**
+
+```python
+has_unknown_memory_effect(instruction)
+```
+
+**Purpose**
+
+Identify call, tail-call, syscall, intrinsic, trap, breakpoint, and unimplemented
+memory operations that may mutate memory outside explicit `STORE` handling. A
+deflatten planner combines this with `expression_may_address_variable`; passing
+a possible state pointer to one of these operations invalidates concrete token
+proof.
+
+### `has_unmodeled_semantics`
+
+**Signature**
+
+```python
+has_unmodeled_semantics(instruction)
+```
+
+**Purpose**
+
+Identify `MLIL_UNIMPL` and `MLIL_UNIMPL_MEM` anywhere in an instruction's
+expression tree. Their semantics are unavailable, so a deflatten transition
+containing either operation cannot prove a stable state token and must fail
+closed even when no state address is known to escape.
 
 ### `state_token`
 
@@ -273,6 +414,218 @@ state_token(const_expr, fallback_size=None)
 Return a `(value, size_in_bytes)` token from an MLIL constant expression. If the
 constant expression has no size and no `fallback_size` is supplied, values that
 are negative or wider than 32 bits use size `8`; other values use size `4`.
+
+### `comparison_parts`
+
+**Signature**
+
+```python
+comparison_parts(condition)
+```
+
+**Purpose**
+
+Parse one supported variable/constant MLIL comparison without losing operand
+order, token width, or signedness.
+
+**Parameters**
+
+- `condition`: An MLIL comparison expression.
+
+**Returns**
+
+A dictionary with `op`, `var`, `bound`, and `var_on_left`, or `None` when the
+shape or operation is unsupported. `bound` is the normalized
+`(value, size_in_bytes)` returned by `state_token`; `var_on_left` records whether
+the original expression was `var op constant` rather than `constant op var`.
+
+**Key behavior and limits**
+
+- Supports `MLIL_CMP_E`, `MLIL_CMP_NE`, and signed/unsigned `MLIL_CMP_SLT`,
+  `ULT`, `SLE`, `ULE`, `SGE`, `UGE`, `SGT`, and `UGT`.
+- Requires one exact whole-variable expression accepted by
+  `direct_var_from_expr` and one
+  `MLIL_CONST`. It does not follow variable definitions or accept
+  variable/variable comparisons.
+- Preserves the original operand order; it does not reverse or normalize the
+  comparison operator.
+- Does not infer ranges or mutate IL.
+
+### `evaluate_comparison`
+
+**Signature**
+
+```python
+evaluate_comparison(parts, token)
+```
+
+**Purpose**
+
+Evaluate one concrete normalized state token against parsed dispatcher
+comparison parts using the comparison's bitvector semantics.
+
+**Parameters**
+
+- `parts`: The dictionary returned by `comparison_parts`.
+- `token`: A normalized `(value, size_in_bytes)` state token.
+
+**Returns**
+
+`True` or `False` for a supported same-width comparison, or `None` when the token
+and comparison bound have different widths.
+
+**Key behavior and limits**
+
+- Uses `var_on_left` to preserve the original operand order.
+- Treats `SLT`, `SLE`, `SGE`, and `SGT` operands as two's-complement signed
+  integers at the token width. Unsigned and equality comparisons use the
+  normalized masked values.
+- Evaluates only the supplied concrete token. It does not solve symbolic
+  intervals, choose a CFG edge, or accept malformed `parts` from outside
+`comparison_parts`.
+
+### `all_paths_reach_stops`
+
+**Signature**
+
+```python
+all_paths_reach_stops(basic_blocks, scope, stop_starts)
+```
+
+**Purpose**
+
+Prove that every CFG path within a selected block scope terminates at one of the
+given stop blocks.
+
+**Key behavior and limits**
+
+- Uses a least fixed point: a scoped block is proved only after all of its
+  successors are stops or already proved blocks.
+- Rejects terminal blocks, edges outside both sets, and cycles that admit an
+  infinite path, even when another edge can reach a stop.
+- Proves termination only; it does not choose or evaluate a dispatcher target.
+
+### `row_local_copy_chain`
+
+**Signature**
+
+```python
+row_local_copy_chain(mlil, variable, row, use)
+```
+
+**Purpose**
+
+Return the tuple of direct, equal-width variable copies from a dispatcher
+comparison variable back to the input variable shared by the comparison rows.
+Return `None` when a row-local alias has multiple definitions, an impure source,
+a cycle, or a definition at or after the comparison.
+
+The final variable is the dispatcher state channel; its definitions may live in
+the original-block regions. Those definitions are token evidence for the
+transition planner, not part of the dispatcher row copy chain.
+
+### `all_paths_hit_blocks`
+
+**Signature**
+
+```python
+all_paths_hit_blocks(basic_blocks, starts, scope, hit_starts)
+```
+
+**Purpose**
+
+Prove that every scoped CFG path from the selected entry blocks executes a
+designated hit block before leaving the scope.
+
+**Key behavior and limits**
+
+- Treats a hit block as satisfied on entry because MLIL instructions execute in
+  block order before its terminator.
+- Uses a least fixed point, so a path that reaches a stop or cycle without a hit
+  is not proved.
+- Does not inspect the value written in a hit block.
+
+### `dependency_variables`
+
+**Signature**
+
+```python
+dependency_variables(mlil, expressions, scope)
+```
+
+**Purpose**
+
+Collect variables on definition chains rooted at expressions, following only
+definitions inside the selected basic-block scope.
+
+**Key behavior and limits**
+
+- Follows every in-scope definition returned by Binary Ninja and guards cycles.
+- Records variables whose definitions lie outside the scope as inputs, without
+  following those definitions.
+- Does not decide reaching-definition feasibility or prove an expression pure.
+
+### `transitive_definition_variables`
+
+**Signature**
+
+```python
+transitive_definition_variables(mlil, variables)
+```
+
+**Purpose**
+
+Collect every variable reachable through the available definition-source graph,
+including definitions represented outside a selected block scope.
+
+**Key behavior and limits**
+
+- Follows every definition and guards variable cycles.
+- Is an inspection primitive for callers that intentionally need the complete
+  definition graph; it is not a reaching-definition proof.
+- Does not choose a reaching definition or prove that a definition dominates a
+  use.
+
+### `variables_are_scope_local`
+
+**Signature**
+
+```python
+variables_are_scope_local(mlil, variables, scope)
+```
+
+**Purpose**
+
+Check that selected variables have no reads or address escapes outside a basic
+block scope.
+
+**Key behavior and limits**
+
+- Scans expression trees outside the scope for variable reads and both
+  `MLIL_ADDRESS_OF` and `MLIL_ADDRESS_OF_FIELD` uses.
+- Is deliberately conservative for non-SSA variables with unrelated uses.
+- Does not prove dominance or memory aliasing.
+
+### `definitions_cover_all_paths`
+
+**Signature**
+
+```python
+definitions_cover_all_paths(mlil, starts, scope, expressions)
+```
+
+**Purpose**
+
+Prove that every dependency with an in-scope definition is definitely defined
+before each in-scope use on every path from the selected entries.
+
+**Key behavior and limits**
+
+- Computes a forward must-defined set with predecessor intersection.
+- Treats variables defined only outside the scope as inputs; a variable with an
+  in-scope definition must be established on every relevant path.
+- Complements token-value agreement and termination checks; it does not fold
+  values or choose reaching definitions by itself.
 
 ### `walk_expr`
 

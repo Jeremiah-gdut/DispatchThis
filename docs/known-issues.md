@@ -14,15 +14,23 @@ output against the disassembly before trusting it.
 ## Cleanup residue
 
 - **Residue can survive.** Phase cleanup is intentionally narrow: it only NOPs dead pure
-  target-decode assignments rooted at resolved branch or call sites. Deflatten cleanup only
-  NOPs dispatcher state writes recorded by deflattening. Other harmless decode-gadget
-  residue or global-slot artifacts can remain in MLIL/HLIL.
+  target-decode assignments rooted at resolved branch or call sites. Deflattening NOPs only
+  the exact state-write instruction indices proved obsolete by a recovered transition. If
+  the selected rewrite preserves state execution, uncertain cleanup leaves those writes in
+  place while retaining CFG recovery. A condition shortcut that would bypass them is
+  rejected instead. Other harmless decode-gadget residue or global-slot artifacts can remain in
+  MLIL/HLIL.
 
 ## Conditional reconstruction
 
-- **Conditional deflattening is narrow.** It handles branch regions where each arm writes
-  exactly one known dispatcher state token. More complex state-selection chains or impure
-  branch tails are left intact. See [`conditional-deflattening.md`](conditional-deflattening.md).
+- **Conditional deflattening is narrow.** It handles pure branch regions where all state
+  writes in each arm resolve to one known dispatcher token. More complex state-selection
+  chains or impure branch tails are left intact. See
+  [`conditional-deflattening.md`](conditional-deflattening.md).
+- **Ordering dispatchers require concrete tokens.** Equality, inequality, and signed or
+  unsigned `LT`, `LE`, `GT`, and `GE` comparisons are supported by replaying a recovered
+  concrete token through the dispatcher CFG. Symbolic state ranges, variable/variable
+  comparisons, mixed-width tokens, and ambiguous routes are left flattened.
 
 ## Operational
 

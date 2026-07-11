@@ -2,7 +2,7 @@ from collections import deque
 
 from . import valorant_2_6
 from ..helpers import facts, memory, mlil
-from ..utils.log import log_debug, log_info, log_warn
+from ..utils.log import log_info, log_warn
 
 
 PROFILE_ID = "driver_2_6"
@@ -232,47 +232,66 @@ def _block_at(il, instr_index):
     return il[instr_index].il_basic_block
 
 
-def _resolve_condition(cond):
-    if mlil.op_name(cond) != "MLIL_VAR":
-        return cond
-    try:
-        definition = cond.function.ssa_form.get_ssa_var_definition(cond.ssa_form.src)
-    except AttributeError:
-        return cond
-    return getattr(definition, "src", cond) if definition is not None else cond
-
-
-def _comparison_parts(cond):
-    cond = _resolve_condition(cond)
-    op = mlil.op_name(cond)
-    if op not in ("MLIL_CMP_E", "MLIL_CMP_NE"):
+def _comparison_var(cond):
+    if not (mlil.op_name(cond) or "").startswith("MLIL_CMP"):
         return None
-    sides = (getattr(cond, "left", None), getattr(cond, "right", None))
-    var_expr = next((side for side in sides if mlil.var_from_expr(side) is not None), None)
-    const_expr = next((side for side in sides if mlil.op_name(side) == "MLIL_CONST"), None)
-    if var_expr is None or const_expr is None:
-        return None
-    return op, mlil.var_from_expr(var_expr), mlil.state_token(const_expr)
+    variables = [
+        var
+        for var in (
+            mlil.direct_var_from_expr(getattr(cond, "left", None)),
+            mlil.direct_var_from_expr(getattr(cond, "right", None)),
+        )
+        if var is not None
+    ]
+    return variables[0] if len(variables) == 1 else None
 
 
-def _trace_var_roots(il, var, seen=None, depth=0):
-    seen = seen or set()
-    key = str(var)
-    if key in seen or depth > 12:
-        return set()
-    seen.add(key)
+def _comparison_details(il, if_il):
+    condition = getattr(if_il, "condition", None)
+    definition = None
+    if mlil.op_name(condition) == "MLIL_VAR":
+        try:
+            ssa_definition = condition.function.ssa_form.get_ssa_var_definition(
+                condition.ssa_form.src
+            )
+            definition = mlil.current_non_ssa_instruction(il, ssa_definition)
+        except (AttributeError, KeyError, IndexError, TypeError):
+            return None
+        definition_block = getattr(definition, "il_basic_block", None)
+        if (
+            definition is None
+            or mlil.op_name(definition) != "MLIL_SET_VAR"
+            or not mlil.same_var(getattr(definition, "dest", None), condition.src)
+            or definition_block is None
+            or definition_block.start != if_il.il_basic_block.start
+            or definition.instr_index >= if_il.instr_index
+        ):
+            return None
+        condition = getattr(definition, "src", None)
+    return {
+        "condition": condition,
+        "definition": definition,
+        "parts": mlil.comparison_parts(condition),
+        "use": definition or if_il,
+        "var": _comparison_var(condition),
+    }
 
-    definitions = list(il.get_var_definitions(var))
-    if not definitions:
-        return {var}
 
-    roots = set()
-    for definition in definitions:
-        source_var = mlil.var_from_expr(getattr(definition, "src", None))
-        if source_var is None:
-            return {var}
-        roots.update(_trace_var_roots(il, source_var, seen, depth + 1))
-    return roots
+def _router_prefix_is_pure(bb, details, root, state_vars):
+    definition = details["definition"]
+    definition_index = (
+        getattr(definition, "instr_index", None)
+        if definition is not None
+        else None
+    )
+    saw_definition = definition is None
+    for ins in list(bb)[:-1]:
+        if definition_index is not None and ins.instr_index == definition_index:
+            saw_definition = True
+            continue
+        if not _pure_router_instruction(ins, root, state_vars):
+            return False
+    return saw_definition
 
 
 def _dispatcher_rows(il):
@@ -281,19 +300,28 @@ def _dispatcher_rows(il):
         if_il = _last(il, bb)
         if mlil.op_name(if_il) != "MLIL_IF":
             continue
-        parts = _comparison_parts(if_il.condition)
-        if parts is None:
+        details = _comparison_details(il, if_il)
+        if details is None or details["parts"] is None:
             continue
-        cmp_op, var, token = parts
-        roots = _trace_var_roots(il, var)
-        if len(roots) != 1:
+        parts = details["parts"]
+        chain = mlil.row_local_copy_chain(
+            il,
+            parts["var"],
+            bb,
+            details["use"],
+        )
+        if chain is None:
             continue
+        state_vars = set(chain)
+        if details["definition"] is not None:
+            state_vars.add(details["definition"].dest)
         rows.append({
             "bb": bb,
             "if_il": if_il,
-            "root": next(iter(roots)),
-            "token": token,
-            "target": if_il.false if cmp_op == "MLIL_CMP_NE" else if_il.true,
+            "root": chain[-1],
+            "state_vars": state_vars,
+            "comparison": parts,
+            "comparison_details": details,
         })
     return rows
 
@@ -301,7 +329,10 @@ def _dispatcher_rows(il):
 def _dominant_dispatcher_rows(il):
     groups = {}
     for row in _dispatcher_rows(il):
-        groups.setdefault((str(row["root"]), row["token"][1]), []).append(row)
+        groups.setdefault(
+            (row["root"], row["comparison"]["bound"][1]),
+            [],
+        ).append(row)
     candidates = [group for group in groups.values() if len(group) >= _DISPATCHER_MIN_ROWS]
     if not candidates:
         return None
@@ -312,33 +343,187 @@ def _dominant_dispatcher_rows(il):
     return candidates[0]
 
 
-def _state_pointer_vars(il, root):
-    pointers = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        if mlil.op_name(ins) != "MLIL_SET_VAR":
-            continue
-        src = getattr(ins, "src", None)
-        if mlil.op_name(src) == "MLIL_ADDRESS_OF" and mlil.same_var(getattr(src, "src", None), root):
-            pointers.add(ins.dest)
-    return pointers
+def _definition_dominates_use(il, definition, use):
+    definition_block = getattr(definition, "il_basic_block", None)
+    use_block = getattr(use, "il_basic_block", None)
+    if definition_block is None or use_block is None:
+        return False
+    if definition_block.start == use_block.start:
+        definition_index = getattr(definition, "instr_index", None)
+        use_index = getattr(use, "instr_index", None)
+        return (
+            definition_index is not None
+            and use_index is not None
+            and definition_index < use_index
+        )
+
+    blocks = {bb.start: bb for bb in il.basic_blocks}
+    if not blocks or definition_block.start not in blocks or use_block.start not in blocks:
+        return False
+    entry = list(il.basic_blocks)[0].start
+    all_starts = set(blocks)
+    dominators = {
+        start: ({entry} if start == entry else set(all_starts))
+        for start in blocks
+    }
+    changed = True
+    while changed:
+        changed = False
+        for start, bb in blocks.items():
+            if start == entry:
+                continue
+            predecessors = [
+                dominators[edge.source.start]
+                for edge in bb.incoming_edges
+                if edge.source.start in blocks
+            ]
+            new = (
+                {start}
+                if not predecessors
+                else {start} | set.intersection(*(set(pred) for pred in predecessors))
+            )
+            if new != dominators[start]:
+                dominators[start] = new
+                changed = True
+    return definition_block.start in dominators[use_block.start]
 
 
-def _router_boundary_block(il, bb, root):
-    if any(
-        mlil.op_name(ins) == "MLIL_SET_VAR" and mlil.same_var(getattr(ins, "dest", None), root)
-        for ins in bb
+def _known_size(expr):
+    size = getattr(expr, "size", None)
+    return size if type(size) is int and size > 0 else None
+
+
+def _expr_points_to_state(
+    il,
+    expr,
+    root,
+    use=None,
+    seen=None,
+    expected_size=None,
+):
+    expression_size = _known_size(expr)
+    if (
+        expected_size is not None
+        and expression_size is not None
+        and expression_size != expected_size
     ):
         return False
+    operation = mlil.op_name(expr)
+    if operation == "MLIL_ADDRESS_OF":
+        return mlil.same_var(getattr(expr, "src", None), root)
+    if operation in {"MLIL_ADD", "MLIL_SUB"}:
+        left = getattr(expr, "left", None)
+        right = getattr(expr, "right", None)
+        right_is_zero = (
+            mlil.op_name(right) == "MLIL_CONST"
+            and getattr(right, "constant", None) == 0
+        )
+        left_is_zero = (
+            mlil.op_name(left) == "MLIL_CONST"
+            and getattr(left, "constant", None) == 0
+        )
+        pointer = None
+        if right_is_zero:
+            pointer = left
+        elif operation == "MLIL_ADD" and left_is_zero:
+            pointer = right
+        if pointer is None:
+            return False
+        pointer_size = _known_size(pointer)
+        if (
+            expression_size is not None
+            and pointer_size is not None
+            and expression_size != pointer_size
+        ):
+            return False
+        return _expr_points_to_state(
+            il,
+            pointer,
+            root,
+            use=use,
+            seen=seen,
+            expected_size=expression_size or expected_size,
+        )
+    var = mlil.direct_var_from_expr(expr)
+    if var is None:
+        return False
+    seen = set(seen or ())
+    if var in seen:
+        return False
+    seen.add(var)
+    try:
+        definitions = list(il.get_var_definitions(var))
+    except Exception:  # noqa: BLE001
+        return False
+    if len(definitions) != 1:
+        return False
+    definition = definitions[0]
+    if (
+        mlil.op_name(definition) != "MLIL_SET_VAR"
+        or not mlil.same_var(getattr(definition, "dest", None), var)
+        or (use is not None and not _definition_dominates_use(il, definition, use))
+    ):
+        return False
+    definition_size = _known_size(definition)
+    source = getattr(definition, "src", None)
+    source_size = _known_size(source)
+    known_sizes = {
+        size
+        for size in (expected_size, expression_size, definition_size, source_size)
+        if size is not None
+    }
+    if len(known_sizes) > 1:
+        return False
+    return _expr_points_to_state(
+        il,
+        source,
+        root,
+        use=definition,
+        seen=seen,
+        expected_size=next(iter(known_sizes), None),
+    )
+
+
+def _pure_router_instruction(ins, root, state_vars):
+    op = mlil.op_name(ins)
+    if op in {"MLIL_GOTO", "MLIL_NOP"}:
+        return True
+    if op != "MLIL_SET_VAR" or mlil.same_var(getattr(ins, "dest", None), root):
+        return False
+    source = getattr(ins, "src", None)
+    source_var = mlil.direct_var_from_expr(source)
+    dest_size = getattr(ins, "size", None)
+    source_size = getattr(source, "size", None)
+    if dest_size is not None and source_size is not None and dest_size != source_size:
+        return False
+    return source_var is not None and all(
+        any(mlil.same_var(var, candidate) for candidate in state_vars)
+        for var in (ins.dest, source_var)
+    )
+
+
+def _router_boundary_block(il, bb, root, state_vars):
     tail = _last(il, bb)
     if mlil.op_name(tail) == "MLIL_IF":
-        parts = _comparison_parts(tail.condition)
-        if parts is None:
+        details = _comparison_details(il, tail)
+        if (
+            details is None
+            or details["parts"] is None
+            or not _router_prefix_is_pure(bb, details, root, state_vars)
+        ):
             return False
-        return any(mlil.same_var(candidate, root) for candidate in _trace_var_roots(il, parts[1]))
-    return all(mlil.op_name(ins) in {"MLIL_SET_VAR", "MLIL_GOTO", "MLIL_NOP"} for ins in bb)
+        parts = details["parts"]
+        chain = mlil.row_local_copy_chain(
+            il,
+            parts["var"],
+            bb,
+            details["use"],
+        )
+        return chain is not None and mlil.same_var(chain[-1], root)
+    return all(_pure_router_instruction(ins, root, state_vars) for ins in bb)
 
 
-def _expand_dispatcher_boundary(il, starts, root):
+def _expand_dispatcher_boundary(il, starts, root, state_vars):
     by_start = {bb.start: bb for bb in il.basic_blocks}
     expanded = set(starts)
     queue = deque(by_start[start] for start in starts if start in by_start)
@@ -346,7 +531,12 @@ def _expand_dispatcher_boundary(il, starts, root):
         bb = queue.popleft()
         for edge in bb.incoming_edges:
             pred = edge.source
-            if pred.start in expanded or not _router_boundary_block(il, pred, root):
+            if pred.start in expanded or not _router_boundary_block(
+                il,
+                pred,
+                root,
+                state_vars,
+            ):
                 continue
             expanded.add(pred.start)
             if len(pred.incoming_edges) <= 2:
@@ -359,38 +549,78 @@ def _analyze_driver_dispatcher(il):
     if rows is None:
         return None
     root = rows[0]["root"]
-    token_size = rows[0]["token"][1]
-    token_targets = {row["token"]: _block_at(il, row["target"]) for row in rows}
-    dispatcher_starts = _expand_dispatcher_boundary(il, {row["bb"].start for row in rows}, root)
-    state_pointers = _state_pointer_vars(il, root)
-    if not state_pointers:
-        log_debug("[driver_2_6:deflat] dispatcher state root has no address-taken pointer")
+    token_size = rows[0]["comparison"]["bound"][1]
+    state_vars = set().union(*(row["state_vars"] for row in rows))
+    if any(
+        not _router_boundary_block(il, row["bb"], root, state_vars)
+        for row in rows
+    ):
+        log_warn("[driver_2_6:deflat] dispatcher row contains an impure state update")
         return None
+    dispatcher_starts = {row["bb"].start for row in rows}
+    for bb in il.basic_blocks:
+        tail = _last(il, bb)
+        if mlil.op_name(tail) != "MLIL_IF":
+            continue
+        details = _comparison_details(il, tail)
+        if details is None:
+            continue
+        parts = details["parts"]
+        comparison_var = parts["var"] if parts is not None else details["var"]
+        if comparison_var is not None:
+            chain = mlil.row_local_copy_chain(
+                il,
+                comparison_var,
+                bb,
+                details["use"],
+            )
+            if chain is None or not mlil.same_var(chain[-1], root):
+                continue
+            row_state_vars = set(chain)
+            if details["definition"] is not None:
+                row_state_vars.add(details["definition"].dest)
+            candidate_state_vars = state_vars | row_state_vars
+            if not _router_boundary_block(
+                il,
+                bb,
+                root,
+                candidate_state_vars,
+            ):
+                continue
+            dispatcher_starts.add(bb.start)
+            state_vars.update(row_state_vars)
+    dispatcher_starts = _expand_dispatcher_boundary(
+        il,
+        dispatcher_starts,
+        root,
+        state_vars,
+    )
+    target_heads = {}
+    for bb in il.basic_blocks:
+        if bb.start not in dispatcher_starts:
+            continue
+        for edge in bb.outgoing_edges:
+            if edge.target.start not in dispatcher_starts:
+                target_heads.setdefault(edge.target.start, edge.target)
     return {
         "state_var": root,
+        "state_vars": state_vars,
+        "state_address_escapes": mlil.variable_address_escapes(il, root),
+        "potential_state_pointers": _potential_state_pointer_vars(il, root),
         "token_size": token_size,
-        "token_targets": token_targets,
-        "state_tokens": set(token_targets),
         "dispatcher_starts": dispatcher_starts,
-        "state_pointers": state_pointers,
+        "dispatcher_rows": {row["bb"].start: row for row in rows},
+        "target_heads": tuple(target_heads.values()),
     }
 
 
-def _region_until(il, start_bb, stop_starts, root, state_tokens):
+def _region_until(il, start_bb, stop_starts, root):
     region = set()
     queue = deque([start_bb])
     while queue:
         bb = queue.popleft()
         if bb.start in region or bb.start in stop_starts:
             continue
-        if bb.start != start_bb.start and mlil.op_name(_last(il, bb)) == "MLIL_IF":
-            parts = _comparison_parts(_last(il, bb).condition)
-            compares_state = parts is not None and (
-                parts[2] in state_tokens
-                or any(mlil.same_var(candidate, root) for candidate in _trace_var_roots(il, parts[1]))
-            )
-            if compares_state:
-                continue
         region.add(bb.start)
         for edge in bb.outgoing_edges:
             if edge.target.start not in region and edge.target.start not in stop_starts:
@@ -402,90 +632,359 @@ def _tokens_from_expr(il, expr, token_size, scope, seen=None):
     seen = seen or set()
     if mlil.op_name(expr) == "MLIL_CONST":
         return {mlil.state_token(expr, token_size)}
-    var = mlil.var_from_expr(expr)
+    var = mlil.direct_var_from_expr(expr)
     if var is None:
-        return set()
-    key = str(var)
-    if key in seen:
-        return set()
-    seen.add(key)
+        return None
+    if var in seen:
+        return None
+    seen = set(seen)
+    seen.add(var)
 
     tokens = set()
-    for definition in il.get_var_definitions(var):
-        if definition.il_basic_block.start not in scope:
+    found = False
+    try:
+        definitions = list(il.get_var_definitions(var))
+    except Exception:  # noqa: BLE001
+        return None
+    for definition in definitions:
+        definition_block = getattr(definition, "il_basic_block", None)
+        if definition_block is None or definition_block.start not in scope:
             continue
-        tokens.update(_tokens_from_expr(il, definition.src, token_size, scope, set(seen)))
-    return tokens
+        found = True
+        resolved = _tokens_from_expr(il, definition.src, token_size, scope, set(seen))
+        if not resolved:
+            return None
+        tokens.update(resolved)
+    return tokens if found else None
 
 
-def _store_targets_state_pointer(il, dest, state_pointers):
-    var = mlil.var_from_expr(dest)
-    if var is None:
-        return False
-    roots = _trace_var_roots(il, var)
-    return any(
-        mlil.same_var(root, pointer)
-        for root in roots
-        for pointer in state_pointers
-    )
+def _store_targets_state(il, store, root):
+    return _expr_points_to_state(il, store.dest, root, use=store)
 
 
-def _state_write_tokens(il, analysis, scope):
-    root = analysis["state_var"]
-    token_size = analysis["token_size"]
-    state_pointers = analysis["state_pointers"]
-    tokens = set()
-    for bb in il.basic_blocks:
-        if bb.start not in scope:
-            continue
-        for ins in bb:
-            op = mlil.op_name(ins)
-            if op == "MLIL_SET_VAR" and mlil.same_var(getattr(ins, "dest", None), root):
-                tokens.update(_tokens_from_expr(il, ins.src, token_size, scope))
-            elif op == "MLIL_STORE" and _store_targets_state_pointer(il, ins.dest, state_pointers):
-                tokens.update(_tokens_from_expr(il, ins.src, token_size, scope))
-    return tokens
-
-
-def _pure_state_selection_tail(il, analysis, scope):
-    allowed = {"MLIL_SET_VAR", "MLIL_IF", "MLIL_GOTO", "MLIL_NOP"}
-    for bb in il.basic_blocks:
-        if bb.start not in scope:
-            continue
-        for ins in bb:
-            op = mlil.op_name(ins)
-            if op in allowed:
+def _potential_state_pointer_vars(il, root):
+    potential_pointers = set()
+    changed = True
+    while changed:
+        changed = False
+        for ins in getattr(il, "instructions", ()) or ():
+            if mlil.op_name(ins) != "MLIL_SET_VAR":
                 continue
-            if op == "MLIL_STORE" and _store_targets_state_pointer(
-                il, ins.dest, analysis["state_pointers"]
+            src = getattr(ins, "src", None)
+            direct = mlil.same_var(mlil.addressed_var(src), root)
+            source_var = mlil.var_from_expr(src)
+            inherited = source_var is not None and any(
+                mlil.same_var(source_var, pointer) for pointer in potential_pointers
+            )
+            if (direct or inherited) and not any(
+                mlil.same_var(ins.dest, pointer) for pointer in potential_pointers
+            ):
+                potential_pointers.add(ins.dest)
+                changed = True
+
+    return potential_pointers
+
+
+def _store_may_target_state(il, store, root, potential_pointers):
+    if mlil.expression_may_address_variable(
+        il,
+        store.dest,
+        root,
+    ):
+        return True
+    for expr in mlil.walk_expr(store.dest):
+        addressed = mlil.addressed_var(expr)
+        if addressed is not None and mlil.same_var(addressed, root):
+            return True
+        used = mlil.var_from_expr(expr)
+        if used is not None and any(
+            mlil.same_var(used, pointer) for pointer in potential_pointers
+        ):
+            return True
+    return False
+
+
+def _state_channel_is_dispatcher_only(il, analysis, ignored_scope=()):
+    root = analysis["state_var"]
+    ignored_scope = set(ignored_scope)
+    pointer_vars = set()
+    for ins in getattr(il, "instructions", ()) or ():
+        if mlil.op_name(ins) != "MLIL_SET_VAR":
+            continue
+        definitions = list(il.get_var_definitions(ins.dest))
+        if len(definitions) == 1 and _expr_points_to_state(
+            il,
+            ins.src,
+            root,
+            use=ins,
+        ):
+            pointer_vars.add(ins.dest)
+
+    def uses_channel(expr):
+        if any(
+            mlil.instruction_reads_variable(expr, variable)
+            for variable in (*analysis["state_vars"], *pointer_vars)
+        ):
+            return True
+        for node in mlil.walk_expr(expr):
+            addressed = mlil.addressed_var(node)
+            if addressed is not None and mlil.same_var(addressed, root):
+                return True
+        return False
+
+    for bb in il.basic_blocks:
+        if bb.start in analysis["dispatcher_starts"] or bb.start in ignored_scope:
+            continue
+        for ins in bb:
+            op = mlil.op_name(ins)
+            if op != "MLIL_SET_VAR" and any(
+                mlil.instruction_writes_variable(ins, state_var)
+                for state_var in analysis["state_vars"]
+            ):
+                return False
+            if (
+                op == "MLIL_SET_VAR"
+                and any(mlil.same_var(ins.dest, pointer) for pointer in pointer_vars)
+                and _expr_points_to_state(il, ins.src, root, use=ins)
             ):
                 continue
-            return False
+            if op == "MLIL_STORE" and _store_targets_state(il, ins, root):
+                if uses_channel(ins.src):
+                    return False
+                continue
+            if uses_channel(ins):
+                return False
     return True
 
 
-def _private_exit(il, head, region, stop_starts):
-    queue = deque([head])
-    seen = set()
-    while queue:
-        bb = queue.popleft()
-        if bb.start in seen:
+def _dispatcher_values_are_private(il, analysis):
+    root = analysis["state_var"]
+    dispatcher_values = {
+        state_var
+        for state_var in analysis["state_vars"]
+        if not mlil.same_var(state_var, root)
+    }
+    for bb in il.basic_blocks:
+        if bb.start in analysis["dispatcher_starts"]:
             continue
-        seen.add(bb.start)
+        for ins in bb:
+            if any(
+                mlil.instruction_reads_variable(ins, value)
+                for value in dispatcher_values
+            ):
+                return False
+            for expr in mlil.walk_expr(ins):
+                addressed = mlil.addressed_var(expr)
+                if addressed is not None and any(
+                    mlil.same_var(addressed, value)
+                    for value in dispatcher_values
+                ):
+                    return False
+    return True
+
+
+def _state_writes(il, analysis, scope):
+    root = analysis["state_var"]
+    token_size = analysis["token_size"]
+    writes = []
+    for bb in il.basic_blocks:
+        if bb.start not in scope:
+            continue
+        for ins in bb:
+            op = mlil.op_name(ins)
+            if mlil.has_unmodeled_semantics(ins):
+                return None
+            if op == "MLIL_SET_VAR" and mlil.same_var(getattr(ins, "dest", None), root):
+                resolved = _tokens_from_expr(il, ins.src, token_size, scope)
+            elif mlil.instruction_writes_variable(ins, root):
+                return None
+            elif op in mlil.STORE_OPS:
+                if op == "MLIL_STORE" and _store_targets_state(il, ins, root):
+                    resolved = _tokens_from_expr(il, ins.src, token_size, scope)
+                elif _store_may_target_state(
+                    il,
+                    ins,
+                    root,
+                    analysis["potential_state_pointers"],
+                ):
+                    return None
+                elif analysis["state_address_escapes"]:
+                    return None
+                else:
+                    continue
+            else:
+                if (
+                    mlil.has_unknown_memory_effect(ins)
+                    and (
+                        analysis["state_address_escapes"]
+                        or mlil.expression_may_address_variable(il, ins, root)
+                    )
+                ):
+                    return None
+                continue
+            if resolved is None or len(resolved) != 1:
+                return None
+            writes.append((ins, next(iter(resolved))))
+    return writes
+
+
+def _single_state_transition(il, analysis, scope, start):
+    writes = _state_writes(il, analysis, scope)
+    if not writes:
+        return None
+    tokens = {token for _ins, token in writes}
+    if len(tokens) != 1:
+        return None
+    if not mlil.all_paths_hit_blocks(
+        il.basic_blocks,
+        {start.start},
+        scope,
+        {ins.il_basic_block.start for ins, _token in writes},
+    ):
+        return None
+    dependency_exprs = []
+    for ins, _token in writes:
+        dependency_exprs.append(getattr(ins, "src", None))
+        if mlil.op_name(ins) == "MLIL_STORE":
+            dependency_exprs.append(getattr(ins, "dest", None))
+    if not mlil.definitions_cover_all_paths(
+        il,
+        {start.start},
+        scope,
+        dependency_exprs,
+    ):
+        return None
+    return next(iter(tokens)), writes
+
+
+def _pure_state_selection_tail(il, analysis, scope, writes):
+    root = analysis["state_var"]
+    dependency_exprs = []
+    write_indices = set()
+    for ins, _token in writes:
+        write_indices.add(ins.instr_index)
+        dependency_exprs.append(getattr(ins, "src", None))
+        if mlil.op_name(ins) == "MLIL_STORE":
+            dependency_exprs.append(getattr(ins, "dest", None))
+    required = mlil.dependency_variables(il, dependency_exprs, scope)
+    written_dependencies = set()
+    for bb in il.basic_blocks:
+        if bb.start not in scope:
+            continue
+        for ins in bb:
+            op = mlil.op_name(ins)
+            if op in {"MLIL_IF", "MLIL_GOTO", "MLIL_NOP"}:
+                continue
+            if op == "MLIL_STORE" and ins.instr_index in write_indices:
+                continue
+            if op != "MLIL_SET_VAR":
+                return False
+            if mlil.same_var(ins.dest, root):
+                continue
+            if not any(mlil.same_var(ins.dest, var) for var in required):
+                return False
+            written_dependencies.add(ins.dest)
+    return mlil.variables_are_scope_local(il, written_dependencies, scope)
+
+
+def _private_exits(il, head, region, stop_starts):
+    exits = {}
+    for bb in il.basic_blocks:
+        if bb.start not in region:
+            continue
+        foreign = [
+            edge.source
+            for edge in bb.incoming_edges
+            if edge.source.start not in region
+        ]
+        if bb.start != head.start and foreign:
+            return ()
         for edge in bb.outgoing_edges:
-            succ = edge.target
-            if succ.start in stop_starts:
-                return _last(il, bb)
-            if succ.start in region:
-                foreign = [
-                    incoming.source
-                    for incoming in succ.incoming_edges
-                    if incoming.source.start not in region and incoming.source.start not in stop_starts
-                ]
-                if foreign:
-                    return _last(il, bb)
-                queue.append(succ)
-    return None
+            if edge.target.start not in stop_starts:
+                continue
+            jump = _last(il, bb)
+            if mlil.op_name(jump) != "MLIL_GOTO" or len(bb.outgoing_edges) != 1:
+                return ()
+            exits[jump.instr_index] = (jump, edge.target)
+    return tuple(exits.values())
+
+
+def _route_dispatcher_token(il, analysis, start, token):
+    current = start
+    seen = set()
+    while current.start in analysis["dispatcher_starts"]:
+        if current.start in seen:
+            return None
+        seen.add(current.start)
+        row = analysis["dispatcher_rows"].get(current.start)
+        if row is not None:
+            branch = mlil.evaluate_comparison(row["comparison"], token)
+            if branch is None:
+                return None
+            current = _block_at(il, row["if_il"].true if branch else row["if_il"].false)
+            continue
+        if mlil.op_name(_last(il, current)) == "MLIL_IF":
+            return None
+        outgoing = list(current.outgoing_edges)
+        if len(outgoing) != 1:
+            return None
+        current = outgoing[0].target
+    return current
+
+
+def _route_scope(il, analysis, scope, token):
+    exits = {}
+    for bb in il.basic_blocks:
+        if bb.start not in scope:
+            continue
+        for edge in bb.outgoing_edges:
+            if edge.target.start in analysis["dispatcher_starts"]:
+                jump = list(bb)[-1]
+                if mlil.op_name(jump) != "MLIL_GOTO" or len(bb.outgoing_edges) != 1:
+                    return None
+                exits[jump.instr_index] = (jump, edge.target)
+            elif edge.target.start not in scope:
+                return None
+    if not exits or not mlil.all_paths_reach_stops(
+        il.basic_blocks,
+        scope,
+        analysis["dispatcher_starts"],
+    ):
+        return None
+    targets = {}
+    for _jump, start in exits.values():
+        target = _route_dispatcher_token(il, analysis, start, token)
+        if target is None:
+            return None
+        targets.setdefault(target.start, target)
+    if len(targets) != 1:
+        return None
+    if not _dispatcher_values_are_private(il, analysis):
+        return None
+    return {
+        "target": next(iter(targets.values())),
+        "exits": tuple(exits.values()),
+        "direct_rows": all(
+            entry.start in analysis["dispatcher_rows"]
+            for _jump, entry in exits.values()
+        ),
+    }
+
+
+def _region_is_private(il, scope, owners):
+    allowed = set(scope) | set(owners)
+    return not any(
+        bb.start not in owners
+        and any(edge.source.start not in allowed for edge in bb.incoming_edges)
+        for bb in il.basic_blocks
+        if bb.start in scope
+    )
+
+
+def _owned_write_indices(il, writes, scope, owners):
+    if not _region_is_private(il, scope, owners):
+        return set()
+    return {ins.instr_index for ins, _token in writes}
 
 
 def _entry_transition(il, analysis):
@@ -502,34 +1001,58 @@ def _entry_transition(il, analysis):
         region.add(bb.start)
         for edge in bb.outgoing_edges:
             if edge.target.start in stop_starts:
-                exits.append(_last(il, bb))
+                exits.append((_last(il, bb), edge.target))
             else:
                 queue.append(edge.target)
-    tokens = _state_write_tokens(il, analysis, region)
-    if len(tokens) != 1 or len(exits) != 1:
+    entry = list(il.basic_blocks)[0]
+    transition = _single_state_transition(il, analysis, region, entry)
+    if transition is None or not exits:
         return None
-    token = next(iter(tokens))
-    target = analysis["token_targets"].get(token)
-    if target is None:
+    if not _region_is_private(il, region, {entry.start}):
+        return None
+    if not mlil.all_paths_reach_stops(il.basic_blocks, region, stop_starts):
+        return None
+    if any(
+        mlil.op_name(jump) != "MLIL_GOTO" or len(jump.il_basic_block.outgoing_edges) != 1
+        for jump, _entry in exits
+    ):
+        return None
+    entry_start = list(il.basic_blocks)[0].start
+    if any(
+        jump.il_basic_block.start != entry_start
+        and any(
+            edge.source.start not in region
+            for edge in jump.il_basic_block.incoming_edges
+        )
+        for jump, _entry in exits
+    ):
+        return None
+    token, _writes = transition
+    targets = {}
+    for _jump, dispatcher_entry in exits:
+        target = _route_dispatcher_token(il, analysis, dispatcher_entry, token)
+        if target is None:
+            return None
+        targets.setdefault(target.start, target)
+    if len(targets) != 1:
+        return None
+    if not _dispatcher_values_are_private(il, analysis):
         return None
     return {
         "kind": "uncond",
-        "jump": exits[0],
-        "target_bb": target,
+        "exit_jumps": tuple(jump for jump, _entry in exits),
+        "target_bb": next(iter(targets.values())),
         "obb": list(il.basic_blocks)[0],
-        "state_var": analysis["state_var"],
-        "state_vars": {analysis["state_var"]},
         "state_token": token,
-        "state_tokens": {token},
+        "obsolete_state_writes": set(),
         "entry": True,
     }
 
 
-def _conditional_transition(il, head, region, analysis):
+def _conditional_candidates(il, head, region, analysis):
     stop_starts = analysis["dispatcher_starts"]
     root = analysis["state_var"]
-    state_tokens = analysis["state_tokens"]
-    token_targets = analysis["token_targets"]
+    candidates = []
     for bb in il.basic_blocks:
         if bb.start not in region:
             continue
@@ -540,64 +1063,111 @@ def _conditional_transition(il, head, region, analysis):
         false_bb = _block_at(il, if_il.false)
         if true_bb.start in stop_starts or false_bb.start in stop_starts:
             continue
-        true_scope = _region_until(il, true_bb, stop_starts, root, state_tokens)
-        false_scope = _region_until(il, false_bb, stop_starts, root, state_tokens)
-        if not _pure_state_selection_tail(il, analysis, true_scope | false_scope):
+        true_scope = _region_until(il, true_bb, stop_starts, root)
+        false_scope = _region_until(il, false_bb, stop_starts, root)
+        true_transition = _single_state_transition(il, analysis, true_scope, true_bb)
+        false_transition = _single_state_transition(il, analysis, false_scope, false_bb)
+        if true_transition is None or false_transition is None:
             continue
-        true_tokens = _state_write_tokens(il, analysis, true_scope)
-        false_tokens = _state_write_tokens(il, analysis, false_scope)
-        if len(true_tokens) != 1 or len(false_tokens) != 1:
-            continue
-        true_token = next(iter(true_tokens))
-        false_token = next(iter(false_tokens))
+        true_token, true_writes = true_transition
+        false_token, false_writes = false_transition
         if true_token == false_token:
             continue
-        true_target = token_targets.get(true_token)
-        false_target = token_targets.get(false_token)
-        if true_target is None or false_target is None:
+        writes = (*true_writes, *false_writes)
+        scopes = true_scope | false_scope
+        if not _pure_state_selection_tail(il, analysis, scopes, writes):
             continue
-        return {
-            "kind": "if_else",
-            "obb": head,
-            "if_il": if_il,
-            "true_target": true_target,
-            "false_target": false_target,
-            "true_token": true_token,
-            "false_token": false_token,
-            "state_var": root,
-            "state_vars": {root},
-            "state_tokens": {true_token, false_token},
-        }
-    return None
+        true_route = _route_scope(il, analysis, true_scope, true_token)
+        false_route = _route_scope(il, analysis, false_scope, false_token)
+        if true_route is None or false_route is None:
+            continue
+        owned_writes = _owned_write_indices(il, writes, scopes, {head.start})
+        exit_cleanup = (
+            owned_writes
+            if _state_channel_is_dispatcher_only(il, analysis)
+            else set()
+        )
+        exit_targets = {}
+        conflicting_exit = False
+        for route in (true_route, false_route):
+            for jump, _entry in route["exits"]:
+                prior = exit_targets.get(jump.instr_index)
+                if prior is not None and prior[1].start != route["target"].start:
+                    conflicting_exit = True
+                    break
+                exit_targets[jump.instr_index] = (jump, route["target"])
+            if conflicting_exit:
+                break
+        exact_writes = {ins.instr_index for ins, _token in writes}
+        preserve_writes = (
+            not conflicting_exit
+            and true_route["direct_rows"]
+            and false_route["direct_rows"]
+            and owned_writes == exact_writes
+            and _dispatcher_values_are_private(il, analysis)
+        )
+        bypass_safe = (
+            owned_writes == exact_writes
+            and _state_channel_is_dispatcher_only(il, analysis, scopes)
+        )
+        if not preserve_writes and not bypass_safe:
+            continue
+        candidates.append(
+            {
+                "kind": "if_else",
+                "rewrite_mode": "arm_exits" if preserve_writes else "condition",
+                "obb": head,
+                "if_il": if_il,
+                "true_target": true_route["target"],
+                "false_target": false_route["target"],
+                "true_token": true_token,
+                "false_token": false_token,
+                "exit_targets": (
+                    tuple(exit_targets.values()) if preserve_writes else ()
+                ),
+                "obsolete_state_writes": exit_cleanup if preserve_writes else owned_writes,
+            }
+        )
+    return tuple(candidates)
 
 
 def _head_transition(il, head, analysis):
     stop_starts = analysis["dispatcher_starts"]
-    region = _region_until(il, head, stop_starts, analysis["state_var"], analysis["state_tokens"])
+    region = _region_until(il, head, stop_starts, analysis["state_var"])
 
-    conditional = _conditional_transition(il, head, region, analysis)
-    if conditional is not None:
-        return conditional
+    conditional = _conditional_candidates(il, head, region, analysis)
+    if len(conditional) > 1:
+        log_warn(f"[driver_2_6:deflat] {head.start}: ambiguous conditional transitions")
+        return None
+    if conditional:
+        return conditional[0]
 
-    tokens = _state_write_tokens(il, analysis, region)
-    if len(tokens) != 1:
+    transition = _single_state_transition(il, analysis, region, head)
+    if transition is None:
         return None
-    token = next(iter(tokens))
-    target = analysis["token_targets"].get(token)
-    if target is None:
+    if not mlil.all_paths_reach_stops(il.basic_blocks, region, stop_starts):
         return None
-    exit_jump = _private_exit(il, head, region, stop_starts)
-    if exit_jump is None:
+    token, _writes = transition
+    exits = _private_exits(il, head, region, stop_starts)
+    if not exits:
+        return None
+    targets = {}
+    for _jump, dispatcher_entry in exits:
+        target = _route_dispatcher_token(il, analysis, dispatcher_entry, token)
+        if target is None:
+            return None
+        targets.setdefault(target.start, target)
+    if len(targets) != 1:
+        return None
+    if not _dispatcher_values_are_private(il, analysis):
         return None
     return {
         "kind": "uncond",
-        "jump": exit_jump,
-        "target_bb": target,
+        "exit_jumps": tuple(jump for jump, _entry in exits),
+        "target_bb": next(iter(targets.values())),
         "obb": head,
-        "state_var": analysis["state_var"],
-        "state_vars": {analysis["state_var"]},
         "state_token": token,
-        "state_tokens": {token},
+        "obsolete_state_writes": set(),
     }
 
 
@@ -614,7 +1184,7 @@ def plan_deflatten_redirections(_bv, func, il):
         redirections.append(entry)
 
     heads = {}
-    for head in analysis["token_targets"].values():
+    for head in analysis["target_heads"]:
         heads.setdefault(head.start, head)
     for head in heads.values():
         plan = _head_transition(il, head, analysis)
@@ -624,6 +1194,6 @@ def plan_deflatten_redirections(_bv, func, il):
     if redirections:
         log_info(
             f"[driver_2_6:deflat] recovered {len(redirections)} transition(s) "
-            f"from {len(analysis['state_tokens'])} state token(s) in {hex(func.start)}"
+            f"in {hex(func.start)}"
         )
     return redirections

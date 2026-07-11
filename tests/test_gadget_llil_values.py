@@ -227,6 +227,23 @@ def test_const_values_collect_phi_candidates():
     assert llil_helpers.const_values(None, ssa, reg(x1_3)) == {0x10, 0x20}
 
 
+def test_correlated_binding_does_not_merge_distinct_same_named_registers():
+    class NamedRegister:
+        def __eq__(self, other):
+            return self is other
+
+        __hash__ = object.__hash__
+
+        def __str__(self):
+            return "x1#1"
+
+    first = NamedRegister()
+    second = NamedRegister()
+    bindings = {first: 0x10, str(first): 0x10}
+
+    assert llil_helpers._bound_value(bindings, second) is None
+
+
 def test_correlated_const_values_preserves_sibling_phi_arms():
     a0 = Var("x1", 1)
     a1 = Var("x1", 2)

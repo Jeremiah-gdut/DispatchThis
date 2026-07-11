@@ -62,8 +62,8 @@ If Binary Ninja does not reanalyze automatically after changing a setting, run
 
 **Deflatten depends on indirect branch resolving.** The Deflatten setting also enables the
 indirect branch and indirect call resolvers, so the full CFG can become visible before the
-deflattener reconstructs dispatcher edges. Deflatten cleanup only runs after the
-deflattener has rewritten the dispatcher exits, so unresolved indirect branches usually
+deflattener reconstructs dispatcher edges. Exact obsolete state writes are NOPed in the
+same atomic replacement as those edge rewrites, so unresolved indirect branches usually
 leave the deflatten workflow phase idle.
 
 ## Pipeline at a glance
@@ -82,15 +82,21 @@ Eight workflow activities are inserted per function. One is the no-op
 4. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
    switches back into `if` expressions, then runs branch-target phase cleanup.
 5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
-6. **String decrypt** (MLIL, *opt-in*) - waits for branch, call, and global phases to
+6. **Correlated store recovery** (MLIL) - restores path-specific global stores when a
+   merge has lost the relationship between sibling PHI values.
+7. **String decrypt** (MLIL, *opt-in*) - waits for branch, call, and global phases to
    stabilize for the current function, then annotates recognized direct decrypt calls.
-7. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and builds an atomic
+8. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and builds an atomic
    replacement MLIL where each original basic block's dispatcher jump becomes a direct
-   `goto` to the real successor. Conditional transitions preserve their original condition
-   and point both arms at recovered original blocks; state-write cleanup data is published
-   only after Binary Ninja installs that replacement.
-8. **Deflatten cleanup / NOP pass** (MLIL, *opt-in*) - NOPs dispatcher state writes
-   recorded by deflattening.
+   `goto` to the real successor. Conditional transitions either redirect private arm exits
+   while preserving their state writes, or shortcut the original condition only after the
+   skipped state channel is proved private. Equality, inequality, and signed or
+   unsigned ordering dispatchers are routed by replaying each concrete state token. Every
+   private dispatcher exit and each exactly proven obsolete state write is rewritten in the
+   same all-or-nothing copy-transform. Comparison aliases must be whole-variable,
+   equal-width copies established inside their own dispatcher rows; unresolved field,
+   split, aliased, escaped-address, or pointer state mutations leave the affected
+   transition intact. Stale current-MLIL plan objects are rejected before rewriting.
 
 Full details, ordering rationale, and the `session_data` contract are in
 [`docs/pipeline.md`](docs/pipeline.md); workflow phase coordination rules live in

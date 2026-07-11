@@ -16,14 +16,15 @@ the others are recovery workflow phases:
 | `extension.DispatchThis.IndirectCallPatcher` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.BranchConditionTranslator` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.GlobalConstantResolver` | MLIL | `core.function.generateHighLevelIL` |
+| `extension.DispatchThis.CorrelatedStoreRecovery` | MLIL | `core.function.generateHighLevelIL` |
 | `analysis.plugins.dispatchThis.stringDecrypt` | MLIL | `core.function.generateHighLevelIL` |
 | `analysis.plugins.dispatchThis.deflatten` | MLIL | `core.function.generateHighLevelIL` |
-| `extension.DispatchThis.Cleanup` | MLIL | `core.function.generateHighLevelIL` |
 
 The indirect branch resolver runs **before MLIL is generated**, because the deflattener needs
 the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
 The other six run before HLIL generation, in the order call-resolve → branch-condition
-translation → global-constant resolving → string decrypt → deflatten → cleanup. The MLIL activities gate themselves on function phase
+translation → global-constant resolving → correlated-store recovery → string
+decrypt → deflatten. The MLIL activities gate themselves on function phase
 state, so they do not submit reanalysis-triggering mutations until indirect branch
 resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja edits:
 `set_user_indirect_branches`, `set_call_type_adjustment`, global data-var typing, and
@@ -90,7 +91,14 @@ The first scope is intentionally narrow: a qword slot in `.data`, a nonzero cons
 offset chain, a valid resolved address, and no store to the slot in the known direct-ref
 functions.
 
-### 5. String decrypt (MLIL, opt-in) - `passes/medium/string_decrypt.py`
+### 5. Correlated store recovery (MLIL) - `passes/medium/correlated_stores.py`
+
+After global constants stabilize, the active profile may identify a join-block store whose
+destination and source came from correlated sibling PHIs. `apply_correlated_stores_mlil`
+atomically inserts each concrete store in its owning predecessor arm and NOPs the merged
+store. Unsupported or incomplete plans leave the current MLIL unchanged.
+
+### 6. String decrypt (MLIL, opt-in) - `passes/medium/string_decrypt.py`
 
 Gated behind the `String Decrypt` setting. The workflow callback returns without work
 until indirect branch, indirect call, and global constant phases are stable. It does not
@@ -105,7 +113,7 @@ calls get function-level comments in the form
 `[decrypt] <escaped-string>, src=0x... dst=0x...`; existing manual comment lines are
 preserved.
 
-### 6. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
+### 7. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
 
 Gated behind the `Enable Deflattening` setting, and only runs once function phase state
 reports that the LLIL indirect branch resolver has drained every indirect jump (otherwise
@@ -113,28 +121,46 @@ the CFG - and the recovered state machine - would be incomplete).
 
 - The active resolver profile's `plan_deflatten_redirections` identifies the
   binary-specific dispatcher/state-write shape and maps state tokens to target
-  original blocks. The default profile delegates to `compute_redirections`.
+  original blocks. Dispatcher rows may use equality, inequality, or signed/unsigned
+  `LT`, `LE`, `GT`, and `GE` comparisons. The planner preserves operand order and token
+  width, then replays each concrete recovered token through the dispatcher CFG; it does
+  not solve symbolic intervals. Each comparison alias must be established by a unique
+  whole-variable, equal-width direct-copy chain earlier in its own row, ending at the
+  state input shared by the dispatcher rows. Field/split/aliased reads are possible
+  observers, not exact copies. Predicate-variable conditions must resolve through
+  exact SSA-to-non-SSA mapping to a current comparison earlier in that row, and the
+  copy chain must precede the comparison itself. Auxiliary comparison blocks join
+  the dispatcher boundary only after their complete prefix passes the routing-purity
+  proof. The
+  default profile delegates to `compute_redirections`.
 - `rewrite_redirections_mlil` uses the MLIL copy-transform backend to build an atomic
-  replacement: copied source-block labels direct each original block to its planned real
-  successor, and conditional transitions copy their original condition - see
+  replacement: every private dispatcher exit is redirected to the one target proved for
+  it, conditional transitions explicitly choose either private arm-exit rewrites or a
+  fully proved condition shortcut, and only exact instruction indices in each plan's
+  `obsolete_state_writes` set become NOPs - see
   [`conditional-deflattening.md`](conditional-deflattening.md). Any rejected redirection
   discards the entire replacement.
-- The workflow installs the replacement through `AnalysisContext.set_mlil_function` before
-  recording the resolved dispatcher state values and state-variable aliases in
-  `session_data`. A failed installation leaves those maps unpublished so the next run can
-  retry.
+- Target and cleanup proof are independent when the selected edge rewrite preserves state
+  execution. An uncertain target produces no plan; a proved target with uncertain cleanup
+  then keeps an empty `obsolete_state_writes` set. A condition shortcut that would bypass
+  those writes instead requires complete private cleanup/state-channel proof or is rejected.
+- Partial/split/aliased state writes, unresolved struct or pointer stores, and whole-variable
+  or field-address escapes are fail-closed rather than ignored as unrelated IL. A call,
+  syscall, or intrinsic receiving a possible state pointer invalidates target proof, not
+  merely cleanup proof. Once that address has escaped into memory, later unknown
+  memory effects or non-exact stores invalidate the token even without an explicit
+  pointer argument. Escape includes an unknown operation retaining `&holder` when
+  the holder contains `&state`. Unimplemented IL always rejects the transition.
+- The workflow installs the replacement through `AnalysisContext.set_mlil_function`, then
+  publishes `dispatchthis_mlil_stable` for cross-function string-decrypt recognition. It
+  publishes no deflatten token or variable cleanup maps.
 
-### 7. Deflatten cleanup / NOP pass (MLIL, opt-in) - `passes/medium/nop_pass.py`
-
-Gated behind `Deflatten`; it only acts once deflatten has rewritten the original block exits.
-`nop_deflatten_state_writes` NOPs dispatcher state writes by the state token values and
-state variables recorded by the deflatten workflow. Branch-target and call-target decode
-cleanup are separate phase cleanup attempts owned by the workflow callbacks for those
-phases.
+The cleanup ownership and atomicity decision is recorded in
+[`adr/0010-plan-owned-atomic-deflatten-cleanup.md`](adr/0010-plan-owned-atomic-deflatten-cleanup.md).
 
 ## Why the MLIL passes reapply every run
 
-The indirect call, branch condition, deflatten, and final state-write cleanup MLIL rewrites are *overlays*
+The indirect call, branch condition, correlated-store, and atomic deflatten MLIL rewrites are *overlays*
 derived from the (unchanged) LLIL. Each reanalysis regenerates MLIL from LLIL and reverts
 them, so these passes **re-run every pass** to keep their rewrites in place rather than
 latching off after the first apply. Phase cleanup for branch/call target decodes is
@@ -146,9 +172,7 @@ overlay after Binary Ninja reanalysis.
 
 | Key | Meaning |
 | --- | --- |
-| `dispatchthis_mlil_stable` | `{start: bool}` - deflatten has rewritten exits |
-| `dispatchthis_state_consts` | `{start: set(state_value)}` - for state-write NOP |
-| `dispatchthis_state_vars` | `{start: set(var)}` - state var + aliases |
+| `dispatchthis_mlil_stable` | `{start: bool}` - the atomic deflatten replacement was installed; used only as a cross-function string-decrypt gate |
 | `dispatchthis_tag_cleanup_pending` | `set(start)` - view-level analysis-completion callbacks pending |
 
 Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`;

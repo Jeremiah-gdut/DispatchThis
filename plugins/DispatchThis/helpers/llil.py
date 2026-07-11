@@ -110,7 +110,6 @@ def correlated_phi_values(ssa, expr, value_func, max_depth=32):
                 return None
             value = next(iter(values))
             bindings[reg] = value
-            bindings[str(reg)] = value
         out.update(value_func(expr, bindings))
     return out
 
@@ -270,9 +269,7 @@ def _single_const(bv, ssa, expr, depth=0, max_depth=48):
 def _bound_value(bindings, reg):
     if not bindings:
         return None
-    if reg in bindings:
-        return bindings[reg]
-    return bindings.get(str(reg))
+    return bindings.get(reg)
 
 
 def _const_values_for_operand(bv, ssa, operand, depth, max_depth, seen, bindings=None):
