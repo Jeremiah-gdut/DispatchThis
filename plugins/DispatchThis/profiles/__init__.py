@@ -9,7 +9,7 @@ from ..utils.log import log_warn
 
 DEFAULT_PROFILE_ID = "default"
 ACTIVE_PROFILE_SETTING = "analysis.plugins.dispatchThis.resolverProfile"
-REQUIRED_HOOKS = (
+PROFILE_HOOKS = (
     "resolve_branch_gadget",
     "resolve_call_gadget",
     "plan_global_constant_slots",
@@ -20,7 +20,7 @@ REQUIRED_HOOKS = (
 
 ResolverProfile = namedtuple(
     "ResolverProfile",
-    ("id", "name", "description", *REQUIRED_HOOKS),
+    ("id", "name", "description", *PROFILE_HOOKS),
 )
 
 
@@ -28,18 +28,33 @@ class InvalidResolverProfile(ValueError):
     pass
 
 
+_MISSING = object()
+
+
+def _no_recovery(*_args, **_kwargs):
+    return []
+
+
 def resolver_profile_from_module(module):
-    missing = [name for name in REQUIRED_HOOKS if not callable(getattr(module, name, None))]
-    if missing:
+    hooks = []
+    invalid = []
+    for name in PROFILE_HOOKS:
+        hook = getattr(module, name, _MISSING)
+        if hook is _MISSING:
+            hook = _no_recovery
+        elif not callable(hook):
+            invalid.append(name)
+        hooks.append(hook)
+    if invalid:
         raise InvalidResolverProfile(
             f"resolver profile {getattr(module, 'PROFILE_ID', '<unknown>')} "
-            f"missing hook(s): {', '.join(missing)}"
+            f"invalid hook(s): {', '.join(invalid)}"
         )
     return ResolverProfile(
         module.PROFILE_ID,
         module.PROFILE_NAME,
         module.PROFILE_DESCRIPTION,
-        *(getattr(module, name) for name in REQUIRED_HOOKS),
+        *hooks,
     )
 
 

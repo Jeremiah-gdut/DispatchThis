@@ -5,9 +5,11 @@ dispatcher state token and jumps back to the dispatcher. DispatchThis rewrites t
 terminator into a direct `goto` to the target block for that token.
 
 Some transitions are conditional. The current pass handles the narrow shape where an
-original basic block contains an `MLIL_IF`, each branch arm is pure state-selection code,
-and all state writes in each arm resolve to one known dispatcher state token before
-returning to the dispatcher.
+original basic block contains an `MLIL_IF` and all state writes in each arm resolve to one
+known dispatcher state token before returning to the dispatcher. Rewrites that skip arm
+work require pure state-selection code. A private shared-exit rewrite may instead
+preserve modeled semantic work throughout both arms and the merge because it changes only
+their common final dispatcher `GOTO`.
 
 The original transition condition and the dispatcher predicates are separate. The
 original `MLIL_IF` may use any condition because the rewriter copies it unchanged. The
@@ -26,8 +28,8 @@ For a candidate original basic block, the conditional planner:
 
 - finds an `MLIL_IF` inside the original basic block region;
 - walks the true and false regions until the dispatcher boundary;
-- rejects assignments outside the state-selection dependency chain or whose
-  assigned variables remain live outside the arm scope;
+- for rewrites that bypass work, rejects assignments outside the state-selection
+  dependency chain or whose assigned variables remain live outside the arm scope;
 - requires each dispatcher comparison alias to be defined by a unique,
   equal-width whole-variable direct-copy chain earlier in that comparison row,
   ending at the shared state input;
@@ -46,14 +48,17 @@ For a candidate original basic block, the conditional planner:
 - records only exact current-MLIL state-write instruction indices proved obsolete by the
   recovered transition.
 
-If both arms resolve to different known targets, `rewrite_redirections_mlil` copies the
-candidate `MLIL_IF` condition only when the skipped state channel is proved
-dispatcher-only and privately owned. When each arm instead has a distinct GOTO
-directly into a dispatcher comparison row, the planner rewrites those arm exits
-and leaves the original condition and state writes on the execution path. Both
-modes use copied source-block labels. Their edge rewrites and the plan's exact
-state-write NOPs are one atomic copy-transform; the whole replacement is
-discarded if any selected rewrite cannot be emitted.
+If both arms resolve to different known targets, `rewrite_redirections_mlil` chooses one
+of three proved rewrites. It may copy the candidate `MLIL_IF` condition when the skipped
+state channel is dispatcher-only and privately owned. When each arm has a distinct GOTO
+directly into a dispatcher comparison row, it rewrites those arm exits and leaves the
+original condition and state writes on the execution path. When both arms converge into
+one private merge tail, it preserves the original IF, both arms, and the complete shared
+tail, then replaces only the shared final GOTO with an IF on the
+already-written state token. This `shared_exit` mode never marks state writes obsolete.
+All modes use copied source-block labels. Their edge rewrites and the plan's exact
+state-write NOPs are one atomic copy-transform; the whole replacement is discarded if
+any selected rewrite cannot be emitted.
 
 Cleanup proof is deliberately weaker than target proof. If both targets are proved but no
 state-write instruction can be proved obsolete, the plan keeps an empty
@@ -64,14 +69,16 @@ reused the index.
 This applies only when the selected rewrite preserves execution of those writes.
 If distinct arm-exit rewrites are unavailable, cleanup or ownership uncertainty
 rejects the IF shortcut because an empty set cannot make bypassed writes execute.
-An external entry rejects both modes because rewriting a shared arm exit would
-also redirect the foreign path without target proof for that entry.
+An external entry rejects every mode because rewriting an arm or shared exit would also
+redirect the foreign path without target proof for that entry.
 
 ## Limits
 
 This is intentionally narrower than a symbolic predicate rebuild. It does not try to
-solve state ranges, variable/variable comparisons, arbitrary multi-step state-selection
-chains, or impure branch tails. A token-width mismatch or ambiguous route also rejects the
+solve state ranges, variable/variable comparisons, or arbitrary multi-step state-selection
+chains. Modeled semantic work is accepted only for shared-exit mode, when the entire
+arm-and-merge region is private, every path establishes a concrete token, and both routes
+use one final GOTO. Possible state mutations, a token-width mismatch, or an ambiguous route reject the
 transition. Unsupported shapes are left intact for Binary Ninja to display normally.
 Implicit dispatcher pass-through expansion is limited to `NOP* + GOTO` routing.
 Direct copies are accepted only inside an explicitly proved comparison row or

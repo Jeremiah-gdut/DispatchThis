@@ -13,11 +13,12 @@ PROFILE_DESCRIPTION = (
 )
 
 # Supported:
-# - branch gadget: yes
-# - indirect call gadget: yes
-# - global constants: yes
-# - deflatten: default planner
-# - string decrypt: yes (rem-loop, index0-loop, unrolled; ignores mlil_stable)
+# - branch gadget: custom
+# - indirect call gadget: custom
+# - global constants: custom
+# - correlated stores: custom
+# - deflatten: alias default
+# - string decrypt: custom (rem-loop, index0-loop, unrolled; ignores mlil_stable)
 #
 # Validation:
 # - branch: 0x6c5f6c -> 0x6c5f70, 0x6c6a4c
@@ -70,8 +71,7 @@ def _expression_key(expr):
     return ("il", id(getattr(expr, "function", None)), expr_index, instr_index)
 
 
-def plan_deflatten_redirections(bv, func, il):
-    return default.plan_deflatten_redirections(bv, func, il)
+plan_deflatten_redirections = default.plan_deflatten_redirections
 
 
 def _iter_scalar_constant_loads(bv, il):
@@ -463,10 +463,8 @@ def resolve_branch_gadget(bv, il, known_targets=None):
         )
         if targets:
             out.append(facts.branch_fact(
-                jump_il.address,
-                jump_il.dest.expr_index,
+                jump_il,
                 targets,
-                jump_il=jump_il,
             ))
     return out
 

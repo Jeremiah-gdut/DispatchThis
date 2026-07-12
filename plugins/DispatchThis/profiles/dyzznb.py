@@ -9,12 +9,12 @@ PROFILE_DESCRIPTION = "Rules for the dyzznb sample profile."
 CONST_SLOT_TYPE = "uint8_t const* const"
 
 # Supported:
-# - branch gadget: shared default planner
-# - indirect call gadget: shared default planner
-# - global constants: shared default planner
-# - correlated stores: intentional no-op
-# - deflatten: shared default planner
-# - string decrypt: shared default planner
+# - branch gadget: alias default
+# - indirect call gadget: alias default
+# - global constants: alias default
+# - correlated stores: omitted
+# - deflatten: alias default
+# - string decrypt: alias default
 #
 # Validation:
 # - branch/call/deflatten: validated on sub_924464 and sub_8e09ac in libdyzznb.so
@@ -22,25 +22,8 @@ CONST_SLOT_TYPE = "uint8_t const* const"
 # - string decrypt: fixture coverage
 
 
-def resolve_branch_gadget(bv, llil, known_targets=None):
-    return default.resolve_branch_gadget(bv, llil, known_targets)
-
-
-def resolve_call_gadget(bv, mlil):
-    return default.resolve_call_gadget(bv, mlil)
-
-
-def plan_global_constant_slots(bv, mlil):
-    return default.plan_global_constant_slots(bv, mlil)
-
-
-def plan_correlated_store_rewrites(_bv, _func, _mlil):
-    return []
-
-
-def plan_deflatten_redirections(bv, func, mlil):
-    return default.plan_deflatten_redirections(bv, func, mlil)
-
-
-def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
-    return default.plan_string_decrypt_calls(bv, func, mlil, mlil_stable)
+resolve_branch_gadget = default.resolve_branch_gadget
+resolve_call_gadget = default.resolve_call_gadget
+plan_global_constant_slots = default.plan_global_constant_slots
+plan_deflatten_redirections = default.plan_deflatten_redirections
+plan_string_decrypt_calls = default.plan_string_decrypt_calls

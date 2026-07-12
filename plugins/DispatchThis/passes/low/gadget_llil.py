@@ -366,10 +366,8 @@ def resolve_llil_jump_plan(bv, llil, known_targets=None):
                     facts = []
                     break
                 facts.append(branch_fact(
-                    source,
-                    jump_il.dest.expr_index,
+                    jump_il,
                     targets,
-                    jump_il=jump_il,
                 ))
             except Exception as e:  # noqa: BLE001
                 log_error(f"[gadget-llil] {source:#x}: {e}")

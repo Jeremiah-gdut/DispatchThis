@@ -43,17 +43,19 @@ def _int_set(name, values):
 
 
 def branch_fact(
-    source,
-    dest_expr_index,
-    targets,
     jump_il,
+    targets,
     cleanup_roots=None,
 ):
+    jump_il = _require_object("jump_il", jump_il)
     fact = {
-        "source": _require_int("source", source),
-        "dest_expr_index": _require_int("dest_expr_index", dest_expr_index),
+        "source": _require_int("source", getattr(jump_il, "address", None)),
+        "dest_expr_index": _require_int(
+            "dest_expr_index",
+            getattr(getattr(jump_il, "dest", None), "expr_index", None),
+        ),
         "targets": _targets(targets),
-        "jump_il": _require_object("jump_il", jump_il),
+        "jump_il": jump_il,
     }
     if cleanup_roots is not None:
         fact["cleanup_roots"] = _int_set("cleanup_roots", cleanup_roots)

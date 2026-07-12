@@ -15,11 +15,12 @@ PROFILE_DESCRIPTION = (
 )
 
 # Supported:
-# - branch gadget: valorant_2_6 delegate
-# - indirect call gadget: valorant_2_6 delegate
-# - global constants: driver call-argument slots
-# - deflatten: driver stack-state store dispatcher
-# - string decrypt: driver clone decoder
+# - branch gadget: alias valorant_2_6
+# - indirect call gadget: alias valorant_2_6
+# - global constants: custom
+# - correlated stores: omitted
+# - deflatten: custom
+# - string decrypt: custom
 #
 # Validation:
 # - deflatten: main @ 0x36d10, state var_124, state pointer var_168,
@@ -50,12 +51,8 @@ _COMPARISON_OPERATIONS = {
 }
 
 
-def resolve_branch_gadget(bv, il, known_targets=None):
-    return valorant_2_6.resolve_branch_gadget(bv, il, known_targets)
-
-
-def resolve_call_gadget(bv, il):
-    return valorant_2_6.resolve_call_gadget(bv, il)
+resolve_branch_gadget = valorant_2_6.resolve_branch_gadget
+resolve_call_gadget = valorant_2_6.resolve_call_gadget
 
 
 def plan_global_constant_slots(bv, il):
@@ -63,10 +60,6 @@ def plan_global_constant_slots(bv, il):
     for slot_addr in _driver_global_constant_slot_refs(il):
         _add_driver_global_constant_plan(plans, bv, il, slot_addr)
     return [plans[addr] for addr in sorted(plans)]
-
-
-def plan_correlated_store_rewrites(_bv, _func, _il):
-    return []
 
 
 def _driver_global_constant_slot_refs(il):

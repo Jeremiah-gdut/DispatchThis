@@ -1638,10 +1638,8 @@ An exception instance.
 
 ```python
 branch_fact(
-    source,
-    dest_expr_index,
-    targets,
     jump_il,
+    targets,
     cleanup_roots=None,
 )
 ```
@@ -1652,12 +1650,10 @@ Build an indirect branch recovery fact.
 
 **Parameters**
 
-- `source`: Indirect branch instruction address.
-- `dest_expr_index`: Current LLIL destination expression index, used only for
-  current-LLIL presentation rewrites.
-- `targets`: Iterable of target addresses.
 - `jump_il`: Required current LLIL instruction witness retained for exact
-  mutation-boundary validation.
+  mutation-boundary validation. `source` is derived from `jump_il.address`, and
+  `dest_expr_index` from `jump_il.dest.expr_index`.
+- `targets`: Iterable of target addresses.
 - `cleanup_roots`: Optional iterable of instruction indices for branch target
   decode cleanup.
 
@@ -1674,8 +1670,9 @@ A dict with:
 
 **Key behavior and limits**
 
-- Raises `MalformedRecoveryFact` when required integer fields are not integers,
-  when `targets` is not iterable, or when `targets` is empty.
+- Raises `MalformedRecoveryFact` when the witness is missing, its derived
+  coordinates are not exact non-negative integers, `targets` is not iterable,
+  or `targets` is empty.
 - `bool` and negative integers are rejected for address/index fields.
 - Does not validate target addresses against a BinaryView.
 - Does not call `Function.set_user_indirect_branches`; workflow owns that

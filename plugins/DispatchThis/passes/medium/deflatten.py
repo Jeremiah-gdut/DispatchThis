@@ -833,7 +833,44 @@ def _pure_state_selection_tail(mlil, root, scope, writes):
             if not any(_same_var(ins.dest, var) for var in required):
                 return False
             written_dependencies.add(ins.dest)
-    return mlil_helpers.variables_are_scope_local(mlil, written_dependencies, scope)
+    return mlil_helpers.variables_are_scope_local(
+        mlil,
+        written_dependencies,
+        scope,
+    )
+
+
+def _shared_semantic_exit(
+    mlil,
+    head,
+    true_scope,
+    false_scope,
+    analysis,
+    true_route,
+    false_route,
+):
+    shared_scope = true_scope & false_scope
+    scopes = true_scope | false_scope
+    if (
+        not shared_scope
+        or not _region_is_private(mlil, scopes, {head.start})
+        or not _dispatcher_values_are_private(mlil, analysis)
+    ):
+        return None
+
+    exits = []
+    for route in (true_route, false_route):
+        if len(route["exits"]) != 1:
+            return None
+        exits.append(route["exits"][0][0])
+    first, second = exits
+    if (
+        getattr(first, "instr_index", None) != getattr(second, "instr_index", None)
+        or first.il_basic_block.start not in shared_scope
+        or _op(first) != M.MLIL_GOTO
+    ):
+        return None
+    return first
 
 
 def _conditional_candidates(mlil, head, region, analysis):
@@ -877,57 +914,76 @@ def _conditional_candidates(mlil, head, region, analysis):
             continue
         writes = (*true_writes, *false_writes)
         scopes = true_scope | false_scope
-        if not _pure_state_selection_tail(mlil, root, scopes, writes):
-            continue
         true_route = _route_scope(mlil, analysis, true_scope, true_token)
         false_route = _route_scope(mlil, analysis, false_scope, false_token)
         if true_route is None or false_route is None:
             continue
-        owned_writes = _owned_write_indices(mlil, writes, scopes, {head.start})
-        exit_cleanup = (
-            owned_writes
-            if _state_channel_is_dispatcher_only(mlil, analysis)
-            else set()
+        pure_tail = _pure_state_selection_tail(mlil, root, scopes, writes)
+        shared_exit = None if pure_tail else _shared_semantic_exit(
+            mlil,
+            head,
+            true_scope,
+            false_scope,
+            analysis,
+            true_route,
+            false_route,
         )
-        exit_targets = {}
-        conflicting_exit = False
-        for route in (true_route, false_route):
-            for jump, _entry in route["exits"]:
-                prior = exit_targets.get(jump.instr_index)
-                if prior is not None and prior[1].start != route["target"].start:
-                    conflicting_exit = True
+        if shared_exit is not None:
+            rewrite_mode = "shared_exit"
+            cleanup_indices = set()
+            selected_exit_targets = ()
+        else:
+            owned_writes = _owned_write_indices(mlil, writes, scopes, {head.start})
+            exit_cleanup = (
+                owned_writes
+                if _state_channel_is_dispatcher_only(mlil, analysis)
+                else set()
+            )
+            exit_targets = {}
+            conflicting_exit = False
+            for route in (true_route, false_route):
+                for jump, _entry in route["exits"]:
+                    prior = exit_targets.get(jump.instr_index)
+                    if prior is not None and prior[1].start != route["target"].start:
+                        conflicting_exit = True
+                        break
+                    exit_targets[jump.instr_index] = (jump, route["target"])
+                if conflicting_exit:
                     break
-                exit_targets[jump.instr_index] = (jump, route["target"])
-            if conflicting_exit:
-                break
-        exact_writes = {ins.instr_index for ins, _token in writes}
-        preserve_writes = (
-            not conflicting_exit
-            and true_route["direct_rows"]
-            and false_route["direct_rows"]
-            and owned_writes == exact_writes
-            and _dispatcher_values_are_private(mlil, analysis)
-        )
-        bypass_safe = (
-            owned_writes == exact_writes
-            and _state_channel_is_dispatcher_only(mlil, analysis, scopes)
-        )
-        if not preserve_writes and not bypass_safe:
-            continue
-        cleanup_indices = exit_cleanup if preserve_writes else owned_writes
+            exact_writes = {ins.instr_index for ins, _token in writes}
+            preserve_writes = (
+                pure_tail
+                and not conflicting_exit
+                and true_route["direct_rows"]
+                and false_route["direct_rows"]
+                and owned_writes == exact_writes
+                and _dispatcher_values_are_private(mlil, analysis)
+            )
+            bypass_safe = (
+                pure_tail
+                and owned_writes == exact_writes
+                and _state_channel_is_dispatcher_only(mlil, analysis, scopes)
+            )
+            if not preserve_writes and not bypass_safe:
+                continue
+            rewrite_mode = "arm_exits" if preserve_writes else "condition"
+            cleanup_indices = exit_cleanup if preserve_writes else owned_writes
+            selected_exit_targets = (
+                tuple(exit_targets.values()) if preserve_writes else ()
+            )
         candidates.append(
             {
                 "kind": "if_else",
-                "rewrite_mode": "arm_exits" if preserve_writes else "condition",
+                "rewrite_mode": rewrite_mode,
                 "obb": head,
                 "if_il": if_il,
+                "shared_exit": shared_exit,
+                "state_var": root,
                 "true_target": true_route["target"],
                 "false_target": false_route["target"],
                 "true_token": true_token,
                 "false_token": false_token,
-                "exit_targets": (
-                    tuple(exit_targets.values()) if preserve_writes else ()
-                ),
+                "exit_targets": selected_exit_targets,
                 "obsolete_state_writes": cleanup_indices,
                 "obsolete_state_write_witnesses": _write_witnesses(
                     writes,
@@ -1127,6 +1183,18 @@ def _valid_instruction_index(instr_index):
     return type(instr_index) is int and instr_index >= 0
 
 
+def _valid_state_token(token):
+    return (
+        isinstance(token, (tuple, list))
+        and len(token) == 2
+        and type(token[0]) is int
+        and token[0] >= 0
+        and type(token[1]) is int
+        and token[1] > 0
+        and token[0].bit_length() <= token[1] * 8
+    )
+
+
 def _expression_witness(expr):
     expr_index = getattr(expr, "expr_index", None)
     operation = _op(expr)
@@ -1194,6 +1262,43 @@ def _replacements_for_redirection(redirection):
 
     if kind == "if_else":
         rewrite_mode = redirection.get("rewrite_mode")
+        if rewrite_mode == "shared_exit":
+            jump = redirection.get("shared_exit")
+            state_var = redirection.get("state_var")
+            true_token = redirection.get("true_token")
+            false_token = redirection.get("false_token")
+            true_start = getattr(redirection.get("true_target"), "start", None)
+            false_start = getattr(redirection.get("false_target"), "start", None)
+            if (
+                _op(jump) != M.MLIL_GOTO
+                or state_var is None
+                or not _valid_state_token(true_token)
+                or not _valid_state_token(false_token)
+                or true_token[1] != false_token[1]
+                or true_token[0] == false_token[0]
+                or not _valid_instruction_index(true_start)
+                or not _valid_instruction_index(false_start)
+            ):
+                return None
+
+            def replace(mlil, old_jump):
+                loc = ILSourceLocation.from_instruction(old_jump)
+                size = true_token[1]
+                condition = mlil.compare_equal(
+                    size,
+                    mlil.var(size, state_var, loc),
+                    mlil.const(size, true_token[0], loc),
+                    loc,
+                )
+                return mlil.if_expr(
+                    condition,
+                    copied_label_for_source(mlil, true_start),
+                    copied_label_for_source(mlil, false_start),
+                    loc,
+                )
+
+            return ((jump, replace),)
+
         if rewrite_mode == "arm_exits":
             raw_exit_targets = redirection.get("exit_targets")
             if not isinstance(raw_exit_targets, (tuple, list)):

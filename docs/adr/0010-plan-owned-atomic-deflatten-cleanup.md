@@ -22,8 +22,10 @@ For a conditional transition, every path in each selected arm must terminate
 at a dispatcher entry and must establish the same concrete token; mere
 existential reachability or one agreeing write elsewhere in the scope is not
 target proof.
-Assignments in the arms must belong to the recovered state-selection dependency
-chain and must not remain live outside the arm scope. More than one valid
+Assignments skipped or bypassed by a conditional rewrite must belong to the recovered
+state-selection dependency chain and must not remain live outside the arm scope. A
+shared-exit rewrite may preserve other modeled semantics because it changes only the
+common final GOTO, but its complete arm-and-merge region must be private. More than one valid
 conditional candidate in an original region is ambiguous and rejects that
 region. Pointer-based state stores require one complete, unique definition
 chain from the store destination to the address of the state variable.
@@ -95,8 +97,11 @@ the rewritten arm or region rejects a conditional plan because the shared exit
 mutation would also affect the foreign path. For unconditional plans it merely
 leaves `obsolete_state_writes` empty when the owned exit itself remains valid.
 Conditional plans use an exit-preserving rewrite when each private arm reaches
-a distinct GOTO directly into a dispatcher comparison row. Otherwise the planner
-may shortcut the original IF only when all skipped state-channel work is proved
+a distinct GOTO directly into a dispatcher comparison row. When both arms
+converge into one private shared tail, the planner preserves the complete region and
+replaces only its unique final dispatcher GOTO with a comparison of the concrete
+state token; this mode performs no state-write cleanup. Otherwise the planner may
+shortcut the original IF only when all skipped state-channel work is proved
 dispatcher-only and privately owned; cleanup uncertainty then rejects that
 shortcut rather than silently bypassing the writes.
 

@@ -144,6 +144,15 @@ class CopiedMlil:
     def if_expr(self, cond, true_label, false_label, loc):
         return ("if", cond, true_label.operand, false_label.operand, loc)
 
+    def var(self, size, variable, loc):
+        return ("var", size, variable, loc)
+
+    def const(self, size, value, loc):
+        return ("const", size, value, loc)
+
+    def compare_equal(self, size, left, right, loc):
+        return ("cmp_e", size, left, right, loc)
+
     def copy_expr(self, expr):
         return ("copy", expr)
 
@@ -490,6 +499,75 @@ def build_cond_function():
     }
     mlil = FakeMlil([d1, d2, d3, chooser, true_arm, false_arm, join, obb2, obb3, exit_bb], defs)
     return FakeFunc(mlil), chooser, obb2, obb3
+
+
+def build_cond_function_with_shared_semantic_tail():
+    func, chooser, obb2, obb3 = build_cond_function()
+    join = next(bb for bb in func.mlil.basic_blocks if bb.start == 13)
+    jump = join.instructions[-1]
+    del func.mlil._by_index[jump.instr_index]
+    jump.instr_index += 1
+    semantic_write = set_var("loop_index", const(1), 14)
+    semantic_write.il_basic_block = join
+    semantic_write.function = func.mlil
+    join.instructions.insert(-1, semantic_write)
+    join.end += 1
+    func.mlil._by_index[semantic_write.instr_index] = semantic_write
+    func.mlil._by_index[jump.instr_index] = jump
+    func.mlil._defs["loop_index"] = [semantic_write]
+    return func, chooser, join, obb2, obb3
+
+
+def build_cond_function_with_arm_selected_shared_semantics():
+    d1 = Block(0, if_instr(cmp_e("t1", 0x1111000011110001), 10, 1, 0))
+    d2 = Block(1, if_instr(cmp_e("t2", 0x2222000022220002), 40, 2, 1))
+    d3 = Block(2, if_instr(cmp_e("t3", 0x3333000033330003), 50, 99, 2))
+    chooser = Block(10, if_instr(var("program_cond"), 11, 20, 10))
+    true_arm = Block(
+        11,
+        set_var("next_state", const(0x2222000022220002), 11),
+        set_var("next_value", const(1), 12),
+        set_var("preserved_scratch", const(11), 13),
+        goto(14),
+    )
+    false_arm = Block(
+        20,
+        set_var("next_state", const(0x3333000033330003), 20),
+        set_var("next_value", const(2), 21),
+        set_var("preserved_scratch", const(22), 22),
+        goto(23),
+    )
+    join = Block(
+        30,
+        set_var("state", var("next_state"), 30),
+        set_var("semantic_value", var("next_value"), 31),
+        goto(32),
+    )
+    obb2 = Block(40, goto(40))
+    obb3 = Block(50, goto(50))
+    exit_bb = Block(99, goto(99))
+    link(d1, chooser, d2)
+    link(d2, obb2, d3)
+    link(d3, obb3, exit_bb)
+    link(chooser, true_arm, false_arm)
+    link(true_arm, join)
+    link(false_arm, join)
+    link(join, d1)
+    defs = {
+        "t1": [set_var("t1", var("state"), 100)],
+        "t2": [set_var("t2", var("state"), 101)],
+        "t3": [set_var("t3", var("state"), 102)],
+        "next_state": [true_arm[11], false_arm[20]],
+        "next_value": [true_arm[12], false_arm[21]],
+        "preserved_scratch": [true_arm[13], false_arm[22]],
+        "state": [join[30]],
+        "semantic_value": [join[31]],
+    }
+    mlil = FakeMlil(
+        [d1, d2, d3, chooser, true_arm, false_arm, join, obb2, obb3, exit_bb],
+        defs,
+    )
+    return FakeFunc(mlil), chooser, join, obb2, obb3
 
 
 def build_nested_cond_function():
@@ -1492,7 +1570,34 @@ def test_compute_redirections_recovers_conditional_two_branch_transition():
     assert 13 not in deflatten._analyze_dispatcher(func.mlil)["dispatcher_starts"]
 
 
-def test_compute_redirections_rejects_conditional_tail_writing_other_state():
+def test_compute_redirections_preserves_shared_semantic_tail():
+    func, chooser, join, obb2, obb3 = build_cond_function_with_shared_semantic_tail()
+
+    redirections = compute_redirections(FakeBv(), func)
+    cond = next(r for r in redirections if r.get("obb") is chooser)
+
+    assert cond["rewrite_mode"] == "shared_exit"
+    assert cond["shared_exit"] is join[15]
+    assert cond["state_var"] == "state"
+    assert cond["true_target"] is obb2
+    assert cond["false_target"] is obb3
+    assert cond["obsolete_state_writes"] == set()
+
+
+def test_compute_redirections_preserves_arm_selected_shared_semantics():
+    func, chooser, join, obb2, obb3 = build_cond_function_with_arm_selected_shared_semantics()
+
+    redirections = compute_redirections(FakeBv(), func)
+    cond = next(r for r in redirections if r.get("obb") is chooser)
+
+    assert cond["rewrite_mode"] == "shared_exit"
+    assert cond["shared_exit"] is join[32]
+    assert cond["true_target"] is obb2
+    assert cond["false_target"] is obb3
+    assert cond["obsolete_state_writes"] == set()
+
+
+def test_compute_redirections_preserves_unrelated_arm_write_before_shared_exit():
     func, chooser, _obb2, _obb3 = build_cond_function()
     true_arm = next(bb for bb in func.mlil.basic_blocks if bb.start == 11)
     other_write = set_var("other_state", const(0x4444000044440004), 111)
@@ -1504,8 +1609,10 @@ def test_compute_redirections_rejects_conditional_tail_writing_other_state():
     func.mlil._defs["other_state"] = [other_write]
 
     redirections = compute_redirections(FakeBv(), func)
+    plan = next(item for item in redirections if item.get("if_il") is chooser[10])
 
-    assert all(plan.get("if_il") is not chooser[10] for plan in redirections)
+    assert plan["rewrite_mode"] == "shared_exit"
+    assert plan["obsolete_state_writes"] == set()
 
 
 def test_conditional_rejects_arm_with_external_entry():
@@ -1518,6 +1625,17 @@ def test_conditional_rejects_arm_with_external_entry():
         ins.function = func.mlil
         func.mlil._by_index[ins.instr_index] = ins
     func.mlil.basic_blocks.append(external)
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan.get("if_il") is not chooser[10] for plan in redirections)
+
+
+def test_conditional_shared_exit_rejects_merge_with_external_entry():
+    func, chooser, join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    external = Block(200, goto(200))
+    link(external, join)
+    append_block(func.mlil, external)
 
     redirections = compute_redirections(FakeBv(), func)
 
@@ -1817,6 +1935,80 @@ def test_rewrite_conditional_arm_exits_preserves_original_if(monkeypatch):
         200: ("goto", ("copied-label", obb2.start), ("loc", true_jump.expr_index)),
         201: ("goto", ("copied-label", obb3.start), ("loc", false_jump.expr_index)),
     }
+
+
+def test_rewrite_conditional_shared_exit_preserves_semantic_tail(monkeypatch):
+    func, chooser, join, obb2, obb3 = build_cond_function_with_shared_semantic_tail()
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
+    copied = CopiedMlil()
+
+    def fake_copy(ctx_arg, replacements, mlil=None):
+        assert ctx_arg is ctx
+        assert mlil is func.mlil
+        assert set(replacements) == {join[15].instr_index}
+        copied.outputs[join[15].instr_index] = replacements[join[15].instr_index](
+            copied,
+            join[15],
+        )
+        return copied, 1
+
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        fake_copy,
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(ctx, func.mlil, [plan])
+
+    loc = ("loc", join[15].expr_index)
+    assert new_mlil is copied
+    assert applied == 1
+    assert copied.outputs == {
+        join[15].instr_index: (
+            "if",
+            (
+                "cmp_e",
+                8,
+                ("var", 8, "state", loc),
+                ("const", 8, 0x2222000022220002, loc),
+                loc,
+            ),
+            ("copied-label", obb2.start),
+            ("copied-label", obb3.start),
+            loc,
+        ),
+    }
+
+
+def test_rewrite_conditional_shared_exit_rejects_token_outside_width(monkeypatch):
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    plan["true_token"] = (0x100, 1)
+    plan["false_token"] = (0, 1)
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("out-of-width token reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [plan],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
 
 
 @pytest.mark.parametrize("rewrite_mode", [None, "unknown"])

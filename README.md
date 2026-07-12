@@ -88,9 +88,9 @@ Eight workflow activities are inserted per function. One is the no-op
    stabilize for the current function, then annotates recognized direct decrypt calls.
 8. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and builds an atomic
    replacement MLIL where each original basic block's dispatcher jump becomes a direct
-   `goto` to the real successor. Conditional transitions either redirect private arm exits
-   while preserving their state writes, or shortcut the original condition only after the
-   skipped state channel is proved private. Equality, inequality, and signed or
+   `goto` to the real successor. Conditional transitions redirect private arm exits,
+   redirect one private shared semantic-tail exit, or shortcut the original condition
+   only after the skipped state channel is proved private. Equality, inequality, and signed or
    unsigned ordering dispatchers are routed by replaying each concrete state token. Every
    private dispatcher exit and each exactly proven obsolete state write is rewritten in the
    same all-or-nothing copy-transform. Comparison aliases must be whole-variable,

@@ -81,8 +81,8 @@ validation:
 Then implement the smallest profile that satisfies those facts:
 
 1. Add `plugins/DispatchThis/profiles/<profile_id>.py`.
-2. Define the metadata and every required hook.
-3. Return `[]` from hooks the binary does not need.
+2. Define the metadata and only the semantic hooks this binary supports.
+3. Omit unsupported hooks; the registry normalizes them to an empty result.
 4. Register the module in `plugins/DispatchThis/profiles/__init__.py`.
 5. Complete the definition of done below.
 
@@ -118,17 +118,17 @@ hash prefix, or another non-sensitive identifier.
 
 ## Capability matrix
 
-Every binary profile must declare which required hooks are real and which are
-intentional no-ops. Keep this near the top of the profile module as a comment:
+Every binary profile must declare which semantic hooks are custom, aliases, or
+intentionally omitted. Keep this near the top of the profile module as a comment:
 
 ```text
 Supported:
-- branch gadget: yes
-- indirect call gadget: yes
-- global constants: no-op
-- correlated stores: no-op
-- deflatten: no-op
-- string decrypt: no-op
+- branch gadget: custom
+- indirect call gadget: alias valorant_2_6
+- global constants: custom
+- correlated stores: omitted
+- deflatten: alias default
+- string decrypt: omitted
 
 Validation:
 - branch: 0x...
@@ -139,15 +139,16 @@ This distinguishes "not needed by this binary" from "not implemented yet".
 
 ## Reuse
 
-A binary profile may reuse behavior only by calling stable helper modules or by
-explicitly delegating a hook to another named profile:
+A binary profile may reuse behavior only through stable helper modules or by
+explicitly aliasing a hook from another named profile:
 
 ```python
 from . import default
 
-def resolve_branch_gadget(bv, llil, known_targets=None):
-    return default.resolve_branch_gadget(bv, llil, known_targets)
+resolve_branch_gadget = default.resolve_branch_gadget
 ```
+
+Use a wrapper only when the profile intentionally changes arguments or behavior.
 
 A profile may not import recovery pass modules directly. The current
 `default` profile is the temporary exception because it is the facade for the
@@ -159,7 +160,7 @@ automatic inheritance. The profile module must make hook ownership obvious:
 document which hooks reuse another profile and which hooks are binary-specific.
 
 Do not change `profiles/default.py` while adding a new binary profile unless the
-task is explicitly to fix the current default binary. Reuse default by calling
+task is explicitly to fix the current default binary. Reuse default by aliasing
 its hooks. Widening default behavior for a new binary risks regressing the
 existing default binary.
 
@@ -266,12 +267,17 @@ a deliberate general contract change.
 
 ## Contract
 
-Each profile module must expose:
+Each profile module must expose metadata:
 
 ```python
 PROFILE_ID = "dyzznb_main_202607"
 PROFILE_NAME = "DYZZNB main 2026-07"
-PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals, correlated stores, deflatten, and strings."
+PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607 branch and call gadgets."
+```
+
+It may expose any of these six semantic capability hooks:
+
+```python
 
 def resolve_branch_gadget(bv, llil, known_targets=None):
     return []
@@ -292,8 +298,11 @@ def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
     return []
 ```
 
-`resolver_profile_from_module()` rejects a module when any required hook is
-missing. No-op hooks are valid.
+Missing hooks mean that the profile does not support that capability;
+`resolver_profile_from_module()` supplies one shared empty-result function to
+the workflow-facing `ResolverProfile`. A hook attribute that exists but is not
+callable is rejected as a profile error. This keeps hook names semantic without
+requiring boilerplate no-op functions, a profile base class, or a dispatch DSL.
 
 ## Recovery facts
 
@@ -309,8 +318,16 @@ missing. No-op hooks are valid.
 }
 ```
 
-`source` is the indirect branch address. `targets` must contain valid target
-addresses. `dest_expr_index` is used only for current-LLIL presentation rewrites;
+Build the fact from the exact current LLIL witness so repeated coordinates cannot
+disagree:
+
+```python
+return facts.branch_fact(jump_il, targets, cleanup_roots=cleanup_roots)
+```
+
+`source` is derived from `jump_il.address`, while `dest_expr_index` is derived
+from `jump_il.dest.expr_index`. `targets` must contain valid target addresses.
+`dest_expr_index` is used only for current-LLIL presentation rewrites;
 workflow owns `Function.set_user_indirect_branches`. `cleanup_roots` is optional
 and must contain instruction indices rooted in branch-target decode garbage.
 Bundled resolvers also retain the exact current `jump_il` witness; the backend
@@ -394,9 +411,10 @@ Profiles recognize the binary-specific dispatcher/state-write shape. Every
 unconditional plan must include all private dispatcher exits for that original
 region, and concrete token replay from every exit must prove the same target.
 For conditional plans, every path in each arm must terminate at a dispatcher
-entry and establish the same token, assignments must stay on the
-state-selection dependency chain, and
-multiple valid candidates must be rejected rather than ordered implicitly.
+entry and establish the same token. Work bypassed by a rewrite must stay on the
+state-selection dependency chain; modeled semantics may remain in a private
+shared-exit region because that whole region still executes. Multiple valid
+candidates must be rejected rather than ordered implicitly.
 Supported variable/constant dispatcher comparisons are `E`, `NE`, and signed or
 unsigned `LT`, `LE`, `GT`, and `GE`; comparison operand order and token width are
 part of the evidence. Profiles do not need to solve symbolic intervals.
@@ -492,12 +510,12 @@ different profile, set `analysis.plugins.dispatchThis.resolverProfile` explicitl
 
 - The binary facts template is complete; unused capabilities are marked `none`.
 - The profile has a stable non-sensitive ID, name, and description.
-- The capability matrix identifies real hooks and intentional no-ops.
-- Every required hook exists, and unused capabilities return `[]`.
+- The capability matrix identifies custom hooks, aliases, and omitted capabilities.
+- Every declared hook is callable; unsupported capabilities are omitted.
 - The profile is registered and passes resolver contract validation.
 - Every real hook has a focused test.
 - `pytest -q` passes.
-- Manual BNDB validation is recorded after a full Binary Ninja restart.
+- Validation on a freshly opened raw binary is recorded after a full Binary Ninja restart.
 - `workflow.py`, `profiles/default.py`, and `passes/` are unchanged unless the
   change explicitly updates a shared contract.
 - Profile code, tests, and docs contain no sensitive local/project information.

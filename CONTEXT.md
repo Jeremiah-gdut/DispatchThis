@@ -22,13 +22,14 @@ binary profiles may share helpers when their sample family behavior overlaps.
 _Avoid_: generic rule engine
 
 **Resolver profile contract**:
-The narrow agreement a resolver profile must satisfy: recognize one binary's
-indirect branch, indirect call, global constant, correlated-store, deflatten, and
+The narrow agreement a resolver profile must satisfy: declare its metadata and
+implement only the semantic capabilities it supports for one binary's indirect
+branch, indirect call, global constant, correlated-store, deflatten, and
 string-decrypt shapes, then return standard recovery facts or plans without
-owning workflow mutations. The plan hooks are
+owning workflow mutations. Missing hooks are normalized to an empty result by
+the registry; identical behavior is expressed with a direct function alias. The plan hooks are
 `plan_correlated_store_rewrites`, `plan_deflatten_redirections`, and
-`plan_string_decrypt_calls`. A profile may implement a hook as a no-op when that
-binary does not use the capability.
+`plan_string_decrypt_calls`.
 _Avoid_: middleware, adapter framework, plugin rewrite layer
 
 **Binary profile**:
@@ -284,8 +285,10 @@ family it carries two branch outcomes, each with its own state token and target
 original basic block. Deflattening rewrites conditional transitions when both
 branch outcomes resolve, every path establishes its token, and the rewritten
 region is private. It preserves arm execution when distinct dispatcher exits
-exist; otherwise it shortcuts the condition only with complete state-channel
-bypass proof.
+exist. When both arms converge into one private semantic tail, it preserves the
+tail and rewrites only its unique dispatcher exit using the already-written
+state token. Otherwise it shortcuts the condition only with complete
+state-channel bypass proof.
 
 **Workflow phase**:
 A named stage of per-function recovery work whose result controls whether later recovery work may run.

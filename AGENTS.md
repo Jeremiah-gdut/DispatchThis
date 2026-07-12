@@ -73,14 +73,18 @@ width, then replay each concrete recovered token through the dispatcher CFG.
 Do not infer symbolic token intervals or choose a target when replay is
 ambiguous.
 
-Conditional tails may contain only control flow and assignments on the proved
-state-selection dependency chain. Every path must establish the same token;
+Conditional rewrites that skip arm work may contain only control flow and assignments
+on the proved state-selection dependency chain. Every path must establish the same token;
 the presence of one agreeing write somewhere in the scope is insufficient.
 When each arm has a private GOTO directly into a dispatcher comparison row,
 rewrite those exits so state writes still execute. Rewriting the original IF is
 allowed only when the whole state channel is dispatcher-only and every skipped
-write is proved private. Any external arm entry rejects the conditional plan:
-even an arm-exit rewrite would also change the foreign path using that exit. A
+write is proved private. A private arm-and-merge region may contain other modeled
+semantics when both routes use one final dispatcher GOTO; preserve the entire region and
+rewrite only that GOTO using the already-written state token, with no state-write
+cleanup. Possible state mutations still reject this mode. Any external entry into the complete arm-and-merge
+region rejects the conditional plan: even an exit rewrite would also change the
+foreign path using that exit. A
 profile that recognizes pointer-based state stores must prove the
 store destination through one complete, unique definition chain that dominates
 the STORE and ends at the state variable; a variable that once held `&state` is

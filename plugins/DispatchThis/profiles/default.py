@@ -9,6 +9,14 @@ PROFILE_ID = "default"
 PROFILE_NAME = "Default"
 PROFILE_DESCRIPTION = "Built-in rules for the current DispatchThis binary."
 
+# Supported:
+# - branch gadget: custom
+# - indirect call gadget: custom
+# - global constants: custom
+# - correlated stores: omitted
+# - deflatten: custom
+# - string decrypt: custom
+
 
 def resolve_branch_gadget(bv, llil, known_targets=None):
     return resolve_llil_jump_plan(bv, llil, known_targets)
@@ -20,10 +28,6 @@ def resolve_call_gadget(bv, mlil):
 
 def plan_global_constant_slots(bv, mlil):
     return _plan_global_constant_slots(bv, mlil)
-
-
-def plan_correlated_store_rewrites(_bv, _func, _mlil):
-    return []
 
 
 def plan_deflatten_redirections(bv, func, mlil):

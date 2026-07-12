@@ -1,6 +1,5 @@
 from importlib import import_module
 
-from test_gadget_llil_values import Expr as LlilExpr
 from test_global_constants import (
     DataVar,
     FakeBv as GlobalFakeBv,
@@ -24,36 +23,10 @@ from test_string_decrypt import (
 )
 
 
-def test_branch_profile_returns_branch_facts(monkeypatch):
+def test_branch_profile_reuses_default_planner():
     dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
-    jump = LlilExpr(
-        "LLIL_JUMP",
-        dest=LlilExpr("LLIL_REG_SSA", expr_index=7),
-        address=0x2000,
-    )
 
-    class FakeLlil(list):
-        pass
-
-    il = FakeLlil([[jump]])
-    il.ssa_form = object()
-    bv = object()
-    expected = [{
-        "source": 0x2000,
-        "dest_expr_index": 7,
-        "targets": (0x2000, 0x3000),
-    }]
-    monkeypatch.setattr(
-        dyzznb.default,
-        "resolve_branch_gadget",
-        lambda passed_bv, passed_il, known_targets=None: (
-            expected
-            if (passed_bv, passed_il, known_targets) == (bv, il, None)
-            else None
-        ),
-    )
-
-    assert dyzznb.resolve_branch_gadget(bv, il) == expected
+    assert dyzznb.resolve_branch_gadget is dyzznb.default.resolve_branch_gadget
 
 
 def test_call_profile_returns_call_facts():

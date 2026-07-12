@@ -35,6 +35,8 @@ Complete-evidence and current-witness rules are captured in
 [`adr/0011-complete-evidence-and-current-il-witnesses.md`](adr/0011-complete-evidence-and-current-il-witnesses.md).
 Plan-owned call load cleanup is captured in
 [`adr/0012-call-target-slice-owned-load-cleanup.md`](adr/0012-call-target-slice-owned-load-cleanup.md).
+Optional semantic profile hooks are captured in
+[`adr/0013-optional-semantic-profile-hooks.md`](adr/0013-optional-semantic-profile-hooks.md).
 New binary recognizers should be added as bundled resolver profiles; see
 [`resolver-profiles.md`](resolver-profiles.md).
 
@@ -223,8 +225,9 @@ the CFG - and the recovered state machine - would be incomplete).
   blocks. The default profile delegates to `compute_redirections`.
 - `rewrite_redirections_mlil` uses the MLIL copy-transform backend to build an atomic
   replacement: every private dispatcher exit is redirected to the one target proved for
-  it, conditional transitions explicitly choose either private arm-exit rewrites or a
-  fully proved condition shortcut, and only exact instruction indices in each plan's
+  it, conditional transitions explicitly choose private arm-exit rewrites, a private
+  shared-tail exit rewrite, or a fully proved condition shortcut, and only exact
+  instruction indices in each plan's
   `obsolete_state_writes` set become NOPs - see
   [`conditional-deflattening.md`](conditional-deflattening.md). Any rejected redirection
   discards the entire replacement.

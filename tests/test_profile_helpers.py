@@ -44,6 +44,12 @@ class CallIl:
     address = 0x4000
 
 
+class JumpIl:
+    def __init__(self, address=0x1000, dest_expr_index=7):
+        self.address = address
+        self.dest = type("Dest", (), {"expr_index": dest_expr_index})()
+
+
 def test_helper_package_exposes_stable_module_imports():
     helpers = import_module("plugins.DispatchThis.helpers")
 
@@ -107,21 +113,19 @@ def test_memory_helpers_validate_addresses_targets_and_sections():
 
 def test_fact_builders_return_existing_recovery_fact_shapes():
     facts = import_module("plugins.DispatchThis.helpers.facts")
-    jump_il = object()
+    jump_il = JumpIl()
     call_il = CallIl()
     decode_def = object()
 
-    assert facts.branch_fact(0x1000, 7, [0x3000, 0x2000, 0x3000], jump_il) == {
+    assert facts.branch_fact(jump_il, [0x3000, 0x2000, 0x3000]) == {
         "source": 0x1000,
         "dest_expr_index": 7,
         "targets": (0x2000, 0x3000),
         "jump_il": jump_il,
     }
     assert facts.branch_fact(
-        0x1000,
-        7,
-        [0x2000],
         jump_il,
+        [0x2000],
         cleanup_roots=[12, 11, 12],
     ) == {
         "source": 0x1000,
@@ -157,14 +161,14 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
 
 def test_fact_builders_reject_malformed_required_fields():
     facts = import_module("plugins.DispatchThis.helpers.facts")
-    jump_il = object()
+    jump_il = JumpIl()
 
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
-        facts.branch_fact(0x1000, 7, [], jump_il)
+        facts.branch_fact(jump_il, [])
     with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
-        facts.branch_fact(0x1000, 7, [0x2000], jump_il, cleanup_roots=1)
+        facts.branch_fact(jump_il, [0x2000], cleanup_roots=1)
     with pytest.raises(facts.MalformedRecoveryFact, match="jump_il"):
-        facts.branch_fact(0x1000, 7, [0x2000], None)
+        facts.branch_fact(None, [0x2000])
     with pytest.raises(facts.MalformedRecoveryFact, match="call_il"):
         facts.call_fact(None, 0x5000)
     with pytest.raises(facts.MalformedRecoveryFact, match="call_addr"):
@@ -174,9 +178,11 @@ def test_fact_builders_reject_malformed_required_fields():
     with pytest.raises(facts.MalformedRecoveryFact, match="plaintext"):
         facts.string_decrypt_fact(0x9000, 0xA000, 0xB000, "hello")
     with pytest.raises(facts.MalformedRecoveryFact, match="source"):
-        facts.branch_fact(-1, 7, [0x2000], jump_il)
+        facts.branch_fact(JumpIl(address=-1), [0x2000])
+    with pytest.raises(facts.MalformedRecoveryFact, match="dest_expr_index"):
+        facts.branch_fact(JumpIl(dest_expr_index=-1), [0x2000])
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
-        facts.branch_fact(0x1000, 7, [-1], jump_il)
+        facts.branch_fact(jump_il, [-1])
     with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
         facts.call_fact(CallIl(), 0x5000, cleanup_roots=[-1])
     with pytest.raises(facts.MalformedRecoveryFact, match="subset"):

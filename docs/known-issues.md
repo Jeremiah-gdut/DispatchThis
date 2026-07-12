@@ -23,9 +23,10 @@ output against the disassembly before trusting it.
 
 ## Conditional reconstruction
 
-- **Conditional deflattening is narrow.** It handles pure branch regions where all state
-  writes in each arm resolve to one known dispatcher token. More complex state-selection
-  chains or impure branch tails are left intact. See
+- **Conditional deflattening is narrow.** Every arm must establish one known dispatcher
+  token. A private arm-and-merge region may preserve other modeled semantics when both
+  arms use one final dispatcher exit; rewrites that bypass arm work still require pure
+  state-selection dependencies. More complex state-selection chains are left intact. See
   [`conditional-deflattening.md`](conditional-deflattening.md).
 - **Ordering dispatchers require concrete tokens.** Equality, inequality, and signed or
   unsigned `LT`, `LE`, `GT`, and `GE` comparisons are supported by replaying a recovered

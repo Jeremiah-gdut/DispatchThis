@@ -73,7 +73,8 @@ call, and global constant workflow phase stability, mutation receipts, and downs
 [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
 
 ### `profiles/`
-Owns the bundled resolver profile registry. The built-in `default` profile exposes
+Owns the bundled resolver profile registry. Metadata is required; each semantic
+capability hook is optional and omitted hooks become empty results. The built-in `default` profile exposes
 the current indirect branch, indirect call, global constant, and string decrypt
 resolver behavior plus the default deflatten redirection planner behind the
 resolver profile contract. See
@@ -120,7 +121,7 @@ control flow or remove deflatten state writes.
 `compute_redirections` identifies the dominant dispatcher comparison cluster, maps state
 tokens to target blocks by concrete CFG replay, and returns terminator re-pointings with
 exact `obsolete_state_writes` instruction indices. `rewrite_redirections_mlil` turns every
-selected exit or explicit conditional arm-exit/condition rewrite and exact state-write NOP into one atomic replacement
+selected exit or explicit conditional arm-exit/shared-exit/condition rewrite and exact state-write NOP into one atomic replacement
 MLIL function. Equality, inequality, and signed/unsigned ordering dispatchers are
 supported through fail-closed concrete replay; symbolic interval solving is not. Handles unconditional and simple conditional
 transitions; see

@@ -92,23 +92,39 @@ def test_driver_2_6_resolver_profile_is_registered():
     assert profile.plan_string_decrypt_calls is not None
 
 
-def test_profile_without_required_hook_is_rejected():
+def test_profile_missing_hook_defaults_to_no_recovery():
+    profiles = import_module("plugins.DispatchThis.profiles")
+    module = types.SimpleNamespace(
+        PROFILE_ID="branch_only",
+        PROFILE_NAME="Branch only",
+        PROFILE_DESCRIPTION="Only resolves branch gadgets",
+        resolve_branch_gadget=lambda *_args: [],
+    )
+
+    profile = profiles.resolver_profile_from_module(module)
+
+    assert profile.resolve_branch_gadget(None, None, None) == []
+    assert profile.resolve_call_gadget(None, None) == []
+    assert profile.plan_global_constant_slots(None, None) == []
+    assert profile.plan_correlated_store_rewrites(None, None, None) == []
+    assert profile.plan_deflatten_redirections(None, None, None) == []
+    assert profile.plan_string_decrypt_calls(None, None, None, {}) == []
+
+
+def test_profile_rejects_present_noncallable_hook():
     profiles = import_module("plugins.DispatchThis.profiles")
     module = types.SimpleNamespace(
         PROFILE_ID="broken",
         PROFILE_NAME="Broken",
-        PROFILE_DESCRIPTION="Missing call hook",
-        resolve_branch_gadget=lambda *_args: [],
-        plan_global_constant_slots=lambda *_args: [],
-        plan_deflatten_redirections=lambda *_args: [],
-        plan_string_decrypt_calls=lambda *_args: [],
+        PROFILE_DESCRIPTION="Invalid call hook",
+        resolve_call_gadget=None,
     )
 
-    with pytest.raises(profiles.InvalidResolverProfile):
+    with pytest.raises(profiles.InvalidResolverProfile, match="resolve_call_gadget"):
         profiles.resolver_profile_from_module(module)
 
 
-def test_noop_required_hooks_are_valid():
+def test_explicit_noop_hooks_are_valid():
     profiles = import_module("plugins.DispatchThis.profiles")
     module = types.SimpleNamespace(
         PROFILE_ID="noop",
