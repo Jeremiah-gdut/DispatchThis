@@ -1,8 +1,10 @@
 """MLIL-stage global constant slot planner."""
 
+from binaryninja import TypeClass
+
 from ...helpers.facts import global_constant_fact
-from ...helpers.memory import in_section, is_valid_target, read_qword_slot
-from ...helpers.mlil import iter_load_slot_offsets, mlil_stores_to_address
+from ...helpers.memory import in_section, is_mapped_address, read_qword_slot
+from ...helpers.mlil import iter_load_slot_offsets, slot_has_no_stores
 from ...utils.log import log_info, log_warn
 
 
@@ -12,42 +14,13 @@ CONST_SLOT_TYPE = "uint8_t const* const"
 
 def _plain_ptr_var(bv, addr):
     data_var = bv.get_data_var_at(addr)
-    return data_var is not None and str(data_var.type).replace(" ", "") == "void*"
-
-
-def _ref_functions(bv, data_var):
-    seen = set()
-    for ref in list(getattr(data_var, "code_refs", ()) or ()):
-        funcs = []
-        func = getattr(ref, "function", None)
-        if func is not None:
-            funcs = [func]
-        else:
-            try:
-                funcs = list(bv.get_functions_containing(ref.address))
-            except Exception:  # noqa: BLE001
-                funcs = []
-        for func in funcs:
-            key = getattr(func, "start", id(func))
-            if key in seen:
-                continue
-            seen.add(key)
-            yield func
-
-
-def _refs_store_slot(bv, current_mlil, slot_addr):
-    data_var = bv.get_data_var_at(slot_addr)
-    if mlil_stores_to_address(current_mlil, slot_addr, address_mask=U48):
-        return True
-    for func in _ref_functions(bv, data_var):
-        mlil = getattr(func, "mlil", None)
-        if (
-            mlil is not None
-            and mlil is not current_mlil
-            and mlil_stores_to_address(mlil, slot_addr, address_mask=U48)
-        ):
-            return True
-    return False
+    type_ = getattr(data_var, "type", None)
+    return (
+        getattr(type_, "type_class", None) == TypeClass.PointerTypeClass
+        and getattr(type_, "width", None) == 8
+        and getattr(getattr(type_, "target", None), "type_class", None)
+        == TypeClass.VoidTypeClass
+    )
 
 
 def _plan_for_slot(bv, mlil, slot_addr, offset):
@@ -59,10 +32,10 @@ def _plan_for_slot(bv, mlil, slot_addr, offset):
     if value is None:
         return None
     resolved_addr = (value + offset) & U48
-    if not is_valid_target(bv, resolved_addr):
+    if not is_mapped_address(bv, resolved_addr):
         return None
-    if _refs_store_slot(bv, mlil, slot_addr):
-        log_warn(f"[gconst] {hex(slot_addr)}: skipped, known reference writes to slot")
+    if not slot_has_no_stores(bv, mlil, slot_addr, address_mask=U48):
+        log_warn(f"[gconst] {hex(slot_addr)}: skipped, slot immutability is unproven")
         return None
     return global_constant_fact(slot_addr, CONST_SLOT_TYPE)
 

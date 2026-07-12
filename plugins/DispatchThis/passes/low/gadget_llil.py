@@ -3,15 +3,20 @@ LLIL-stage jump gadget resolver that replaces indirect jump expressions
 with replace_expr and an associated jump to the original address 
 """
 
+from collections import defaultdict
+
+from binaryninja import LowLevelILOperation as L
+
 from ...helpers.facts import branch_fact
 from ...helpers.llil import (
-    LOAD_OPS,
+    CONST_OPERATIONS,
+    LOAD_OPERATIONS,
     U48,
     const_values,
     iter_indirect_jumps as iter_llil_indirect_jumps,
     peel_reg_definition,
 )
-from ...helpers.memory import read_u64le
+from ...helpers.memory import is_executable_target, read_u64le
 from ...utils.log import log_debug, log_warn, log_error
 
 
@@ -64,21 +69,21 @@ def resolve_indirect_jump_addr(bv, slot, entry_offset, table_base_key, key):
 
 def _single_const(bv, ssa, expr):
     values = const_values(bv, ssa, expr)
-    return next(iter(values)) if len(values) == 1 else None
+    return next(iter(values)) if values is not None and len(values) == 1 else None
 
 
 def _slot_from_load(bv, ssa, sload):
-    if sload is None or sload.operation.name not in LOAD_OPS:
+    if sload is None or sload.operation not in LOAD_OPERATIONS:
         return None
     sp = sload.src
-    if sp.operation.name in ("LLIL_CONST_PTR", "LLIL_CONST"):
+    if sp.operation in CONST_OPERATIONS:
         return sp.constant & U48
     return _single_const(bv, ssa, sp)
 
 
 def _slot_add_const_candidates(bv, ssa, expr):
     expr = peel_reg_definition(ssa, expr)
-    if expr is None or expr.operation.name != "LLIL_ADD":
+    if expr is None or expr.operation != L.LLIL_ADD:
         return []
     candidates = []
     for sload_expr, const_expr in ((expr.left, expr.right), (expr.right, expr.left)):
@@ -92,17 +97,27 @@ def _slot_add_const_candidates(bv, ssa, expr):
 
 
 def _valid_offsets(bv, slot, table_base_key, key, offsets):
-    valid = set()
-    for offset in offsets:
+    normalized = {offset & U48 for offset in offsets}
+    if not normalized:
+        return None
+    for offset in normalized:
         target = resolve_indirect_jump_addr(bv, slot, offset, table_base_key, key)
-        if target is not None and bv.is_valid_offset(target):
-            valid.add(offset & U48)
-    return valid
+        if target is None or not is_executable_target(bv, target):
+            return None
+    return normalized
+
+
+def _consensus_jump_parts(candidates):
+    unique = {}
+    for slot, table_base_key, key, offsets in candidates:
+        semantic_key = (slot, table_base_key, key, frozenset(offsets))
+        unique.setdefault(semantic_key, (slot, table_base_key, key, set(offsets)))
+    return next(iter(unique.values())) if len(unique) == 1 else None
 
 
 def _is_index_offset(ssa, expr):
     expr = peel_reg_definition(ssa, expr)
-    return expr is not None and expr.operation.name in ("LLIL_LSL", "LLIL_LSR")
+    return expr is not None and expr.operation in (L.LLIL_LSL, L.LLIL_LSR)
 
 
 def _jump_parts(bv, ssa, jump_il):
@@ -114,19 +129,19 @@ def _jump_parts(bv, ssa, jump_il):
     gadget does not match the expected shape."""
 
     jdest = jump_il.ssa_form.dest
-    if jdest.operation.name != "LLIL_REG_SSA":
+    if jdest.operation != L.LLIL_REG_SSA:
         return None
 
     # rax = rax (+/-) KEY -- the final decode step is `add` or `sub`; for `sub`
     # the effective key is negated (the U48 decode math treats it as addition).
     fin = peel_reg_definition(ssa, jdest)
-    if fin is None or fin.operation.name not in ("LLIL_ADD", "LLIL_SUB"):
+    if fin is None or fin.operation not in (L.LLIL_ADD, L.LLIL_SUB):
         return None
-    if fin.operation.name == "LLIL_SUB":
+    if fin.operation == L.LLIL_SUB:
         chain_expr, key_expr, neg = fin.left, fin.right, True
     else:
         # commutative: the chain operand leads to the entry LOAD; other is key.
-        if peel_reg_definition(ssa, fin.left).operation.name in LOAD_OPS:
+        if peel_reg_definition(ssa, fin.left).operation in LOAD_OPERATIONS:
             chain_expr, key_expr, neg = fin.left, fin.right, False
         else:
             chain_expr, key_expr, neg = fin.right, fin.left, False
@@ -140,11 +155,13 @@ def _jump_parts(bv, ssa, jump_il):
     # LLIL) and the table-base chain can sit on either side of the address add;
     # the chain is the operand whose definition is the OFFSET + [&SLOT] add.
     load = peel_reg_definition(ssa, chain_expr)
-    if load is None or load.operation.name not in LOAD_OPS:
+    if load is None or load.operation not in LOAD_OPERATIONS:
         return None
     addr = load.src
-    if addr.operation.name != "LLIL_ADD":
+    if addr.operation != L.LLIL_ADD:
         return None
+
+    candidates = []
 
     # Some ARM64 samples pre-add the table-base key before indexing:
     #     target = *(*slot + table_base_key + offset) + key
@@ -155,45 +172,52 @@ def _jump_parts(bv, ssa, jump_il):
         if not _is_index_offset(ssa, disp_expr):
             continue
         for slot, table_base_key in _slot_add_const_candidates(bv, ssa, tb):
-            offsets = {o & U48 for o in const_values(bv, ssa, disp_expr)}
-            offsets = _valid_offsets(bv, slot, table_base_key, key, offsets)
-            if offsets:
-                return (slot, table_base_key, key & U48, offsets)
+            offset_values = const_values(bv, ssa, disp_expr)
+            if offset_values is None:
+                continue
+            offsets = _valid_offsets(
+                bv,
+                slot,
+                table_base_key,
+                key,
+                offset_values,
+            )
+            if offsets is not None:
+                candidates.append((slot, table_base_key, key & U48, offsets))
 
-    cand = peel_reg_definition(ssa, addr.right)
-    if cand is not None and cand.operation.name == "LLIL_ADD":
-        disp_expr, tb = addr.left, cand
-    else:
-        tb = peel_reg_definition(ssa, addr.left)
-        disp_expr = addr.right
-    if tb is None or tb.operation.name != "LLIL_ADD":
-        return None
-    table_base_key = _single_const(bv, ssa, disp_expr)
-    if table_base_key is None:
-        return None
+    # rax = OFFSET + [&SLOT] -- enumerate both ADD orientations and both
+    # possible slot-load operands. Multiple successful interpretations must
+    # agree semantically; operand order never chooses a winner.
+    for table_base_expr, disp_expr in (
+        (peel_reg_definition(ssa, addr.right), addr.left),
+        (peel_reg_definition(ssa, addr.left), addr.right),
+    ):
+        if table_base_expr is None or table_base_expr.operation != L.LLIL_ADD:
+            continue
+        table_base_key = _single_const(bv, ssa, disp_expr)
+        if table_base_key is None:
+            continue
+        for slot_load, offset_expr in (
+            (peel_reg_definition(ssa, table_base_expr.right), table_base_expr.left),
+            (peel_reg_definition(ssa, table_base_expr.left), table_base_expr.right),
+        ):
+            slot = _slot_from_load(bv, ssa, slot_load)
+            if slot is None:
+                continue
+            offset_values = const_values(bv, ssa, offset_expr)
+            if offset_values is None:
+                continue
+            offsets = _valid_offsets(
+                bv,
+                slot,
+                table_base_key,
+                key,
+                offset_values,
+            )
+            if offsets is not None:
+                candidates.append((slot, table_base_key & U48, key & U48, offsets))
 
-    # rax = OFFSET + [&SLOT] -- table-base add. The [&SLOT] load (of a const
-    # pointer) can be on either side; the other operand is the entry offset.
-    tb_left = peel_reg_definition(ssa, tb.left)
-    tb_right = peel_reg_definition(ssa, tb.right)
-    if tb_right is not None and tb_right.operation.name in LOAD_OPS:
-        sload, off_expr = tb_right, tb.left
-    else:
-        sload, off_expr = tb_left, tb.right
-    if sload.operation.name not in LOAD_OPS:
-        return None
-    sp = sload.src
-    if sp.operation.name in ("LLIL_CONST_PTR", "LLIL_CONST"):
-        slot = sp.constant & U48
-    else:
-        slot = _single_const(bv, ssa, sp)
-    if slot is None:
-        return None
-    offsets = const_values(bv, ssa, off_expr)
-    if not offsets:
-        return None
-
-    return (slot, table_base_key & U48, key & U48, {o & U48 for o in offsets})
+    return _consensus_jump_parts(candidates)
 
 
 def parse_jump_gadget_targets(bv, ssa, jump_il):
@@ -209,7 +233,7 @@ def resolve_llil_jump_targets(bv, ssa, jump_il):
     """Decode every concrete target for one decode-gadget branch."""
     parsed = parse_jump_gadget_targets(bv, ssa, jump_il)
     if parsed is None:
-        log_warn(f"[gadget-llil] shape mismatch @ {hex(jump_il.address)}")
+        log_debug(f"[gadget-llil] shape mismatch @ {hex(jump_il.address)}")
         return []
     targets = []
     for slot, table_base_key, key, offset in parsed:
@@ -217,47 +241,149 @@ def resolve_llil_jump_targets(bv, ssa, jump_il):
         log_debug(f"[gadget-llil] {hex(jump_il.address)} slot={hex(slot)} table_base_key={hex(table_base_key)} "
                   f"key={hex(key)} off={hex(offset)} -> "
                   f"{hex(target) if target is not None else None}")
-        if target is not None:
-            targets.append(target)
+        if target is None or not is_executable_target(bv, target):
+            return []
+        targets.append(target)
     return sorted(set(targets))
 
 
+def _validated_targets(bv, targets):
+    targets = list(targets or ())
+    if not targets or any(
+        type(target) is not int or not is_executable_target(bv, target)
+        for target in targets
+    ):
+        return None
+    return sorted(set(targets))
+
+
+def _current_jump_groups(llil):
+    groups = defaultdict(list)
+    for jump in iter_llil_indirect_jumps(llil):
+        source = getattr(jump, "address", None)
+        dest_index = getattr(getattr(jump, "dest", None), "expr_index", None)
+        if type(source) is int and source >= 0 and type(dest_index) is int and dest_index >= 0:
+            groups[source].append(jump)
+    return groups
+
+
+def _same_jump_witness(candidate, current, llil):
+    if (
+        candidate is None
+        or getattr(candidate, "operation", None) != getattr(current, "operation", None)
+        or getattr(candidate, "address", None) != getattr(current, "address", None)
+        or getattr(getattr(candidate, "dest", None), "expr_index", None)
+        != getattr(getattr(current, "dest", None), "expr_index", None)
+    ):
+        return False
+    for attr in ("instr_index", "expr_index"):
+        recorded = getattr(candidate, attr, None)
+        actual = getattr(current, attr, None)
+        if type(recorded) is not int or type(actual) is not int or recorded != actual:
+            return False
+    recorded_owner = getattr(candidate, "function", None)
+    current_owner = getattr(current, "function", None)
+    if recorded_owner is not None or current_owner is not None:
+        return recorded_owner is llil and current_owner is llil
+    # Lightweight test doubles do not model the owning IL function. Real BNIL
+    # instructions do, and the branch above requires that exact current owner.
+    return True
+
+
+def validate_current_branch_plans(bv, llil, plan):
+    """Keep only complete, non-conflicting facts witnessed by current LLIL."""
+    current_groups = _current_jump_groups(llil)
+    groups = defaultdict(list)
+    for item in plan or ():
+        source = item.get("source")
+        if type(source) is int and source >= 0:
+            groups[source].append(item)
+
+    accepted = []
+    for source, items in groups.items():
+        try:
+            semantics = set()
+            for item in items:
+                targets = list(item.get("targets", ()))
+                if (
+                    not targets
+                    or any(type(target) is not int or target < 0 for target in targets)
+                    or (
+                        hasattr(bv, "is_offset_executable")
+                        and _validated_targets(bv, targets) is None
+                    )
+                ):
+                    raise ValueError("invalid targets")
+                semantics.add((item.get("dest_expr_index"), tuple(sorted(set(targets)))))
+        except (AttributeError, TypeError, ValueError):
+            log_warn(f"[gadget-llil] malformed branch plan @ {source:#x}")
+            continue
+        current = current_groups.get(source, ())
+        if len(semantics) != 1 or len(current) != 1:
+            log_warn(f"[gadget-llil] conflicting or stale branch plan @ {source:#x}")
+            continue
+        dest_index, _targets = next(iter(semantics))
+        if (
+            type(dest_index) is not int
+            or dest_index < 0
+            or current[0].dest.expr_index != dest_index
+            or any(
+                not _same_jump_witness(item.get("jump_il"), current[0], llil)
+                for item in items
+            )
+        ):
+            log_warn(f"[gadget-llil] rejected stale jump witness @ {source:#x}")
+            continue
+        accepted.append(items[0])
+    return accepted
+
+
 def resolve_llil_jump_plan(bv, llil, known_targets=None):
-    """Resolve decode-gadget branches to a plan without mutating BN state."""
+    """Resolve the current branch frontier without mutating BN state.
+
+    ``known_targets`` contains receipts already verified against Binary Ninja's
+    current user branch metadata. Their sources are therefore outside this
+    run's decode frontier.
+    """
     if not llil:
         return []
-    if known_targets is None:
-        known_targets = {}
 
     # Phase 1: resolve every target read-only against the original SSA. The
     # decode gadgets are independent, so none of these reads observe a later
     # rewrite -- batching avoids rebuilding SSA between jumps.
     ssa = llil.ssa_form
     pending = []
-    for jump_il in iter_llil_indirect_jumps(llil):
-        try:
-            newly_resolved = jump_il.address not in known_targets
-            if jump_il.address in known_targets:
-                cached = known_targets[jump_il.address]
-                if isinstance(cached, (list, tuple, set)):
-                    targets = list(cached)
-                else:
-                    targets = [cached]
-            else:
-                # Otherwise resolve it
-                targets = resolve_llil_jump_targets(bv, ssa, jump_il)
-            targets = [t for t in targets if t is not None and bv.is_valid_offset(t)]
-            if not targets:
-                continue
-            pending.append(branch_fact(
-                jump_il.address,
-                jump_il.dest.expr_index,
-                targets,
-                newly_resolved=newly_resolved,
-            ))
-        except Exception as e:  # noqa: BLE001
-            log_error(f"[gadget-llil] {hex(jump_il.address)}: {e}")
+    grouped = _current_jump_groups(llil)
+    for source, jumps in grouped.items():
+        if source in (known_targets or {}):
             continue
+        facts = []
+        for jump_il in jumps:
+            try:
+                targets = resolve_llil_jump_targets(bv, ssa, jump_il)
+                targets = _validated_targets(bv, targets)
+                if targets is None:
+                    facts = []
+                    break
+                facts.append(branch_fact(
+                    source,
+                    jump_il.dest.expr_index,
+                    targets,
+                    jump_il=jump_il,
+                ))
+            except Exception as e:  # noqa: BLE001
+                log_error(f"[gadget-llil] {source:#x}: {e}")
+                facts = []
+                break
+
+        semantics = {
+            (fact["dest_expr_index"], fact["targets"])
+            for fact in facts
+        }
+        if len(semantics) == 1:
+            pending.append(facts[0])
+        elif facts:
+            log_warn(f"[gadget-llil] conflicting branch facts @ {source:#x}")
 
     return pending
 
@@ -266,6 +392,8 @@ def apply_llil_jump_rewrites(bv, llil, plan):
     """Apply current-LLIL rewrites from a branch plan. Does not set user branches."""
     if not llil or not plan:
         return 0
+
+    plan = validate_current_branch_plans(bv, llil, plan)
 
     applied = 0
     for item in plan:

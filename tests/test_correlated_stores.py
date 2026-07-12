@@ -1,5 +1,8 @@
 import types
 
+import pytest
+from binaryninja import MediumLevelILOperation as M
+
 from conftest import load_plugin_module
 
 
@@ -7,14 +10,34 @@ correlated_stores = load_plugin_module("plugins.DispatchThis.passes.medium.corre
 
 
 class Instruction:
-    def __init__(self, instr_index):
+    def __init__(self, instr_index, operation, *, address=None, size=None, **attrs):
         self.instr_index = instr_index
         self.expr_index = 100 + instr_index
+        self.address = 0x1000 + instr_index if address is None else address
+        self.operation = operation
+        if size is not None:
+            self.size = size
+        if operation == M.MLIL_GOTO:
+            self.dest = attrs.pop("dest", instr_index)
+        elif operation == M.MLIL_STORE:
+            self.dest = attrs.pop("dest", types.SimpleNamespace(
+                expr_index=1000 + instr_index * 2,
+                operation=M.MLIL_CONST_PTR,
+                size=8,
+            ))
+            self.src = attrs.pop("src", types.SimpleNamespace(
+                expr_index=1001 + instr_index * 2,
+                operation=M.MLIL_CONST,
+                size=size,
+            ))
+        self.__dict__.update(attrs)
 
 
 class OldMLIL:
     def __init__(self, instructions):
         self.instructions = {instruction.instr_index: instruction for instruction in instructions}
+        for instruction in instructions:
+            instruction.function = self
 
     def __getitem__(self, instr_index):
         return self.instructions[instr_index]
@@ -37,8 +60,8 @@ class NewMLIL:
 
 
 def test_apply_correlated_stores_rejects_malformed_plan(monkeypatch):
-    join_store = Instruction(10)
-    goto = Instruction(1)
+    join_store = Instruction(10, M.MLIL_STORE, size=4)
+    goto = Instruction(1, M.MLIL_GOTO)
     mlil = OldMLIL([goto, join_store])
     calls = []
 
@@ -60,9 +83,9 @@ def test_apply_correlated_stores_rejects_malformed_plan(monkeypatch):
 
 
 def test_apply_correlated_stores_emits_arm_local_stores_and_nops_join(monkeypatch):
-    goto_a = Instruction(1)
-    goto_b = Instruction(2)
-    join_store = Instruction(10)
+    goto_a = Instruction(1, M.MLIL_GOTO)
+    goto_b = Instruction(2, M.MLIL_GOTO)
+    join_store = Instruction(10, M.MLIL_STORE, size=4)
     mlil = OldMLIL([goto_a, goto_b, join_store])
     built = {}
     new = NewMLIL()
@@ -128,6 +151,177 @@ def test_apply_correlated_stores_emits_arm_local_stores_and_nops_join(monkeypatc
             ),
         ),
     }
+
+
+def test_apply_correlated_stores_rejects_duplicate_arm_goto(monkeypatch):
+    goto = Instruction(1, M.MLIL_GOTO)
+    join_store = Instruction(10, M.MLIL_STORE, size=4)
+    mlil = OldMLIL([goto, join_store])
+    calls = []
+    monkeypatch.setattr(
+        correlated_stores,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    new_mlil, applied = correlated_stores.apply_correlated_stores_mlil(
+        types.SimpleNamespace(mlil=mlil),
+        mlil,
+        [{
+            "store": join_store,
+            "size": 4,
+            "arms": (
+                {"goto": goto, "dest": 0x1000, "src": 0x2000},
+                {"goto": goto, "dest": 0x1004, "src": 0x2004},
+            ),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize("field", ["operation", "expr_index", "address"])
+def test_apply_correlated_stores_rejects_stale_store_witness(monkeypatch, field):
+    goto_a = Instruction(1, M.MLIL_GOTO)
+    goto_b = Instruction(2, M.MLIL_GOTO)
+    current_store = Instruction(10, M.MLIL_STORE, size=4)
+    recorded_store = Instruction(10, M.MLIL_STORE, size=4)
+    if field == "operation":
+        recorded_store.operation = M.MLIL_SET_VAR
+    else:
+        setattr(recorded_store, field, getattr(recorded_store, field) + 1)
+    mlil = OldMLIL([goto_a, goto_b, current_store])
+    recorded_store.function = mlil
+    calls = []
+    monkeypatch.setattr(
+        correlated_stores,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    new_mlil, applied = correlated_stores.apply_correlated_stores_mlil(
+        types.SimpleNamespace(mlil=mlil),
+        mlil,
+        [{
+            "store": recorded_store,
+            "size": 4,
+            "arms": (
+                {"goto": goto_a, "dest": 0x1000, "src": 0x2000},
+                {"goto": goto_b, "dest": 0x1004, "src": 0x2004},
+            ),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize("field", ["address", "dest"])
+def test_apply_correlated_stores_rejects_stale_goto_witness(monkeypatch, field):
+    goto_a = Instruction(1, M.MLIL_GOTO)
+    stale_goto_a = Instruction(1, M.MLIL_GOTO)
+    setattr(stale_goto_a, field, getattr(stale_goto_a, field) + 1)
+    goto_b = Instruction(2, M.MLIL_GOTO)
+    join_store = Instruction(10, M.MLIL_STORE, size=4)
+    mlil = OldMLIL([goto_a, goto_b, join_store])
+    stale_goto_a.function = mlil
+    calls = []
+    monkeypatch.setattr(
+        correlated_stores,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    new_mlil, applied = correlated_stores.apply_correlated_stores_mlil(
+        types.SimpleNamespace(mlil=mlil),
+        mlil,
+        [{
+            "store": join_store,
+            "size": 4,
+            "arms": (
+                {"goto": stale_goto_a, "dest": 0x1000, "src": 0x2000},
+                {"goto": goto_b, "dest": 0x1004, "src": 0x2004},
+            ),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert calls == []
+
+
+def test_apply_correlated_stores_rejects_foreign_owner(monkeypatch):
+    goto_a = Instruction(1, M.MLIL_GOTO)
+    goto_b = Instruction(2, M.MLIL_GOTO)
+    current_store = Instruction(10, M.MLIL_STORE, size=4)
+    recorded_store = Instruction(10, M.MLIL_STORE, size=4)
+    mlil = OldMLIL([goto_a, goto_b, current_store])
+    recorded_store.function = object()
+    calls = []
+    monkeypatch.setattr(
+        correlated_stores,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    new_mlil, applied = correlated_stores.apply_correlated_stores_mlil(
+        types.SimpleNamespace(mlil=mlil),
+        mlil,
+        [{
+            "store": recorded_store,
+            "size": 4,
+            "arms": (
+                {"goto": goto_a, "dest": 0x1000, "src": 0x2000},
+                {"goto": goto_b, "dest": 0x1004, "src": 0x2004},
+            ),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize("field", ["dest", "src"])
+def test_apply_correlated_stores_rejects_stale_store_operand(monkeypatch, field):
+    goto_a = Instruction(1, M.MLIL_GOTO)
+    goto_b = Instruction(2, M.MLIL_GOTO)
+    current_store = Instruction(10, M.MLIL_STORE, size=4)
+    recorded_store = Instruction(10, M.MLIL_STORE, size=4)
+    mlil = OldMLIL([goto_a, goto_b, current_store])
+    recorded_store.function = mlil
+    operand = getattr(recorded_store, field)
+    setattr(recorded_store, field, types.SimpleNamespace(
+        expr_index=operand.expr_index + 1,
+        operation=operand.operation,
+        size=operand.size,
+    ))
+    calls = []
+    monkeypatch.setattr(
+        correlated_stores,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    new_mlil, applied = correlated_stores.apply_correlated_stores_mlil(
+        types.SimpleNamespace(mlil=mlil),
+        mlil,
+        [{
+            "store": recorded_store,
+            "size": 4,
+            "arms": (
+                {"goto": goto_a, "dest": 0x1000, "src": 0x2000},
+                {"goto": goto_b, "dest": 0x1004, "src": 0x2004},
+            ),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+    assert calls == []
 
 
 if __name__ == "__main__":

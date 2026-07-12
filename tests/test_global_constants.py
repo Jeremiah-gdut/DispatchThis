@@ -1,4 +1,6 @@
-import types
+from types import SimpleNamespace
+
+from binaryninja import MediumLevelILOperation, TypeClass
 
 from conftest import load_plugin_module
 
@@ -9,20 +11,33 @@ CONST_SLOT_TYPE = global_constants.CONST_SLOT_TYPE
 plan_global_constant_slots = global_constants.plan_global_constant_slots
 
 
-class Op:
-    def __init__(self, name):
-        self.name = name
-
-
 class Expr:
     def __init__(self, op, **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation[op]
         self.__dict__.update(attrs)
+
+    def traverse(self, visit):
+        yield visit(self)
+        for value in self.__dict__.values():
+            if isinstance(value, Expr):
+                yield from value.traverse(visit)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    if isinstance(child, Expr):
+                        yield from child.traverse(visit)
 
 
 class DataVar:
     def __init__(self, type_name, refs=()):
-        self.type = type_name
+        self.type = (
+            SimpleNamespace(
+                type_class=TypeClass.PointerTypeClass,
+                width=8,
+                target=SimpleNamespace(type_class=TypeClass.VoidTypeClass),
+            )
+            if type_name == "void*"
+            else SimpleNamespace(type_class=TypeClass.IntegerTypeClass, width=8)
+        )
         self.code_refs = list(refs)
 
 
@@ -148,6 +163,29 @@ def test_global_constant_slot_is_skipped_when_known_refs_store_to_it():
         {"x10_41": [slot_load], "x10_42": [base_add]},
     )
     ref_func.mlil = FakeMlil([store(const(0xA43D70), address=0x4020)])
+
+    assert plan_global_constant_slots(bv, current_mlil) == []
+
+
+def test_global_constant_slot_is_skipped_when_reference_mlil_is_unavailable():
+    bv = FakeBv()
+    ref_func = FakeFunc(None)
+    bv.data_vars[0xA43D70] = DataVar("void*", [Ref(0x4010, ref_func)])
+    bv.sections[0xA43D70] = [Section(".data")]
+    bv.memory[0xA43D70] = 0x5F88806BDE3FE98C
+    bv.valid_offsets.add(0xA49C30)
+
+    slot_load = set_var("x10_41", load(const(0xA43D70)), address=0x8E1260)
+    base_add = set_var(
+        "x10_42",
+        add(var("x10_41"), const(-0x5F88806BDD9B4E30)),
+        address=0x8E1278,
+    )
+    value_load = load(add(var("x10_42"), const(0xD4)), address=0x8E127C)
+    current_mlil = FakeMlil(
+        [slot_load, base_add, value_load],
+        {"x10_41": [slot_load], "x10_42": [base_add]},
+    )
 
     assert plan_global_constant_slots(bv, current_mlil) == []
 

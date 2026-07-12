@@ -1,6 +1,9 @@
 """MLIL profile helpers."""
 
 from collections import deque
+from functools import cache
+
+from binaryninja import MediumLevelILOperation as M, RegisterValueType
 
 from .memory import read_uint_le
 
@@ -8,106 +11,119 @@ from .memory import read_uint_le
 U64 = 0xFFFFFFFFFFFFFFFF
 U32 = 0xFFFFFFFF
 
-CALL_OPS = (
-    "MLIL_CALL",
-    "MLIL_CALL_SSA",
-    "MLIL_CALL_UNTYPED",
-    "MLIL_CALL_UNTYPED_SSA",
-    "MLIL_TAILCALL",
-    "MLIL_TAILCALL_SSA",
-    "MLIL_TAILCALL_UNTYPED",
-    "MLIL_TAILCALL_UNTYPED_SSA",
-)
-CONST_OPS = ("MLIL_CONST", "MLIL_CONST_PTR")
-LOAD_STRUCT_OPS = ("MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA")
-LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
-SLOT_LOAD_OPS = ("MLIL_LOAD", "MLIL_LOAD_SSA", *LOAD_STRUCT_OPS)
-SET_VAR_OPS = ("MLIL_SET_VAR", "MLIL_SET_VAR_FIELD")
-STORE_OPS = ("MLIL_STORE", "MLIL_STORE_SSA", "MLIL_STORE_STRUCT", "MLIL_STORE_STRUCT_SSA")
-ADDRESS_OF_OPS = ("MLIL_ADDRESS_OF", "MLIL_ADDRESS_OF_FIELD")
 
-_DEST_WRITE_OPS = {
-    "MLIL_SET_VAR",
-    "MLIL_SET_VAR_FIELD",
-    "MLIL_SET_VAR_SSA",
-    "MLIL_SET_VAR_SSA_FIELD",
-    "MLIL_SET_VAR_ALIASED",
-    "MLIL_SET_VAR_ALIASED_FIELD",
-}
-_SPLIT_WRITE_OPS = {"MLIL_SET_VAR_SPLIT", "MLIL_SET_VAR_SPLIT_SSA"}
-_SPLIT_READ_OPS = {"MLIL_VAR_SPLIT", "MLIL_VAR_SPLIT_SSA"}
-_UNKNOWN_MEMORY_EFFECT_PREFIXES = (
-    "MLIL_SYSCALL",
-    "MLIL_INTRINSIC",
-    "MLIL_MEMORY_INTRINSIC",
+def _names(*operations):
+    """Expose the legacy operation-name API without hand-written enum names."""
+    return tuple(operation.name for operation in operations)
+
+
+# Profiles historically exchange operation names so that mixed LLIL/MLIL
+# matchers cannot confuse equal IntEnum values. Exact names still come from BN's
+# enum and are consumed only by explicit compatibility selectors.
+CALL_OPERATIONS = (
+    M.MLIL_CALL,
+    M.MLIL_CALL_SSA,
+    M.MLIL_CALL_UNTYPED,
+    M.MLIL_CALL_UNTYPED_SSA,
+    M.MLIL_TAILCALL,
+    M.MLIL_TAILCALL_SSA,
+    M.MLIL_TAILCALL_UNTYPED,
+    M.MLIL_TAILCALL_UNTYPED_SSA,
 )
-_UNKNOWN_MEMORY_EFFECT_OPS = {"MLIL_BP", "MLIL_TRAP", "MLIL_UNIMPL_MEM"}
-_UNMODELED_OPS = {"MLIL_UNIMPL", "MLIL_UNIMPL_MEM"}
+CALL_OPS = _names(*CALL_OPERATIONS)
+CONST_OPERATIONS = (M.MLIL_CONST, M.MLIL_CONST_PTR)
+CONST_OPS = _names(*CONST_OPERATIONS)
+LOAD_STRUCT_OPERATIONS = (M.MLIL_LOAD_STRUCT, M.MLIL_LOAD_STRUCT_SSA)
+LOAD_STRUCT_OPS = _names(*LOAD_STRUCT_OPERATIONS)
+LOAD_OPERATIONS = (M.MLIL_LOAD, M.MLIL_LOAD_SSA, *LOAD_STRUCT_OPERATIONS)
+LOAD_OPS = _names(*LOAD_OPERATIONS)
+SLOT_LOAD_OPERATIONS = LOAD_OPERATIONS
+SLOT_LOAD_OPS = _names(*SLOT_LOAD_OPERATIONS)
+SET_VAR_OPERATIONS = (M.MLIL_SET_VAR, M.MLIL_SET_VAR_FIELD)
+SET_VAR_OPS = _names(*SET_VAR_OPERATIONS)
+STORE_OPERATIONS = (
+    M.MLIL_STORE,
+    M.MLIL_STORE_SSA,
+    M.MLIL_STORE_STRUCT,
+    M.MLIL_STORE_STRUCT_SSA,
+)
+STORE_OPS = _names(*STORE_OPERATIONS)
+ADDRESS_OF_OPERATIONS = (M.MLIL_ADDRESS_OF, M.MLIL_ADDRESS_OF_FIELD)
+ADDRESS_OF_OPS = _names(*ADDRESS_OF_OPERATIONS)
+
+# BN 5.3 omits vars_written only for these field-write instruction classes.
+_FIELD_WRITE_OPERATIONS = {M.MLIL_SET_VAR_FIELD, M.MLIL_SET_VAR_ALIASED_FIELD}
+_UNKNOWN_MEMORY_EFFECT_OPERATIONS = {
+    M.MLIL_SYSCALL,
+    M.MLIL_SYSCALL_UNTYPED,
+    M.MLIL_INTRINSIC,
+    M.MLIL_SYSCALL_SSA,
+    M.MLIL_SYSCALL_UNTYPED_SSA,
+    M.MLIL_MEMORY_INTRINSIC_OUTPUT_SSA,
+    M.MLIL_INTRINSIC_SSA,
+    M.MLIL_MEMORY_INTRINSIC_SSA,
+    M.MLIL_BP,
+    M.MLIL_TRAP,
+    M.MLIL_UNIMPL_MEM,
+}
+_UNMODELED_OPERATIONS = {M.MLIL_UNIMPL, M.MLIL_UNIMPL_MEM}
+_CONSTANT_VALUE_TYPES = {
+    RegisterValueType.ConstantValue,
+    RegisterValueType.ConstantPointerValue,
+    RegisterValueType.ImportedAddressValue,
+}
 
 _COMPARISONS = {
-    "MLIL_CMP_E": lambda left, right: left == right,
-    "MLIL_CMP_NE": lambda left, right: left != right,
-    "MLIL_CMP_SLT": lambda left, right: left < right,
-    "MLIL_CMP_ULT": lambda left, right: left < right,
-    "MLIL_CMP_SLE": lambda left, right: left <= right,
-    "MLIL_CMP_ULE": lambda left, right: left <= right,
-    "MLIL_CMP_SGE": lambda left, right: left >= right,
-    "MLIL_CMP_UGE": lambda left, right: left >= right,
-    "MLIL_CMP_SGT": lambda left, right: left > right,
-    "MLIL_CMP_UGT": lambda left, right: left > right,
+    M.MLIL_CMP_E: lambda left, right: left == right,
+    M.MLIL_CMP_NE: lambda left, right: left != right,
+    M.MLIL_CMP_SLT: lambda left, right: left < right,
+    M.MLIL_CMP_ULT: lambda left, right: left < right,
+    M.MLIL_CMP_SLE: lambda left, right: left <= right,
+    M.MLIL_CMP_ULE: lambda left, right: left <= right,
+    M.MLIL_CMP_SGE: lambda left, right: left >= right,
+    M.MLIL_CMP_UGE: lambda left, right: left >= right,
+    M.MLIL_CMP_SGT: lambda left, right: left > right,
+    M.MLIL_CMP_UGT: lambda left, right: left > right,
 }
 _SIGNED_COMPARISONS = {
-    "MLIL_CMP_SLT",
-    "MLIL_CMP_SLE",
-    "MLIL_CMP_SGE",
-    "MLIL_CMP_SGT",
+    M.MLIL_CMP_SLT,
+    M.MLIL_CMP_SLE,
+    M.MLIL_CMP_SGE,
+    M.MLIL_CMP_SGT,
 }
 
 
 def walk_expr(expr):
     if expr is None:
         return []
-    try:
-        return list(expr.traverse(lambda node: node))
-    except AttributeError:
-        pass
-
-    out = []
-    seen = set()
-
-    def visit(node):
-        if node is None or id(node) in seen:
-            return
-        seen.add(id(node))
-        out.append(node)
-        for name in ("src", "dest", "left", "right", "condition"):
-            child = getattr(node, name, None)
-            if hasattr(child, "operation"):
-                visit(child)
-        for name in ("params", "output", "vars_read", "vars_written"):
-            for child in getattr(node, name, ()) or ():
-                if hasattr(child, "operation"):
-                    visit(child)
-
-    visit(expr)
-    return out
+    return list(expr.traverse(lambda node: node))
 
 
-def _op_names(ops):
-    return {ops} if isinstance(ops, str) else set(ops)
+def _operation_selectors(ops):
+    return (ops,) if isinstance(ops, (str, M)) else tuple(ops)
+
+
+def _matches_operation(expr, selectors):
+    """Match native MLIL enums, retaining names only at the compatibility seam."""
+    current = operation(expr)
+    return any(
+        (isinstance(value, M) and current == value)
+        or (isinstance(value, str) and getattr(current, "name", None) == value)
+        for value in selectors
+    )
 
 
 def expression_has_operation(expr, ops):
     """Return whether ``expr`` contains any operation in ``ops``."""
-    wanted = _op_names(ops)
-    return any(op_name(node) in wanted for node in walk_expr(expr))
+    selectors = _operation_selectors(ops)
+    return any(_matches_operation(node, selectors) for node in walk_expr(expr))
 
 
 def expression_or_definitions_have_operation(mlil, expr, ops, max_depth=16):
     """Return whether ``expr`` or followed MLIL_VAR definitions contain ``ops``."""
-    wanted = _op_names(ops)
+    selectors = _operation_selectors(ops)
     return any(
-        op_name(node) in wanted
+        _matches_operation(node, selectors)
         for node in walk_expr_with_defs(mlil, expr, max_depth=max_depth)
     )
 
@@ -116,7 +132,9 @@ def op_name(expr):
     return getattr(getattr(expr, "operation", None), "name", None)
 
 
-_op_name = op_name
+def operation(expr):
+    """Return the native Binary Ninja MLIL operation enum, or ``None``."""
+    return getattr(expr, "operation", None)
 
 
 def same_var(left, right):
@@ -126,15 +144,14 @@ def same_var(left, right):
 
 def var_from_expr(expr):
     """Return the base variable read by any full or field variable expression."""
-    op = op_name(expr)
-    if op in ("MLIL_VAR", "MLIL_VAR_FIELD"):
+    op = operation(expr)
+    if op in (M.MLIL_VAR, M.MLIL_VAR_FIELD):
         return expr.src
     if op in (
-        "MLIL_VAR_SSA",
-        "MLIL_VAR_SSA_FIELD",
-        "MLIL_VAR_FIELD_SSA",
-        "MLIL_VAR_ALIASED",
-        "MLIL_VAR_ALIASED_FIELD",
+        M.MLIL_VAR_SSA,
+        M.MLIL_VAR_SSA_FIELD,
+        M.MLIL_VAR_ALIASED,
+        M.MLIL_VAR_ALIASED_FIELD,
     ):
         return getattr(expr.src, "var", expr.src)
     return None
@@ -142,10 +159,10 @@ def var_from_expr(expr):
 
 def direct_var_from_expr(expr):
     """Return only an exact, whole-variable read (never a field or split read)."""
-    operation = op_name(expr)
-    if operation == "MLIL_VAR":
+    op = operation(expr)
+    if op == M.MLIL_VAR:
         return getattr(expr, "src", None)
-    if operation == "MLIL_VAR_SSA":
+    if op == M.MLIL_VAR_SSA:
         source = getattr(expr, "src", None)
         return getattr(source, "var", source)
     return None
@@ -153,6 +170,10 @@ def direct_var_from_expr(expr):
 
 def _mask(size):
     return (1 << ((size or 4) * 8)) - 1
+
+
+def _expression_mask(expr):
+    return _mask(getattr(expr, "size", None) or 8)
 
 
 def state_token(const_expr, fallback_size=None):
@@ -165,21 +186,21 @@ def state_token(const_expr, fallback_size=None):
 
 def comparison_parts(condition):
     """Return one variable/constant MLIL comparison without losing operand order."""
-    operation = op_name(condition)
-    if operation not in _COMPARISONS:
+    op = operation(condition)
+    if op not in _COMPARISONS:
         return None
     left_var = direct_var_from_expr(getattr(condition, "left", None))
     right_var = direct_var_from_expr(getattr(condition, "right", None))
-    if left_var is not None and op_name(condition.right) == "MLIL_CONST":
+    if left_var is not None and operation(condition.right) == M.MLIL_CONST:
         return {
-            "op": operation,
+            "op": op,
             "var": left_var,
             "bound": state_token(condition.right),
             "var_on_left": True,
         }
-    if right_var is not None and op_name(condition.left) == "MLIL_CONST":
+    if right_var is not None and operation(condition.left) == M.MLIL_CONST:
         return {
-            "op": operation,
+            "op": op,
             "var": right_var,
             "bound": state_token(condition.left),
             "var_on_left": False,
@@ -189,7 +210,11 @@ def comparison_parts(condition):
 
 def addressed_var(expr):
     """Return the variable named by ADDRESS_OF or ADDRESS_OF_FIELD."""
-    return getattr(expr, "src", None) if op_name(expr) in ADDRESS_OF_OPS else None
+    return (
+        getattr(expr, "src", None)
+        if operation(expr) in ADDRESS_OF_OPERATIONS
+        else None
+    )
 
 
 def _base_var(var):
@@ -199,39 +224,29 @@ def _base_var(var):
 def instruction_writes_variable(instruction, variable):
     """Return whether any full, partial, split, or aliased write names ``variable``."""
     candidates = list(getattr(instruction, "vars_written", ()) or ())
-    operation = op_name(instruction)
-    if operation in _DEST_WRITE_OPS:
-        candidates.extend(
-            getattr(instruction, name, None)
-            for name in ("dest", "prev")
-        )
-    elif operation in _SPLIT_WRITE_OPS:
-        candidates.extend(
-            getattr(instruction, name, None)
-            for name in ("high", "low")
-        )
+    if operation(instruction) in _FIELD_WRITE_OPERATIONS:
+        candidates.append(getattr(instruction, "dest", None))
     return any(
         candidate is not None and same_var(_base_var(candidate), variable)
         for candidate in candidates
     )
 
 
-def _node_read_variables(node):
-    variable = var_from_expr(node)
-    if variable is not None:
-        yield _base_var(variable)
-    for candidate in getattr(node, "vars_read", ()) or ():
-        yield _base_var(candidate)
-    if op_name(node) in _SPLIT_READ_OPS:
-        for name in ("high", "low"):
-            candidate = getattr(node, name, None)
-            if candidate is not None:
-                yield _base_var(candidate)
-
-
 def _read_variables(instruction):
+    variables = getattr(instruction, "vars_read", None)
+    if variables is not None:
+        yield from (_base_var(variable) for variable in variables)
+        return
+    # Lightweight tests and external profile adapters may expose only the IL
+    # tree. Real BN instructions always take the vars_read path above.
     for node in walk_expr(instruction):
-        yield from _node_read_variables(node)
+        node_variables = getattr(node, "vars_read", None)
+        if node_variables is not None:
+            yield from (_base_var(variable) for variable in node_variables)
+            continue
+        variable = var_from_expr(node)
+        if variable is not None:
+            yield _base_var(variable)
 
 
 def instruction_reads_variable(instruction, variable):
@@ -239,44 +254,74 @@ def instruction_reads_variable(instruction, variable):
     return any(same_var(candidate, variable) for candidate in _read_variables(instruction))
 
 
-def expression_may_address_variable(mlil, expression, variable):
-    """Follow all variable definitions looking for an address of ``variable``.
+def _addressed_variables_from_expressions(mlil, expressions):
+    """Return every address source reachable from the expression roots.
 
-    This is a conservative may-alias query: an incomplete definition lookup is
-    treated as a possible alias so callers that rewrite control flow fail closed.
+    ``None`` means a definition lookup was incomplete, so callers must treat any
+    queried variable as possibly addressed.
     """
-    expressions = deque((expression,))
+    expressions = deque(expressions)
     seen_expressions = set()
+    seen_expression_refs = []
     seen_variables = []
+    addressed_result = []
     while expressions:
         current = expressions.popleft()
         if current is None:
             continue
+        expression_key = id(current)
+        if expression_key in seen_expressions:
+            continue
+        seen_expressions.add(expression_key)
+        # BN may return fresh Python wrappers for IL nodes. Keep visited
+        # wrappers alive so CPython cannot reuse an id for a different node.
+        seen_expression_refs.append(current)
+
+        addressed_variables = list(
+            getattr(current, "vars_address_taken", ()) or ()
+        )
+        # BN 5.3 omits vars_address_taken for MLIL_ADDRESS_OF_FIELD. The
+        # per-node fallback also supports lightweight external/test adapters.
         for node in walk_expr(current):
-            expression_key = id(node)
-            if expression_key in seen_expressions:
-                continue
-            seen_expressions.add(expression_key)
             addressed = addressed_var(node)
-            if addressed is not None and same_var(_base_var(addressed), variable):
-                return True
-            candidates = list(_node_read_variables(node))
-            if addressed is not None:
-                candidates.append(_base_var(addressed))
-            for candidate in candidates:
-                if any(same_var(candidate, seen) for seen in seen_variables):
-                    continue
-                seen_variables.append(candidate)
-                try:
-                    definitions = list(mlil.get_var_definitions(candidate))
-                except Exception:  # noqa: BLE001
-                    return True
-                expressions.extend(definitions)
-    return False
+            if addressed is not None and not any(
+                same_var(_base_var(addressed), _base_var(candidate))
+                for candidate in addressed_variables
+            ):
+                addressed_variables.append(addressed)
+        for addressed in map(_base_var, addressed_variables):
+            if not any(same_var(addressed, known) for known in addressed_result):
+                addressed_result.append(addressed)
+
+        candidates = [*_read_variables(current), *map(_base_var, addressed_variables)]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if any(same_var(candidate, seen) for seen in seen_variables):
+                continue
+            seen_variables.append(candidate)
+            try:
+                definitions = list(mlil.get_var_definitions(candidate))
+            except Exception:  # noqa: BLE001
+                return None
+            expressions.extend(definitions)
+    return addressed_result
 
 
-def variable_address_escapes(mlil, variable):
-    """Return whether a store or unknown memory effect can retain an address."""
+def _expressions_may_address_variable(mlil, expressions, variable):
+    """Conservatively test whether roots may contain an address of ``variable``."""
+    addressed = _addressed_variables_from_expressions(mlil, expressions)
+    return addressed is None or any(
+        same_var(candidate, _base_var(variable)) for candidate in addressed
+    )
+
+
+def expression_may_address_variable(mlil, expression, variable):
+    """Follow one expression's definitions looking for an address of ``variable``."""
+    return _expressions_may_address_variable(mlil, (expression,), variable)
+
+
+def _memory_effect_expressions(mlil):
     instructions = getattr(mlil, "instructions", None)
     if instructions is None:
         instructions = (
@@ -285,16 +330,41 @@ def variable_address_escapes(mlil, variable):
             for instruction in block
         )
     for instruction in instructions or ():
-        operation = op_name(instruction)
-        if operation in STORE_OPS:
-            expression = getattr(instruction, "src", None)
+        if operation(instruction) in STORE_OPERATIONS:
+            yield getattr(instruction, "src", None)
         elif has_unknown_memory_effect(instruction):
-            expression = instruction
-        else:
-            continue
-        if expression_may_address_variable(mlil, expression, variable):
-            return True
-    return False
+            yield instruction
+
+
+def address_escape_checker(mlil):
+    """Build one current-MLIL address-escape query with shared alias work."""
+    uncomputed = object()
+    addressed = uncomputed
+
+    @cache
+    def cached_address_escapes(variable):
+        nonlocal addressed
+        if addressed is uncomputed:
+            addressed = _addressed_variables_from_expressions(
+                mlil,
+                _memory_effect_expressions(mlil),
+            )
+        return addressed is None or any(
+            same_var(candidate, variable) for candidate in addressed
+        )
+
+    def address_escapes(variable):
+        return cached_address_escapes(_base_var(variable))
+
+    return address_escapes
+
+
+def variable_address_escapes(mlil, variable):
+    """Return whether a store or unknown memory effect can retain an address."""
+    return any(
+        expression_may_address_variable(mlil, expression, variable)
+        for expression in _memory_effect_expressions(mlil)
+    )
 
 
 def current_non_ssa_instruction(mlil, ssa_instruction):
@@ -311,7 +381,7 @@ def current_non_ssa_instruction(mlil, ssa_instruction):
         return None
     if (
         getattr(current, "instr_index", None) != instr_index
-        or op_name(current) != op_name(expected)
+        or operation(current) != operation(expected)
     ):
         return None
     for name in ("expr_index", "address"):
@@ -323,17 +393,13 @@ def current_non_ssa_instruction(mlil, ssa_instruction):
 
 def has_unknown_memory_effect(instruction):
     """Return whether an instruction may mutate memory outside explicit STORE handling."""
-    operation = op_name(instruction) or ""
-    return (
-        operation in CALL_OPS
-        or operation in _UNKNOWN_MEMORY_EFFECT_OPS
-        or operation.startswith(_UNKNOWN_MEMORY_EFFECT_PREFIXES)
-    )
+    op = operation(instruction)
+    return op in CALL_OPERATIONS or op in _UNKNOWN_MEMORY_EFFECT_OPERATIONS
 
 
 def has_unmodeled_semantics(instruction):
     """Return whether Binary Ninja could not model an instruction's semantics."""
-    return expression_has_operation(instruction, _UNMODELED_OPS)
+    return expression_has_operation(instruction, _UNMODELED_OPERATIONS)
 
 
 def evaluate_comparison(parts, token):
@@ -375,7 +441,7 @@ def row_local_copy_chain(mlil, variable, row, use, seen=()):
     definition = row_definitions[0]
     definition_block = getattr(definition, "il_basic_block", None)
     if (
-        op_name(definition) != "MLIL_SET_VAR"
+        operation(definition) != M.MLIL_SET_VAR
         or definition_block is None
         or definition_block.start != row.start
         or getattr(definition, "instr_index", None) is None
@@ -453,14 +519,30 @@ def all_paths_hit_blocks(basic_blocks, starts, scope, hit_starts):
     return starts <= proven
 
 
+def region_until(start_bb, stop_starts):
+    """Return blocks reachable from ``start_bb`` before any stop block."""
+    region = set()
+    queue = deque((start_bb,))
+    while queue:
+        block = queue.popleft()
+        if block.start in region or block.start in stop_starts:
+            continue
+        region.add(block.start)
+        queue.extend(
+            edge.target
+            for edge in block.outgoing_edges
+            if edge.target.start not in region and edge.target.start not in stop_starts
+        )
+    return region
+
+
 def dependency_variables(mlil, expressions, scope):
     """Return variables on in-scope definition chains rooted at ``expressions``."""
     required = set()
     queue = deque(
         var
         for expression in expressions
-        for node in walk_expr(expression)
-        if (var := var_from_expr(node)) is not None
+        for var in _read_variables(expression)
     )
     while queue:
         var = queue.popleft()
@@ -471,45 +553,57 @@ def dependency_variables(mlil, expressions, scope):
             block = getattr(definition, "il_basic_block", None)
             if block is None or block.start not in scope:
                 continue
-            queue.extend(
-                source_var
-                for node in walk_expr(getattr(definition, "src", None))
-                if (source_var := var_from_expr(node)) is not None
-            )
+            queue.extend(_read_variables(getattr(definition, "src", None)))
     return required
 
 
-def transitive_definition_variables(mlil, variables):
-    """Return variables reachable through all available definition sources."""
-    dependencies = set()
-    queue = deque(variables)
-    while queue:
-        var = queue.popleft()
-        if var in dependencies:
-            continue
-        dependencies.add(var)
-        for definition in mlil.get_var_definitions(var):
-            queue.extend(
-                source_var
-                for node in walk_expr(getattr(definition, "src", None))
-                if (source_var := var_from_expr(node)) is not None
-            )
-    return dependencies
+def scope_locality_checker(mlil):
+    """Build one current-MLIL index of variable read/address-taken blocks."""
+    uncomputed = object()
+    use_blocks = uncomputed
+
+    def variables_are_local(variables, scope):
+        nonlocal use_blocks
+        if use_blocks is uncomputed:
+            indexed_use_blocks = {}
+            for block in mlil.basic_blocks:
+                block_variables = []
+                for instruction in block:
+                    block_variables.extend(_read_variables(instruction))
+                    block_variables.extend(
+                        _base_var(addressed)
+                        for expression in walk_expr(instruction)
+                        for addressed in (addressed_var(expression),)
+                        if addressed is not None
+                    )
+                for variable in block_variables:
+                    indexed_use_blocks.setdefault(variable, set()).add(block.start)
+            use_blocks = indexed_use_blocks
+        scope = set(scope)
+        return all(
+            use_blocks.get(_base_var(variable), set()) <= scope
+            for variable in variables
+        )
+
+    return variables_are_local
 
 
 def variables_are_scope_local(mlil, variables, scope):
     """Return whether ``variables`` have no reads or address escapes outside ``scope``."""
     variables = tuple(variables)
-    for bb in mlil.basic_blocks:
-        if bb.start in scope:
+    for block in mlil.basic_blocks:
+        if block.start in scope:
             continue
-        for ins in bb:
-            if any(instruction_reads_variable(ins, var) for var in variables):
+        for instruction in block:
+            if any(
+                instruction_reads_variable(instruction, variable)
+                for variable in variables
+            ):
                 return False
-            for expr in walk_expr(ins):
-                addressed = addressed_var(expr)
+            for expression in walk_expr(instruction):
+                addressed = addressed_var(expression)
                 if addressed is not None and any(
-                    same_var(addressed, var) for var in variables
+                    same_var(addressed, variable) for variable in variables
                 ):
                     return False
     return True
@@ -541,7 +635,7 @@ def definitions_cover_all_paths(mlil, starts, scope, expressions):
         block_defs[start] = {
             ins.dest
             for ins in bb
-            if op_name(ins) == "MLIL_SET_VAR" and ins.dest in tracked
+            if operation(ins) == M.MLIL_SET_VAR and ins.dest in tracked
         }
 
     incoming = {
@@ -575,11 +669,10 @@ def definitions_cover_all_paths(mlil, starts, scope, expressions):
     for start, bb in blocks.items():
         defined = set(incoming[start])
         for ins in bb:
-            for expr in walk_expr(ins):
-                var = var_from_expr(expr)
-                if var is not None and var in tracked and var not in defined:
+            for var in _read_variables(ins):
+                if var in tracked and var not in defined:
                     return False
-            if op_name(ins) == "MLIL_SET_VAR" and ins.dest in tracked:
+            if operation(ins) == M.MLIL_SET_VAR and ins.dest in tracked:
                 defined.add(ins.dest)
     return True
 
@@ -593,10 +686,8 @@ def constant_value(mlil, expr):
         mlil,
         expr,
         max_depth=32,
-        require_single=True,
-        allowed_ops=None,
     )
-    return expr.constant if _op_name(expr) in CONST_OPS else None
+    return expr.constant if operation(expr) in CONST_OPERATIONS else None
 
 
 def expression_scalar_value(mlil, expr):
@@ -605,14 +696,11 @@ def expression_scalar_value(mlil, expr):
         mlil,
         expr,
         max_depth=32,
-        require_single=True,
-        allowed_ops=None,
     )
-    if _op_name(expr) in CONST_OPS:
+    if operation(expr) in CONST_OPERATIONS:
         return expr.constant
     value = getattr(expr, "value", None)
-    value_type = getattr(getattr(value, "type", None), "name", None)
-    if value_type in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
+    if getattr(value, "type", None) in _CONSTANT_VALUE_TYPES:
         return value.value
     return None
 
@@ -624,18 +712,19 @@ def constant_address(mlil, expr, depth=0, max_depth=32, address_mask=None):
         mlil,
         expr,
         max_depth=max_depth,
-        require_single=True,
-        allowed_ops=None,
     )
     value = constant_value(mlil, expr)
     if value is not None:
         return _mask_address(value, address_mask)
-    op = _op_name(expr)
-    if op in ("MLIL_ADD", "MLIL_SUB"):
+    op = operation(expr)
+    if op in (M.MLIL_ADD, M.MLIL_SUB):
         left = constant_address(mlil, expr.left, depth + 1, max_depth, address_mask)
         right = constant_address(mlil, expr.right, depth + 1, max_depth, address_mask)
         if left is not None and right is not None:
-            return _mask_address(left + right if op == "MLIL_ADD" else left - right, address_mask)
+            return _mask_address(
+                left + right if op == M.MLIL_ADD else left - right,
+                address_mask,
+            )
     return None
 
 
@@ -644,16 +733,14 @@ def load_slot_address(mlil, expr, width=8, address_mask=None):
         mlil,
         expr,
         max_depth=32,
-        require_single=True,
-        allowed_ops=None,
     )
-    op = _op_name(expr)
-    if op not in SLOT_LOAD_OPS or getattr(expr, "size", None) != width:
+    op = operation(expr)
+    if op not in SLOT_LOAD_OPERATIONS or getattr(expr, "size", None) != width:
         return None
     addr = constant_address(mlil, expr.src, address_mask=address_mask)
     if addr is None:
         return None
-    if op in LOAD_STRUCT_OPS:
+    if op in LOAD_STRUCT_OPERATIONS:
         offset = getattr(expr, "offset", 0)
         if not isinstance(offset, int):
             return None
@@ -664,21 +751,78 @@ def load_slot_address(mlil, expr, width=8, address_mask=None):
 def mlil_stores_to_address(mlil, addr, address_mask=None):
     for ins in getattr(mlil, "instructions", ()) or ():
         for expr in walk_expr(ins):
-            if (
-                _op_name(expr) in STORE_OPS
-                and constant_address(
-                    mlil,
-                    getattr(expr, "dest", None),
-                    address_mask=address_mask,
-                ) == addr
-            ):
+            op = operation(expr)
+            if op not in STORE_OPERATIONS:
+                continue
+            destination = constant_address(
+                mlil,
+                getattr(expr, "dest", None),
+                address_mask=address_mask,
+            )
+            if op in (M.MLIL_STORE_STRUCT, M.MLIL_STORE_STRUCT_SSA):
+                offset = getattr(expr, "offset", None)
+                if destination is None or type(offset) is not int:
+                    continue
+                destination = _mask_address(destination + offset, address_mask)
+            if destination == addr:
                 return True
     return False
 
 
+def slot_has_no_stores(bv, current_mlil, slot_addr, address_mask=None):
+    """Prove that every currently known code reference has analyzed no write."""
+    if current_mlil is None:
+        return False
+    data_var = bv.get_data_var_at(slot_addr)
+    if data_var is None or mlil_stores_to_address(
+        current_mlil,
+        slot_addr,
+        address_mask=address_mask,
+    ):
+        return False
+
+    try:
+        refs = list(getattr(data_var, "code_refs", ()) or ())
+    except Exception:  # noqa: BLE001
+        return False
+    current_func = getattr(current_mlil, "source_function", None)
+    current_start = getattr(current_func, "start", None)
+    seen = set()
+    for ref in refs:
+        func = getattr(ref, "function", None)
+        if func is not None:
+            funcs = [func]
+        else:
+            try:
+                funcs = list(bv.get_functions_containing(ref.address))
+            except Exception:  # noqa: BLE001
+                return False
+        if not funcs:
+            return False
+        for func in funcs:
+            key = getattr(func, "start", id(func))
+            if key in seen:
+                continue
+            seen.add(key)
+            same_current_function = func is current_func or (
+                current_start is not None and getattr(func, "start", None) == current_start
+            )
+            candidate = current_mlil if same_current_function else getattr(func, "mlil", None)
+            if candidate is None or (
+                candidate is not current_mlil
+                and mlil_stores_to_address(
+                    candidate,
+                    slot_addr,
+                    address_mask=address_mask,
+                )
+            ):
+                return False
+    return True
+
+
 def walk_expr_with_defs(mlil, expr, max_depth=16):
     """Yield expression nodes, following MLIL_VAR definitions."""
-    yield from _walk_expr_with_defs(mlil, expr, set(), set(), 0, max_depth)
+    yield from _walk_expr_with_defs(mlil, expr, set(), [], 0, max_depth)
 
 
 def _walk_expr_with_defs(mlil, expr, seen_exprs, seen_vars, depth, max_depth):
@@ -690,12 +834,12 @@ def _walk_expr_with_defs(mlil, expr, seen_exprs, seen_vars, depth, max_depth):
             continue
         seen_exprs.add(expr_key)
         yield child
-        if _op_name(child) != "MLIL_VAR" or mlil is None or depth >= max_depth:
+        if operation(child) != M.MLIL_VAR or mlil is None or depth >= max_depth:
             continue
-        var_key = repr(getattr(child, "src", None))
-        if var_key in seen_vars:
+        variable = getattr(child, "src", None)
+        if any(same_var(variable, seen) for seen in seen_vars):
             continue
-        seen_vars.add(var_key)
+        seen_vars.append(variable)
         try:
             definitions = mlil.get_var_definitions(child.src)
         except Exception:  # noqa: BLE001
@@ -738,22 +882,20 @@ def _load_slot_offsets(mlil, expr, width, address_mask, depth, max_depth):
         mlil,
         expr,
         max_depth=max_depth,
-        require_single=True,
-        allowed_ops=None,
     )
     slot_addr = load_slot_address(mlil, expr, width=width, address_mask=address_mask)
     if slot_addr is not None:
         return [(slot_addr, 0)]
 
-    op = _op_name(expr)
-    if op not in ("MLIL_ADD", "MLIL_SUB"):
+    op = operation(expr)
+    if op not in (M.MLIL_ADD, M.MLIL_SUB):
         return []
 
     out = []
     right_const = constant_value(mlil, expr.right)
     if right_const is not None:
         addend = _signed_offset(right_const)
-        if op == "MLIL_SUB":
+        if op == M.MLIL_SUB:
             addend = -addend
         out.extend(
             (slot, offset + addend)
@@ -767,7 +909,7 @@ def _load_slot_offsets(mlil, expr, width, address_mask, depth, max_depth):
             )
         )
 
-    if op == "MLIL_ADD":
+    if op == M.MLIL_ADD:
         left_const = constant_value(mlil, expr.left)
         if left_const is not None:
             addend = _signed_offset(left_const)
@@ -795,18 +937,18 @@ def iter_indirect_calls(mlil):
     if mlil is None:
         return
     for insn in mlil.instructions:
-        if not insn.operation.name.startswith("MLIL_CALL"):
+        if insn.operation not in CALL_OPERATIONS:
             continue
-        if insn.dest.operation.name in CONST_OPS:
+        if insn.dest.operation in CONST_OPERATIONS:
             continue
         yield insn
 
 
-def iter_calls(mlil, ops=CALL_OPS):
+def iter_calls(mlil, ops=CALL_OPERATIONS):
     """Yield MLIL call-like instructions."""
-    wanted = _op_names(ops)
+    selectors = _operation_selectors(ops)
     for insn in getattr(mlil, "instructions", ()) or ():
-        if _op_name(insn) in wanted:
+        if _matches_operation(insn, selectors):
             yield insn
 
 
@@ -822,21 +964,23 @@ def peel_var_definitions(
     expr,
     trail=None,
     max_depth=64,
-    require_single=False,
-    allowed_ops=SET_VAR_OPS,
 ):
-    """Follow MLIL_VAR through SET_VAR definitions and return the peeled expr."""
+    """Follow only unique whole-variable MLIL definitions.
+
+    Multiple reaching definitions and field writes are semantic boundaries, not
+    candidates from which a caller may select one representative.
+    """
     for _ in range(max_depth):
-        if expr is None or expr.operation.name != "MLIL_VAR":
+        if expr is None or expr.operation != M.MLIL_VAR:
             break
         try:
-            defs = mlil.get_var_definitions(expr.src)
+            definitions = list(mlil.get_var_definitions(expr.src) or ())
         except Exception:  # noqa: BLE001
             break
-        if not defs or (require_single and len(defs) != 1):
+        if len(definitions) != 1:
             break
-        definition = defs[0]
-        if allowed_ops is not None and definition.operation.name not in allowed_ops:
+        definition = definitions[0]
+        if definition.operation != M.MLIL_SET_VAR:
             break
         if not hasattr(definition, "src"):
             break
@@ -851,34 +995,50 @@ def _single_value(expr):
         value = expr.value
     except Exception:  # noqa: BLE001
         return None
-    if value.type.name in ("ConstantValue", "ConstantPointerValue", "ImportedAddressValue"):
-        return value.value & U64
+    if value.type in _CONSTANT_VALUE_TYPES:
+        return value.value & _expression_mask(expr)
     return None
 
 
 def fold_constant_value(bv, mlil, expr, depth=0, max_depth=32, load_address_mask=None):
-    """Best-effort single-value fold for current MLIL call-target recovery."""
+    """Fold one value, accepting multiple definitions only by consensus."""
     if expr is None or depth > max_depth:
         return None
-    op = expr.operation.name
+    op = expr.operation
 
-    if op in CONST_OPS:
-        return expr.constant & U64
+    if op in CONST_OPERATIONS:
+        return expr.constant & _expression_mask(expr)
 
-    if op == "MLIL_VAR":
+    native_value = _single_value(expr)
+    if native_value is not None:
+        return native_value
+
+    if op == M.MLIL_VAR:
         try:
-            defs = mlil.get_var_definitions(expr.src)
+            definitions = list(mlil.get_var_definitions(expr.src) or ())
         except Exception:  # noqa: BLE001
-            defs = ()
-        if defs and defs[0].operation.name in SET_VAR_OPS:
-            value = fold_constant_value(
-                bv, mlil, defs[0].src, depth + 1, max_depth, load_address_mask
+            definitions = []
+        if not definitions or any(
+            definition.operation != M.MLIL_SET_VAR or not hasattr(definition, "src")
+            for definition in definitions
+        ):
+            return None
+        values = [
+            fold_constant_value(
+                bv,
+                mlil,
+                definition.src,
+                depth + 1,
+                max_depth,
+                load_address_mask,
             )
-            if value is not None:
-                return value
-        return _single_value(expr)
+            for definition in definitions
+        ]
+        return values[0] if values[0] is not None and all(
+            value == values[0] for value in values[1:]
+        ) else None
 
-    if op in ("MLIL_ADD", "MLIL_SUB"):
+    if op in (M.MLIL_ADD, M.MLIL_SUB):
         left = fold_constant_value(
             bv, mlil, expr.left, depth + 1, max_depth, load_address_mask
         )
@@ -887,24 +1047,52 @@ def fold_constant_value(bv, mlil, expr, depth=0, max_depth=32, load_address_mask
         )
         if left is None or right is None:
             return None
-        return (left + right if op == "MLIL_ADD" else left - right) & U64
+        return (left + right if op == M.MLIL_ADD else left - right) & _expression_mask(expr)
 
-    if op == "MLIL_MUL":
+    if op == M.MLIL_MUL:
         left = fold_constant_value(
             bv, mlil, expr.left, depth + 1, max_depth, load_address_mask
         )
         right = fold_constant_value(
             bv, mlil, expr.right, depth + 1, max_depth, load_address_mask
         )
-        return None if left is None or right is None else (left * right) & U64
+        return (
+            None
+            if left is None or right is None
+            else (left * right) & _expression_mask(expr)
+        )
 
-    if op in ("MLIL_ZX", "MLIL_SX", "MLIL_LOW_PART"):
-        return fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth, load_address_mask)
+    if op in (M.MLIL_ZX, M.MLIL_SX, M.MLIL_LOW_PART):
+        source = fold_constant_value(
+            bv,
+            mlil,
+            expr.src,
+            depth + 1,
+            max_depth,
+            load_address_mask,
+        )
+        if source is None:
+            return None
+        result_bits = min((getattr(expr, "size", None) or 8) * 8, 64)
+        result_mask = (1 << result_bits) - 1
+        if op != M.MLIL_SX:
+            return source & result_mask
+        source_bits = min((getattr(expr.src, "size", None) or 8) * 8, 64)
+        source_mask = (1 << source_bits) - 1
+        source &= source_mask
+        sign_bit = 1 << (source_bits - 1)
+        signed = source - (1 << source_bits) if source & sign_bit else source
+        return signed & result_mask
 
-    if op in LOAD_OPS:
+    if op in LOAD_OPERATIONS:
         addr = fold_constant_value(bv, mlil, expr.src, depth + 1, max_depth, load_address_mask)
         if addr is None:
             return None
+        if op in LOAD_STRUCT_OPERATIONS:
+            offset = getattr(expr, "offset", None)
+            if type(offset) is not int:
+                return None
+            addr += offset
         return read_uint_le(bv, _mask_address(addr, load_address_mask), expr.size)
 
     return _single_value(expr)
@@ -914,20 +1102,48 @@ def cleanup_roots_for_expr(mlil, expr):
     """Instruction indices defining MLIL vars read by ``expr``."""
     roots = set()
     for node in walk_expr(expr):
-        if node.operation.name != "MLIL_VAR":
+        if node.operation != M.MLIL_VAR:
             continue
         try:
             defs = mlil.get_var_definitions(node.src)
         except Exception:  # noqa: BLE001
             continue
         for definition in defs:
-            if definition.operation.name in SET_VAR_OPS:
+            if definition.operation in SET_VAR_OPERATIONS:
                 roots.add(definition.instr_index)
     return roots
 
 
+def _assignment_roots_before(block_instrs, position):
+    roots = set()
+    for previous in reversed(block_instrs[:position]):
+        if previous.operation not in SET_VAR_OPERATIONS:
+            break
+        roots.add(previous.instr_index)
+    return roots
+
+
+def set_roots_before_instruction(mlil, instruction):
+    """Contiguous assignment indices immediately before one exact instruction."""
+    block = getattr(instruction, "il_basic_block", None)
+    instr_index = getattr(instruction, "instr_index", None)
+    if block is None or instr_index is None:
+        return set()
+    block_instrs = [mlil[i] for i in range(block.start, block.end)]
+    positions = [
+        pos
+        for pos, candidate in enumerate(block_instrs)
+        if getattr(candidate, "instr_index", None) == instr_index
+    ]
+    return (
+        _assignment_roots_before(block_instrs, positions[0])
+        if len(positions) == 1
+        else set()
+    )
+
+
 def set_roots_before(mlil, site_addrs):
-    """Contiguous pure assignment instruction indices before owned sites."""
+    """Contiguous assignment indices before all instructions at owned sites."""
     site_addrs = set(site_addrs or ())
     roots = set()
     if mlil is None or not site_addrs:
@@ -935,25 +1151,30 @@ def set_roots_before(mlil, site_addrs):
 
     for block in mlil.basic_blocks:
         block_instrs = [mlil[i] for i in range(block.start, block.end)]
-        for pos, ins in enumerate(block_instrs):
+        for position, ins in enumerate(block_instrs):
             if ins.address not in site_addrs:
                 continue
-            for prev in reversed(block_instrs[:pos]):
-                if prev.operation.name not in SET_VAR_OPS:
-                    break
-                roots.add(prev.instr_index)
+            roots.update(_assignment_roots_before(block_instrs, position))
     return roots
 
 
 __all__ = (
+    "ADDRESS_OF_OPERATIONS",
     "ADDRESS_OF_OPS",
     "CALL_OPS",
+    "CALL_OPERATIONS",
     "CONST_OPS",
+    "CONST_OPERATIONS",
     "LOAD_STRUCT_OPS",
+    "LOAD_STRUCT_OPERATIONS",
     "LOAD_OPS",
+    "LOAD_OPERATIONS",
     "SET_VAR_OPS",
+    "SET_VAR_OPERATIONS",
+    "SLOT_LOAD_OPERATIONS",
     "SLOT_LOAD_OPS",
     "STORE_OPS",
+    "STORE_OPERATIONS",
     "addressed_var",
     "cleanup_roots_for_expr",
     "comparison_parts",
@@ -983,12 +1204,15 @@ __all__ = (
     "load_slot_address",
     "mlil_stores_to_address",
     "op_name",
+    "operation",
     "peel_var_definitions",
+    "region_until",
     "row_local_copy_chain",
     "same_var",
     "set_roots_before",
+    "set_roots_before_instruction",
+    "slot_has_no_stores",
     "state_token",
-    "transitive_definition_variables",
     "variables_are_scope_local",
     "variable_address_escapes",
     "var_from_expr",

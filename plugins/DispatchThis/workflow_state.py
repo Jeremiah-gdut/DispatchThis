@@ -5,8 +5,13 @@ ROOT_KEY = "dispatchthis_workflow_state"
 CLEANUP_RECEIPT_VERSION = 3
 
 
+class ProfileStateMismatch(RuntimeError):
+    pass
+
+
 def _fresh_state():
     return {
+        "profile_id": None,
         "branch": {
             "stable": False,
             "receipts": {},
@@ -26,6 +31,23 @@ def _fresh_state():
             "receipts": {},
         },
     }
+
+
+def _has_recovery_evidence(data):
+    return any((
+        data.get("branch", {}).get("stable", False),
+        data.get("branch", {}).get("receipts"),
+        data.get("branch", {}).get("cleanup_roots"),
+        data.get("call", {}).get("stable", False),
+        data.get("call", {}).get("receipts"),
+        data.get("call", {}).get("targets"),
+        data.get("global", {}).get("stable", False),
+        data.get("global", {}).get("receipts"),
+    ))
+
+
+def function_has_recovery_evidence(func):
+    return _has_recovery_evidence(func.session_data.get(ROOT_KEY, {}))
 
 
 def _targets_tuple(targets):
@@ -87,9 +109,26 @@ def _normalize_state(data):
 class FunctionWorkflowState:
     """Phase semantics over one function's session_data."""
 
-    def __init__(self, func):
+    def __init__(self, func, profile_id=None):
         self.func = func
-        self.data = _normalize_state(func.session_data.setdefault(ROOT_KEY, _fresh_state()))
+        raw_state = func.session_data.setdefault(ROOT_KEY, _fresh_state())
+        had_evidence = _has_recovery_evidence(raw_state)
+        self.data = _normalize_state(raw_state)
+        recorded_profile = self.data.get("profile_id")
+        if profile_id is not None:
+            if recorded_profile is None:
+                if had_evidence:
+                    raise ProfileStateMismatch(
+                        "legacy recovery state has no resolver profile provenance"
+                    )
+                self.data["profile_id"] = profile_id
+            elif recorded_profile != profile_id:
+                if had_evidence:
+                    raise ProfileStateMismatch(
+                        f"function state belongs to profile {recorded_profile!r}, "
+                        f"not {profile_id!r}"
+                    )
+                self.data["profile_id"] = profile_id
         self.seed_branch_receipts()
 
     @staticmethod
@@ -104,6 +143,15 @@ class FunctionWorkflowState:
 
     def branch_targets(self):
         return {source: _targets_tuple(targets) for source, targets in self.branch_receipts.items()}
+
+    def verified_branch_targets(self):
+        """Return receipts that exactly match current BN user branch metadata."""
+        applied_targets = _user_branch_targets(self.func)
+        return {
+            source: targets
+            for source, targets in self.branch_targets().items()
+            if applied_targets.get(source) == targets
+        }
 
     @property
     def branch_cleanup_roots(self):
@@ -147,14 +195,13 @@ class FunctionWorkflowState:
     def mark_branch_applied(self, source, targets):
         targets = _targets_tuple(targets)
         previous = self.branch_receipts.get(source)
-        if previous == targets:
-            return False
         self.branch_receipts[source] = targets
-        self.branch_cleanup_roots.pop(source, None)
+        if previous != targets:
+            self.branch_cleanup_roots.pop(source, None)
         self.data["branch"]["stable"] = False
         self.data["branch"]["cleanup_done"] = False
         self.invalidate_calls()
-        return previous is not None
+        return previous is not None and previous != targets
 
     def set_branch_cleanup_roots(self, source, cleanup_roots):
         roots = _int_set(cleanup_roots)
@@ -196,12 +243,29 @@ class FunctionWorkflowState:
     def call_target_receipts(self):
         return self.data["call"]["targets"]
 
-    def call_adjustment_needed(self, call_addr, target):
-        return self.call_receipts.get(call_addr) != target
+    def call_adjustment_needed(self, call_addr, adjust_type):
+        """Compare the desired override with Binary Ninja's current fact."""
+        try:
+            needed = self.func.get_call_type_adjustment(call_addr) != adjust_type
+        except Exception:  # noqa: BLE001
+            needed = True
+        if needed:
+            self.invalidate_call_stable()
+        return needed
+
+    def invalidate_call_stable(self):
+        self.data["call"]["stable"] = False
+        self.invalidate_globals()
 
     def mark_call_target(self, call_addr, target):
         previous = self.call_target_receipts.get(call_addr)
-        if previous == target:
+        stale_adjustment = (
+            call_addr in self.call_receipts
+            and self.call_receipts[call_addr] != target
+        )
+        if stale_adjustment:
+            self.call_receipts.pop(call_addr)
+        if previous == target and not stale_adjustment:
             return False
         self.call_target_receipts[call_addr] = target
         self.data["call"]["stable"] = False

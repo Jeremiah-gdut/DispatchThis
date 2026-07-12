@@ -1,6 +1,7 @@
 from importlib import import_module
 
 import pytest
+from binaryninja import SymbolType
 
 
 class Section:
@@ -15,6 +16,7 @@ class FakeBv:
         self.sections = {}
         self.symbols = {}
         self.functions = {}
+        self.executable_offsets = set()
         self.raise_on_read = set()
 
     def read(self, addr, size):
@@ -24,6 +26,9 @@ class FakeBv:
 
     def is_valid_offset(self, addr):
         return addr in self.valid_offsets
+
+    def is_offset_executable(self, addr):
+        return addr in self.executable_offsets
 
     def get_sections_at(self, addr):
         return self.sections.get(addr, [])
@@ -77,19 +82,24 @@ def test_memory_helpers_return_none_for_short_or_invalid_reads():
 def test_memory_helpers_validate_addresses_targets_and_sections():
     memory = import_module("plugins.DispatchThis.helpers.memory")
     bv = FakeBv()
-    symbol = object()
+    symbol = type("Symbol", (), {"type": SymbolType.ImportedFunctionSymbol})()
+    data_symbol = type("Symbol", (), {"type": SymbolType.DataSymbol})()
     func = object()
-    bv.valid_offsets.update({0x1000, 0x2000, 0x3000})
+    bv.valid_offsets.update({0x1000, 0x2000, 0x3000, 0x4000, 0x5000})
+    bv.executable_offsets.add(0x4000)
     bv.sections[0x1000] = [Section(".data")]
     bv.symbols[0x2000] = symbol
+    bv.symbols[0x5000] = data_symbol
     bv.functions[0x3000] = func
 
-    assert memory.is_valid_address(bv, 0x1000)
-    assert memory.is_valid_target(bv, 0x1000)
-    assert memory.is_call_target(bv, 0x2000)
-    assert memory.is_call_target(bv, 0x3000)
-    assert not memory.is_call_target(bv, 0x1000)
-    assert not memory.is_valid_address(bv, 0x4000)
+    assert memory.is_mapped_address(bv, 0x1000)
+    assert memory.is_known_callee(bv, 0x2000)
+    assert memory.is_known_callee(bv, 0x3000)
+    assert memory.is_executable_target(bv, 0x4000)
+    assert memory.is_known_callee(bv, 0x4000)
+    assert not memory.is_known_callee(bv, 0x1000)
+    assert not memory.is_known_callee(bv, 0x5000)
+    assert not memory.is_mapped_address(bv, 0x6000)
     assert memory.in_section(bv, 0x1000, ".data")
     assert memory.in_section(bv, 0x1000, (".rodata", ".data"))
     assert not memory.in_section(bv, 0x1000, ".text")
@@ -97,20 +107,27 @@ def test_memory_helpers_validate_addresses_targets_and_sections():
 
 def test_fact_builders_return_existing_recovery_fact_shapes():
     facts = import_module("plugins.DispatchThis.helpers.facts")
+    jump_il = object()
     call_il = CallIl()
     decode_def = object()
 
-    assert facts.branch_fact(0x1000, 7, [0x3000, 0x2000, 0x3000]) == {
+    assert facts.branch_fact(0x1000, 7, [0x3000, 0x2000, 0x3000], jump_il) == {
         "source": 0x1000,
         "dest_expr_index": 7,
         "targets": (0x2000, 0x3000),
-        "newly_resolved": True,
+        "jump_il": jump_il,
     }
-    assert facts.branch_fact(0x1000, 7, [0x2000], cleanup_roots=[12, 11, 12]) == {
+    assert facts.branch_fact(
+        0x1000,
+        7,
+        [0x2000],
+        jump_il,
+        cleanup_roots=[12, 11, 12],
+    ) == {
         "source": 0x1000,
         "dest_expr_index": 7,
         "targets": (0x2000,),
-        "newly_resolved": True,
+        "jump_il": jump_il,
         "cleanup_roots": {11, 12},
     }
     assert facts.call_fact(call_il, 0x5000, decode_def=decode_def, cleanup_roots=[2, 1, 2]) == {
@@ -120,6 +137,12 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
         "decode_def": decode_def,
         "cleanup_roots": {1, 2},
     }
+    assert facts.call_fact(
+        call_il,
+        0x5000,
+        cleanup_roots=[2, 1],
+        cleanup_load_roots=[1],
+    )["cleanup_load_roots"] == {1}
     assert facts.global_constant_fact(0xA43D70, "uint8_t const* const") == {
         "slot_addr": 0xA43D70,
         "type": "uint8_t const* const",
@@ -134,11 +157,14 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
 
 def test_fact_builders_reject_malformed_required_fields():
     facts = import_module("plugins.DispatchThis.helpers.facts")
+    jump_il = object()
 
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
-        facts.branch_fact(0x1000, 7, [])
+        facts.branch_fact(0x1000, 7, [], jump_il)
     with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
-        facts.branch_fact(0x1000, 7, [0x2000], cleanup_roots=1)
+        facts.branch_fact(0x1000, 7, [0x2000], jump_il, cleanup_roots=1)
+    with pytest.raises(facts.MalformedRecoveryFact, match="jump_il"):
+        facts.branch_fact(0x1000, 7, [0x2000], None)
     with pytest.raises(facts.MalformedRecoveryFact, match="call_il"):
         facts.call_fact(None, 0x5000)
     with pytest.raises(facts.MalformedRecoveryFact, match="call_addr"):
@@ -147,3 +173,16 @@ def test_fact_builders_reject_malformed_required_fields():
         facts.global_constant_fact(None, "uint8_t const* const")
     with pytest.raises(facts.MalformedRecoveryFact, match="plaintext"):
         facts.string_decrypt_fact(0x9000, 0xA000, 0xB000, "hello")
+    with pytest.raises(facts.MalformedRecoveryFact, match="source"):
+        facts.branch_fact(-1, 7, [0x2000], jump_il)
+    with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
+        facts.branch_fact(0x1000, 7, [-1], jump_il)
+    with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
+        facts.call_fact(CallIl(), 0x5000, cleanup_roots=[-1])
+    with pytest.raises(facts.MalformedRecoveryFact, match="subset"):
+        facts.call_fact(
+            CallIl(),
+            0x5000,
+            cleanup_roots=[1],
+            cleanup_load_roots=[2],
+        )

@@ -2,6 +2,12 @@ import types
 from importlib import import_module
 
 import conftest  # noqa: F401
+from binaryninja import (
+    LowLevelILOperation,
+    MediumLevelILOperation,
+    RegisterValueType,
+    SymbolType,
+)
 
 
 class Op:
@@ -28,7 +34,10 @@ class Expr:
     _next_index = 1
 
     def __init__(self, op, children=(), **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation.__members__.get(
+            op,
+            LowLevelILOperation.__members__.get(op, Op(op)),
+        )
         self.children = list(children)
         self.expr_index = Expr._next_index
         Expr._next_index += 1
@@ -39,6 +48,18 @@ class Expr:
         for child in self.children:
             out.extend(child.traverse(visit))
         return out
+
+    @property
+    def vars_read(self):
+        if self.operation.name in ("MLIL_VAR_SSA", "MLIL_VAR_ALIASED"):
+            return [self.src]
+        if self.operation.name == "MLIL_VAR_PHI":
+            return list(self.src)
+        return [
+            variable
+            for child in self.children
+            for variable in child.vars_read
+        ]
 
 
 class FakeBv:
@@ -59,6 +80,12 @@ class FakeBv:
     def is_valid_offset(self, addr):
         return addr in self.valid_offsets
 
+    def is_offset_executable(self, addr):
+        return addr in self.valid_offsets and any(
+            start <= addr < end and name == ".text"
+            for start, end, name in self.sections
+        )
+
     def get_sections_at(self, addr):
         return [
             types.SimpleNamespace(name=name)
@@ -74,12 +101,16 @@ class FakeBv:
 
 
 class FakeSSA:
-    def __init__(self, defs, instructions=()):
+    def __init__(self, defs, instructions=(), memory_defs=None):
         self.defs = defs
         self.instructions = list(instructions)
+        self.memory_defs = memory_defs or {}
 
     def get_ssa_reg_definition(self, var):
         return self.defs.get(var)
+
+    def get_ssa_memory_definition(self, memory):
+        return self.memory_defs.get(memory)
 
     def __iter__(self):
         return iter([self.instructions])
@@ -131,16 +162,12 @@ class CorrelatedIl:
 
 class IntType:
     width = 4
-
-    def __str__(self):
-        return "int32_t"
+    const = False
 
 
 class MutablePointerType:
     width = 8
-
-    def __str__(self):
-        return "void*"
+    const = False
 
 
 def const(op, value):
@@ -159,8 +186,14 @@ def var_ssa(name):
     return Expr("MLIL_VAR_SSA", src=name)
 
 
-def set_reg(src, instr_index=0):
-    return Expr("LLIL_SET_REG_SSA", [src], src=src, instr_index=instr_index)
+def set_reg(src, instr_index=0, block=None):
+    return Expr(
+        "LLIL_SET_REG_SSA",
+        [src],
+        src=src,
+        instr_index=instr_index,
+        il_basic_block=block,
+    )
 
 
 def set_var(dest, src, instr_index, address=0x4010):
@@ -171,8 +204,13 @@ def set_var_ssa(src, instr_index, address=0x4010):
     return Expr("MLIL_SET_VAR_SSA", [src], src=src, instr_index=instr_index, address=address)
 
 
-def phi(*src, instr_index=0):
-    return Expr("LLIL_REG_PHI", src=list(src), instr_index=instr_index)
+def phi(*src, instr_index=0, block=None):
+    return Expr(
+        "LLIL_REG_PHI",
+        src=list(src),
+        instr_index=instr_index,
+        il_basic_block=block,
+    )
 
 
 def unary(op, src):
@@ -187,15 +225,36 @@ def load(op, src, size=8, address=0x4010):
     return Expr(f"{op}_LOAD", [src], src=src, size=size, address=address)
 
 
-def store(dest, src, instr_index):
-    return Expr("LLIL_STORE_SSA", [dest, src], dest=dest, src=src, instr_index=instr_index)
+def store(dest, src, instr_index, src_memory=None, dest_memory=None, size=8):
+    return Expr(
+        "LLIL_STORE_SSA",
+        [dest, src],
+        dest=dest,
+        src=src,
+        instr_index=instr_index,
+        src_memory=src_memory,
+        dest_memory=dest_memory,
+        size=size,
+    )
+
+
+def stack_address(expr, offset):
+    expr.possible_values = types.SimpleNamespace(
+        type=RegisterValueType.StackFrameOffset,
+        offset=offset,
+    )
+    return expr
 
 
 def qword(bv, addr, value):
     bv.memory[addr] = value & 0xFFFFFFFFFFFFFFFF
 
 
-def correlated_store_fixture(reverse=True, mutable_pointer=False):
+def correlated_store_fixture(
+    reverse=True,
+    mutable_pointer=False,
+    impure_join_load=False,
+):
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
     bv.sections.append((0x5000, 0x6000, ".bss"))
@@ -286,7 +345,12 @@ def correlated_store_fixture(reverse=True, mutable_pointer=False):
     )
 
     non_ssa_join = CorrelatedBlock(40, 42)
-    pure = set_var("tmp", const("MLIL", 0), instr_index=40, address=0x5000)
+    pure_source = (
+        load("MLIL", const("MLIL", 0x5100), size=4)
+        if impure_join_load
+        else const("MLIL", 0)
+    )
+    pure = set_var("tmp", pure_source, instr_index=40, address=0x5000)
     pure.il_basic_block = non_ssa_join
     store = Expr("MLIL_STORE", dest=var("dest"), src=var("src"), size=4, instr_index=41, address=0x6000)
     store.il_basic_block = non_ssa_join
@@ -375,13 +439,13 @@ def test_branch_profile_resolves_main_two_target_jump():
         "source": 0x6C5F6C,
         "dest_expr_index": jump.dest.expr_index,
         "targets": (0x3000, 0x4000),
-        "newly_resolved": True,
+        "jump_il": jump,
     }]
     assert valorant.resolve_branch_gadget(bv, il, {0x6C5F6C: (0x3000, 0xDEAD)}) == [{
         "source": 0x6C5F6C,
         "dest_expr_index": jump.dest.expr_index,
         "targets": (0x3000, 0x4000),
-        "newly_resolved": False,
+        "jump_il": jump,
     }]
 
 
@@ -429,6 +493,35 @@ def test_call_profile_follows_ssa_call_destination():
     }]
 
 
+def test_branch_profile_rejects_partly_invalid_cached_targets():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.valid_offsets.add(0x3000)
+    bv.sections.append((0x3000, 0x3010, ".text"))
+    target = Var("x8", 1)
+    jump = Expr("LLIL_JUMP", [reg(target)], dest=reg(target), address=0x7000)
+    jump.ssa_form = jump
+    il = FakeLlil([[jump]])
+    il.ssa_form = FakeSSA({})
+
+    assert valorant.resolve_branch_gadget(bv, il, {0x7000: (0x3000, 0xDEAD)}) == []
+
+
+def test_branch_profile_does_not_hide_current_invalid_path_with_cache(monkeypatch):
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.valid_offsets.add(0x3000)
+    bv.sections.append((0x3000, 0x3010, ".text"))
+    target = Var("x8", 1)
+    jump = Expr("LLIL_JUMP", [reg(target)], dest=reg(target), address=0x7000)
+    jump.ssa_form = jump
+    il = FakeLlil([[jump]])
+    il.ssa_form = FakeSSA({})
+    monkeypatch.setattr(valorant, "_branch_values", lambda *_args: {0x3000, 0xDEAD})
+
+    assert valorant.resolve_branch_gadget(bv, il, {0x7000: (0x3000,)}) == []
+
+
 def test_peel_ssa_value_uses_binary_ninja_ssa_field_write_name():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     value = Expr("MLIL_CONST", constant=0x42)
@@ -437,26 +530,56 @@ def test_peel_ssa_value_uses_binary_ninja_ssa_field_write_name():
     assert valorant._peel_ssa_value(None, definition) is value
 
 
-def test_call_profile_accepts_external_symbol_target():
+def test_call_profile_rejects_external_symbol_without_code_evidence():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     target = 0x8956BB63505153E0
     bv = FakeBv()
+    bv.valid_offsets.add(target)
+    bv.sections.append((target, target + 8, ".data"))
     bv.symbols[target] = types.SimpleNamespace(
         name="fork",
-        type=types.SimpleNamespace(name="ExternalSymbol"),
+        type=SymbolType.ExternalSymbol,
     )
 
     decode_def = set_var("target", const("MLIL", target), instr_index=12, address=0x3200)
     call_il = Expr("MLIL_CALL", [var("target")], dest=var("target"), address=0x4200)
     il = FakeMlil([decode_def, call_il], {"target": [decode_def]})
 
-    assert valorant.resolve_call_gadget(bv, il) == [{
-        "call_il": call_il,
-        "call_addr": 0x4200,
-        "target": target,
-        "decode_def": decode_def,
-        "cleanup_roots": {12},
-    }]
+    assert valorant.resolve_call_gadget(bv, il) == []
+
+
+def test_call_profile_rejects_partly_valid_complete_value_set():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.valid_offsets.add(0x5000)
+    bv.sections.append((0x5000, 0x5100, ".text"))
+
+    good = set_var("target", const("MLIL", 0x5000), instr_index=14)
+    unknown = set_var("target", const("MLIL", 0xDEAD), instr_index=15)
+    call_il = Expr("MLIL_CALL", [var("target")], dest=var("target"), address=0x4400)
+    il = FakeMlil([good, unknown, call_il], {"target": [good, unknown]})
+
+    assert valorant.resolve_call_gadget(bv, il) == []
+
+
+def test_call_profile_does_not_fallback_when_ssa_value_is_unknown():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    bv = FakeBv()
+    bv.valid_offsets.add(0x5000)
+    bv.sections.append((0x5000, 0x5100, ".text"))
+
+    decode_def = set_var("target", const("MLIL", 0x5000), instr_index=16)
+    call_il = Expr("MLIL_CALL", [var("target")], dest=var("target"), address=0x4500)
+    call_il.ssa_form = Expr(
+        "MLIL_CALL_SSA",
+        [var_ssa("target#1")],
+        dest=var_ssa("target#1"),
+        address=0x4500,
+    )
+    il = FakeMlil([decode_def, call_il], {"target": [decode_def]})
+    il.ssa_form = FakeMlil([], {})
+
+    assert valorant.resolve_call_gadget(bv, il) == []
 
 
 def test_call_profile_rejects_data_symbol_target():
@@ -464,7 +587,7 @@ def test_call_profile_rejects_data_symbol_target():
     bv = FakeBv()
     bv.symbols[0] = types.SimpleNamespace(
         name="__elf_header",
-        type=types.SimpleNamespace(name="DataSymbol"),
+        type=SymbolType.DataSymbol,
     )
 
     decode_def = set_var("target", const("MLIL", 0), instr_index=13, address=0x3300)
@@ -605,6 +728,12 @@ def test_correlated_store_profile_rejects_writable_pointer_load():
     assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
 
 
+def test_correlated_store_profile_rejects_join_prefix_load():
+    valorant, bv, func, il, *_rest = correlated_store_fixture(impure_join_load=True)
+
+    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
+
+
 def test_global_constant_profile_skips_out_of_range_loads():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
@@ -619,13 +748,61 @@ def test_llil_value_folding_uses_stack_spill_before_memory_read():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     sp = Var("sp", 1)
     x1 = Var("x1", 1)
-    slot = binary("LLIL_ADD", reg(sp), const("LLIL", 0x120))
-    spill = store(slot, const("LLIL", 0x59), instr_index=1)
-    reload = load("LLIL", slot)
-    reload.instr_index = 2
-    ssa = FakeSSA({x1: set_reg(reload, instr_index=3)}, [spill])
+    slot = stack_address(binary("LLIL_ADD", reg(sp), const("LLIL", 0x120)), -0x120)
+    spill = store(slot, const("LLIL", 0x59), 1, src_memory=0, dest_memory=1)
+    reload = Expr(
+        "LLIL_LOAD_SSA",
+        [slot],
+        src=slot,
+        size=8,
+        instr_index=2,
+        src_memory=1,
+    )
+    ssa = FakeSSA({x1: set_reg(reload, instr_index=3)}, [spill], {1: spill})
 
     assert valorant._values(None, ssa, reg(x1)) == {0x59}
+
+
+def test_value_folding_requires_every_phi_arm_and_honors_struct_offset():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    unknown = Expr("LLIL_UNIMPL")
+
+    assert valorant._values(None, FakeSSA({}), phi(const("LLIL", 7), unknown)) is None
+
+    bv = FakeBv()
+    qword(bv, 0x1010, 0x1234)
+    load_struct = Expr(
+        "MLIL_LOAD_STRUCT",
+        [const("MLIL", 0x1000)],
+        src=const("MLIL", 0x1000),
+        offset=0x10,
+        size=8,
+    )
+
+    assert valorant._values(bv, FakeMlil([], {}), load_struct) == {0x1234}
+
+
+def test_value_folding_honors_cast_and_arithmetic_widths():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    source = const("LLIL", 0xFF)
+    source.size = 1
+    sx = unary("LLIL_SX", source)
+    sx.size = 8
+    low = unary("MLIL_LOW_PART", const("MLIL", 0x1234))
+    low.size = 1
+    add = binary("LLIL_ADD", const("LLIL", 0xFF), const("LLIL", 1))
+    add.size = 1
+
+    assert valorant._values(None, FakeSSA({}), sx) == {valorant.U64}
+    assert valorant._values(None, FakeSSA({}), low) == {0x34}
+    assert valorant._values(None, FakeSSA({}), add) == {0}
+
+
+def test_target_validation_does_not_choose_executable_u48_alias():
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    high = 0xFFFF000000003000
+
+    assert valorant._validated_targets({high}, lambda target: target == 0x3000) is None
 
 
 def test_branch_value_folding_correlates_phi_arms():
@@ -637,13 +814,22 @@ def test_branch_value_folding_correlates_phi_arms():
     b1 = Var("x2", 2)
     b = Var("x2", 3)
     dest = binary("LLIL_ADD", reg(a), reg(b))
+    left = types.SimpleNamespace(start=10)
+    right = types.SimpleNamespace(start=20)
+    join = types.SimpleNamespace(
+        start=30,
+        incoming_edges=(
+            types.SimpleNamespace(source=left),
+            types.SimpleNamespace(source=right),
+        ),
+    )
     ssa = FakeSSA({
-        a0: set_reg(const("LLIL", 1), 1),
-        a1: set_reg(const("LLIL", 2), 2),
-        a: phi(a0, a1, instr_index=3),
-        b0: set_reg(const("LLIL", 10), 4),
-        b1: set_reg(const("LLIL", 20), 5),
-        b: phi(b0, b1, instr_index=6),
+        a0: set_reg(const("LLIL", 1), 1, left),
+        a1: set_reg(const("LLIL", 2), 2, right),
+        a: phi(a0, a1, instr_index=3, block=join),
+        b0: set_reg(const("LLIL", 10), 4, left),
+        b1: set_reg(const("LLIL", 20), 5, right),
+        b: phi(b1, b0, instr_index=6, block=join),
     })
 
     assert valorant._branch_values(None, ssa, dest) == {11, 22}
@@ -690,11 +876,41 @@ def test_string_decoder_stays_profile_local():
     ) == b"vanguard"
 
 
+def test_string_recognizers_reject_ambiguous_specs(monkeypatch):
+    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
+    il = object()
+    monkeypatch.setattr(valorant, "_has_done_flag_store", lambda _il: True)
+    monkeypatch.setattr(valorant, "_has_byte_crypto_store", lambda _il: True)
+    monkeypatch.setattr(valorant, "_rem_moduli", lambda _il: {3})
+    monkeypatch.setattr(valorant, "_cmp_ne_constants", lambda _il: {8, 9})
+
+    assert valorant._recognize_rem_loop_string_decrypt(il) is None
+
+    func = types.SimpleNamespace(mlil=il)
+    monkeypatch.setattr(valorant, "_parameters", lambda *_args: ("dst", "src"))
+    monkeypatch.setattr(
+        valorant,
+        "_recognize_rem_loop_string_decrypt",
+        lambda _il: {"key_modulus": 3, "length": 5},
+    )
+    monkeypatch.setattr(
+        valorant,
+        "_recognize_index0_loop_string_decrypt",
+        lambda _il: {"key_modulus": 4, "length": 5},
+    )
+    monkeypatch.setattr(valorant, "_recognize_unrolled_string_decrypt", lambda _il: None)
+
+    assert valorant._recognize_string_decrypt_function(func) is None
+
+
 if __name__ == "__main__":
     test_branch_profile_resolves_main_two_target_jump()
+    test_branch_profile_rejects_partly_invalid_cached_targets()
     test_call_profile_accepts_text_target_without_existing_function()
     test_call_profile_follows_ssa_call_destination()
-    test_call_profile_accepts_external_symbol_target()
+    test_call_profile_rejects_external_symbol_without_code_evidence()
+    test_call_profile_rejects_partly_valid_complete_value_set()
+    test_call_profile_does_not_fallback_when_ssa_value_is_unknown()
     test_call_profile_rejects_data_symbol_target()
     test_global_constant_profile_plans_qword_data_loads()
     test_global_constant_profile_plans_expanded_qword_slot_range()
@@ -706,6 +922,7 @@ if __name__ == "__main__":
     test_correlated_store_profile_rejects_writable_pointer_load()
     test_global_constant_profile_skips_out_of_range_loads()
     test_llil_value_folding_uses_stack_spill_before_memory_read()
+    test_value_folding_requires_every_phi_arm_and_honors_struct_offset()
     test_branch_value_folding_correlates_phi_arms()
     test_value_folding_preserves_bindings_through_direct_phi_expr()
     test_string_decoder_stays_profile_local()

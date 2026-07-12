@@ -1,3 +1,5 @@
+from binaryninja import MediumLevelILOperation
+
 from conftest import load_plugin_module
 
 
@@ -12,15 +14,20 @@ _escaped = string_decrypt._escaped
 _set_decrypt_comment = string_decrypt._set_decrypt_comment
 
 
-class Op:
-    def __init__(self, name):
-        self.name = name
-
-
 class Expr:
     def __init__(self, op, **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation[op]
         self.__dict__.update(attrs)
+
+    def traverse(self, visit):
+        yield visit(self)
+        for value in self.__dict__.values():
+            if isinstance(value, Expr):
+                yield from value.traverse(visit)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    if isinstance(child, Expr):
+                        yield from child.traverse(visit)
 
 
 class FakeMlil:
@@ -185,6 +192,18 @@ def test_recognizer_accepts_struct_ssa_loads():
     )
 
     assert spec == {"key_modulus": 16, "length": 10}
+
+
+def test_recognizer_rejects_ambiguous_length_or_modulus_candidates(monkeypatch):
+    callee = decrypt_callee(b"hello", key_modulus=4)
+    callee.mlil.instructions.insert(0, if_(cmp_ult(var("other"), const(20))))
+    assert recognize_string_decrypt_function(callee) is None
+
+    callee = decrypt_callee(b"hello", key_modulus=4)
+    monkeypatch.setattr(string_decrypt, "_key_modulus_constants", lambda _mlil: [4, 8])
+    monkeypatch.setattr(string_decrypt, "_length_constants", lambda _mlil, _modulus: [5])
+    monkeypatch.setattr(string_decrypt, "_has_sample_family_loads", lambda _mlil, _modulus: True)
+    assert recognize_string_decrypt_function(callee) is None
 
 
 def test_decoder_recovers_observed_strings():

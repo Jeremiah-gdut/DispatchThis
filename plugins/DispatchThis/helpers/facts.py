@@ -6,8 +6,8 @@ class MalformedRecoveryFact(ValueError):
 
 
 def _require_int(name, value):
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise MalformedRecoveryFact(f"{name} must be an integer")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise MalformedRecoveryFact(f"{name} must be a non-negative integer")
     return value
 
 
@@ -42,29 +42,49 @@ def _int_set(name, values):
         raise MalformedRecoveryFact(f"{name} must be an iterable of integers") from exc
 
 
-def branch_fact(source, dest_expr_index, targets, newly_resolved=True, cleanup_roots=None):
+def branch_fact(
+    source,
+    dest_expr_index,
+    targets,
+    jump_il,
+    cleanup_roots=None,
+):
     fact = {
         "source": _require_int("source", source),
         "dest_expr_index": _require_int("dest_expr_index", dest_expr_index),
         "targets": _targets(targets),
-        "newly_resolved": bool(newly_resolved),
+        "jump_il": _require_object("jump_il", jump_il),
     }
     if cleanup_roots is not None:
         fact["cleanup_roots"] = _int_set("cleanup_roots", cleanup_roots)
     return fact
 
 
-def call_fact(call_il, target, decode_def=None, cleanup_roots=None, call_addr=None):
+def call_fact(
+    call_il,
+    target,
+    decode_def=None,
+    cleanup_roots=None,
+    call_addr=None,
+    cleanup_load_roots=None,
+):
     call_il = _require_object("call_il", call_il)
     if call_addr is None:
         call_addr = getattr(call_il, "address", None)
-    return {
+    roots = _int_set("cleanup_roots", cleanup_roots)
+    load_roots = _int_set("cleanup_load_roots", cleanup_load_roots)
+    if not load_roots <= roots:
+        raise MalformedRecoveryFact("cleanup_load_roots must be a subset of cleanup_roots")
+    fact = {
         "call_il": call_il,
         "call_addr": _require_int("call_addr", call_addr),
         "target": _require_int("target", target),
         "decode_def": decode_def,
-        "cleanup_roots": _int_set("cleanup_roots", cleanup_roots),
+        "cleanup_roots": roots,
     }
+    if load_roots:
+        fact["cleanup_load_roots"] = load_roots
+    return fact
 
 
 def global_constant_fact(slot_addr, type_name):

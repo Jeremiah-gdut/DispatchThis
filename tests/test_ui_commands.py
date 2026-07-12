@@ -25,6 +25,8 @@ class FakeSettings:
 class FakeBv:
     def __init__(self):
         self.updated = 0
+        self.session_data = {}
+        self.functions = []
 
     def update_analysis_and_wait(self):
         self.updated += 1
@@ -32,9 +34,11 @@ class FakeBv:
 
 class FakeFunc:
     name = "sub_1000"
+    start = 0x1000
 
     def __init__(self):
         self.reanalyzed = 0
+        self.session_data = {}
 
     def reanalyze(self):
         self.reanalyzed += 1
@@ -61,7 +65,7 @@ def test_toggle_function_setting_flips_current_function_resource_setting():
         ("analysis.plugins.dispatchThis.indirectJumpsCalls", False, func, ui.SettingsScope.SettingsResourceScope),
     ]
     assert func.reanalyzed == 2
-    assert bv.updated == 2
+    assert bv.updated == 0
 
 
 def test_disable_function_settings_clears_only_the_requested_keys():
@@ -78,20 +82,45 @@ def test_disable_function_settings_clears_only_the_requested_keys():
         ("string", False, func, ui.SettingsScope.SettingsResourceScope),
     ]
     assert func.reanalyzed == 1
-    assert bv.updated == 1
+    assert bv.updated == 0
 
 
 def test_use_profile_updates_view_profile_without_function_settings(monkeypatch):
     bv = FakeBv()
     func = FakeFunc()
     calls = []
-    monkeypatch.setattr(ui, "set_active_profile", lambda bv_arg, profile_id: calls.append((bv_arg, profile_id)))
+    monkeypatch.setattr(
+        ui,
+        "set_active_profile",
+        lambda bv_arg, profile_id: (calls.append((bv_arg, profile_id)), True)[1],
+    )
 
     ui.use_profile(bv, func, "dyzznb")
 
     assert calls == [(bv, "dyzznb")]
     assert func.reanalyzed == 1
-    assert bv.updated == 1
+    assert bv.updated == 0
+
+
+def test_use_profile_refuses_to_mix_existing_recovery_receipts(monkeypatch):
+    bv = FakeBv()
+    func = FakeFunc()
+    bv.functions = [func]
+    func.session_data["dispatchthis_workflow_state"] = {
+        "profile_id": "default",
+        "branch": {"receipts": {0x1000: (0x2000,)}},
+    }
+    calls = []
+    monkeypatch.setattr(ui, "active_profile_id", lambda _bv: "default")
+    monkeypatch.setattr(
+        ui,
+        "set_active_profile",
+        lambda *_args: calls.append(True),
+    )
+
+    assert ui.use_profile(bv, func, "dyzznb") is False
+    assert calls == []
+    assert func.reanalyzed == 0
 
 
 def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypatch):

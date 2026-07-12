@@ -1,10 +1,16 @@
 """Workflow activity callbacks for DispatchThis."""
 
-from binaryninja import AnalysisContext, Settings, SettingsScope
+from collections.abc import Mapping
+
+from binaryninja import AnalysisContext, FunctionType, Settings, SettingsScope
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
 from .passes.medium.correlated_stores import apply_correlated_stores_mlil
-from .passes.medium.indirect_calls import apply_indirect_call_rewrites
+from .passes.medium.indirect_calls import (
+    apply_indirect_call_rewrites,
+    current_call_receipt_plans,
+    validate_current_call_plans,
+)
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import cleanup_decode
 from .passes.medium.global_constants import CONST_SLOT_TYPE
@@ -14,6 +20,7 @@ from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
     iter_llil_indirect_jumps,
+    validate_current_branch_plans,
 )
 from .profiles import active_profile
 from .utils.log import log_info, log_warn, log_debug, log_error
@@ -23,7 +30,7 @@ from .workflow_state import FunctionWorkflowState
 _ANALYSIS_SETTINGS = (
     ("analysis.limits.maxFunctionSize", 0),
     ("analysis.limits.expressionValueComputeMaxDepth", 99999),
-    ("analysis.limits.maxFunctionAnalysisTime", 600000),
+    ("analysis.limits.maxFunctionAnalysisTime", 1800000),
     ("analysis.limits.maxFunctionUpdateCount", 1024),
     ("analysis.outlining.builtins", False),
 )
@@ -61,6 +68,16 @@ def _commit_mlil(ctx, mlil):
         return False
 
 
+def _active_profile_state(bv, func):
+    """Bind one callback run to one profile and its function-scoped state."""
+    try:
+        profile = active_profile(bv)
+        return profile, FunctionWorkflowState(func, profile.id)
+    except Exception as e:  # noqa: BLE001
+        log_warn(f"[workflow] {func.name}: resolver profile state unavailable: {e}")
+        return None, None
+
+
 def _schedule_tag_cleanup(bv, func_start):
     pending = bv.session_data.setdefault("dispatchthis_tag_cleanup_pending", set())
     if func_start in pending:
@@ -80,10 +97,6 @@ def _schedule_tag_cleanup(bv, func_start):
     bv.add_analysis_completion_event(clear_after_analysis)
 
 
-def _normalized_type_name(type_value):
-    return str(type_value).replace(" ", "")
-
-
 def _global_slot_type(bv, type_name=CONST_SLOT_TYPE):
     parsed, _ = bv.parse_type_string(f"{type_name} dispatchthis_global_constant_slot")
     return parsed
@@ -91,7 +104,28 @@ def _global_slot_type(bv, type_name=CONST_SLOT_TYPE):
 
 def _global_type_applied(bv, slot_addr, type_name=CONST_SLOT_TYPE):
     data_var = bv.get_data_var_at(slot_addr)
-    return data_var is not None and _normalized_type_name(data_var.type) == _normalized_type_name(type_name)
+    if data_var is None:
+        return False
+    try:
+        return data_var.type == _global_slot_type(bv, type_name)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _global_plan_consensus(plans):
+    """Validate one atomic profile result and collapse exact duplicates."""
+    by_slot = {}
+    for plan in plans or ():
+        if not isinstance(plan, Mapping):
+            return None
+        slot_addr = plan.get("slot_addr")
+        type_name = plan.get("type")
+        if type(slot_addr) is not int or slot_addr < 0 or not isinstance(type_name, str) or not type_name:
+            return None
+        previous = by_slot.setdefault(slot_addr, type_name)
+        if previous != type_name:
+            return None
+    return [{"slot_addr": addr, "type": by_slot[addr]} for addr in sorted(by_slot)]
 
 
 def _global_receipts_verified(bv, state):
@@ -99,7 +133,8 @@ def _global_receipts_verified(bv, state):
 
 
 def _type_is_noreturn(type_):
-    return "__noreturn" in str(type_).lower()
+    can_return = getattr(type_, "can_return", None)
+    return can_return is not None and not bool(can_return)
 
 
 def _call_has_fallthrough(mlil, call_il):
@@ -108,6 +143,36 @@ def _call_has_fallthrough(mlil, call_il):
         if mlil[idx].instr_index == call_il.instr_index:
             return True
     return bool(block.outgoing_edges)
+
+
+def _call_adjustment_type(mlil, call_il, callee):
+    type_ = getattr(callee, "type", None)
+    if type_ is None:
+        return True, None
+    try:
+        call_parameters = tuple(call_il.params)
+        parameter_types = tuple(parameter.expr_type for parameter in call_parameters)
+        if any(parameter_type is None for parameter_type in parameter_types):
+            return True, None
+        can_return = (
+            True
+            if _type_is_noreturn(type_) and _call_has_fallthrough(mlil, call_il)
+            else type_.can_return
+        )
+        adjusted = FunctionType.create(
+            ret=type_.return_value,
+            params=parameter_types,
+            calling_convention=type_.calling_convention,
+            variable_arguments=type_.has_variable_arguments,
+            stack_adjust=type_.stack_adjustment,
+            platform=type_.platform,
+            confidence=type_.confidence,
+            can_return=can_return,
+            pure=type_.pure,
+        )
+    except Exception:  # noqa: BLE001
+        return False, None
+    return True, adjusted
 
 
 def _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots=None):
@@ -129,29 +194,25 @@ def _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots=No
     return mutations
 
 
-def _remove_plan_target_user_functions(bv, func, plan):
-    get_function_at = getattr(bv, "get_function_at", None)
-    remove_user_function = getattr(bv, "remove_user_function", None)
-    if get_function_at is None or remove_user_function is None:
-        return
-    for item in plan:
-        for target in item["targets"]:
-            try:
-                existing = get_function_at(target)
-                if existing is not None and existing.start != func.start:
-                    remove_user_function(existing)
-            except Exception as e:  # noqa: BLE001
-                log_warn(f"[workflow] {func.name}: failed to remove target function @ {hex(target)}: {e}")
-
-
-def _converge_branches(ctx, state, plan_llil, coverage_llil, rewrite_llil=False, announce_stable=False):
+def _converge_branches(
+    ctx,
+    state,
+    profile,
+    plan_llil,
+    coverage_llil,
+    rewrite_llil=False,
+    announce_stable=False,
+):
     func = ctx.function
     bv = ctx.view
     jump_sources = {jump.address for jump in iter_llil_indirect_jumps(coverage_llil)}
-    plan = active_profile(bv).resolve_branch_gadget(bv, plan_llil, state.branch_targets())
-    if rewrite_llil:
+    plan = validate_current_branch_plans(
+        bv,
+        plan_llil,
+        profile.resolve_branch_gadget(bv, plan_llil, state.verified_branch_targets()),
+    )
+    if rewrite_llil and any(len(item["targets"]) == 1 for item in plan):
         apply_llil_jump_rewrites(bv, plan_llil, plan)
-    _remove_plan_target_user_functions(bv, func, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
     cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
@@ -170,13 +231,13 @@ def _converge_branches(ctx, state, plan_llil, coverage_llil, rewrite_llil=False,
     return mutations
 
 
-def _resolve_pending_branches_from_function_llil(ctx, state):
+def _resolve_pending_branches(ctx, state, profile):
     func = ctx.function
-    llil = getattr(func, "low_level_il", None)
+    llil = ctx.llil
     if llil is None:
         return False
 
-    mutations = _converge_branches(ctx, state, llil, llil)
+    mutations = _converge_branches(ctx, state, profile, llil, llil)
     if mutations:
         log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
         return True
@@ -193,7 +254,9 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return
 
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
 
     if state.branch_stable(func):
         clear_resolved_indirect_branch_tags(func)
@@ -202,15 +265,13 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = ctx.llil
-    mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
-    func_llil = getattr(func, "low_level_il", None)
-    plan_llil = func_llil if mapped and func_llil is not None else llil
     mutations = _converge_branches(
         ctx,
         state,
-        plan_llil,
+        profile,
         llil,
-        rewrite_llil=plan_llil is llil,
+        llil,
+        rewrite_llil=True,
         announce_stable=True,
     )
 
@@ -226,64 +287,123 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return
 
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
 
     if not state.branch_stable(func):
         if bv.arch.name == "aarch64":
-            _resolve_pending_branches_from_function_llil(ctx, state)
+            _resolve_pending_branches(ctx, state, profile)
         return
 
     mlil = ctx.mlil
     if mlil is None:
         return
 
-    plans = active_profile(bv).resolve_call_gadget(bv, mlil)
-    rewrites = apply_indirect_call_rewrites(bv, mlil, plans)
+    plans = validate_current_call_plans(
+        mlil,
+        profile.resolve_call_gadget(bv, mlil),
+    )
+    if plans is None:
+        state.invalidate_call_stable()
+        return
+
+    rewritten_mlil, rewrites = apply_indirect_call_rewrites(ctx, mlil, plans)
+    if rewrites != len(plans):
+        state.invalidate_call_stable()
+        return
+    if rewrites:
+        mlil = rewritten_mlil
+
+    receipt_targets = dict(state.call_target_receipts)
+    planned_targets = {plan["call_addr"]: plan["target"] for plan in plans}
+    receipt_targets.update(planned_targets)
+    for call_addr, target in state.call_receipts.items():
+        if call_addr in planned_targets and planned_targets[call_addr] != target:
+            continue
+        previous = receipt_targets.setdefault(call_addr, target)
+        if previous != target:
+            state.invalidate_call_stable()
+            return
+    planned_addresses = {plan["call_addr"] for plan in plans}
+    receipt_plans = current_call_receipt_plans(
+        mlil,
+        {
+            call_addr: target
+            for call_addr, target in receipt_targets.items()
+            if call_addr not in planned_addresses
+        },
+    )
+    if receipt_plans is None:
+        state.invalidate_call_stable()
+        return
+    calls = [*plans, *receipt_plans]
+
     adjustments = 0
-    for plan in plans:
+    adjustment_failed = False
+    for plan in calls:
         call_addr = plan["call_addr"]
         target = plan["target"]
-        state.mark_call_target(call_addr, target)
-        if not state.call_adjustment_needed(call_addr, target):
-            continue
         callee = bv.get_function_at(target)
-        if callee is None or callee.type is None:
+        safe, adjust_type = _call_adjustment_type(mlil, plan["call_il"], callee)
+        if not safe:
+            state.invalidate_call_stable()
+            adjustment_failed = True
             continue
-        if _type_is_noreturn(callee.type) and _call_has_fallthrough(mlil, plan["call_il"]):
-            state.mark_call_adjusted(call_addr, target)
-            log_warn(
-                f"[workflow] {func.name}: skipped noreturn type adjustment at "
-                f"{hex(call_addr)} -> {callee.name}; call has fallthrough"
-            )
+        if adjust_type is None:
+            continue
+        if not state.call_adjustment_needed(call_addr, adjust_type):
             continue
         try:
-            func.set_call_type_adjustment(call_addr, callee.type)
-            changed = state.mark_call_adjusted(call_addr, target)
-            if changed:
-                log_warn(f"[workflow] {func.name}: call target changed at {hex(call_addr)}")
+            func.set_call_type_adjustment(call_addr, adjust_type)
+            if state.call_adjustment_needed(call_addr, adjust_type):
+                log_warn(
+                    f"[workflow] {func.name}: failed to verify type adjustment "
+                    f"at {hex(call_addr)}"
+                )
+                adjustment_failed = True
+                continue
             adjustments += 1
         except Exception as e:  # noqa: BLE001
             log_warn(f"[workflow] {func.name}: type-adjust @ {hex(call_addr)} failed: {e}")
+            adjustment_failed = True
 
-    if not adjustments:
-        state.mark_call_stable()
-        cleaned = 0
-        call_cleanup_needed = state.call_cleanup_needed()
-        call_sites = {plan["call_addr"] for plan in plans} or (
-            set(state.call_receipts) | set(state.call_target_receipts)
+    if adjustment_failed:
+        for plan in plans:
+            state.mark_call_target(plan["call_addr"], plan["target"])
+        state.invalidate_call_stable()
+        return
+
+    if adjustments:
+        for plan in calls:
+            state.mark_call_target(plan["call_addr"], plan["target"])
+            state.mark_call_adjusted(plan["call_addr"], plan["target"])
+        return
+
+    cleaned = 0
+    call_cleanup_needed = state.call_cleanup_needed()
+    if call_cleanup_needed or plans:
+        cleanup_roots = set()
+        removable_load_roots = set()
+        for plan in plans:
+            cleanup_roots.update(plan["cleanup_roots"])
+            removable_load_roots.update(plan.get("cleanup_load_roots", ()))
+        cleanup_options = (
+            {"removable_load_roots": removable_load_roots}
+            if removable_load_roots
+            else {}
         )
-        if call_cleanup_needed or call_sites:
-            cleanup_roots = set()
-            for plan in plans:
-                cleanup_roots.update(plan["cleanup_roots"])
-            cleanup_roots.update(set_roots_before(mlil, call_sites))
-            cleaned = cleanup_decode(mlil, cleanup_roots, "call")
-            if cleaned:
-                state.invalidate_call_cleanup()
-            elif call_cleanup_needed:
-                state.mark_call_cleanup_done()
-        if rewrites or cleaned:
-            _commit_mlil(ctx, mlil)
+        cleaned = cleanup_decode(mlil, cleanup_roots, "call", **cleanup_options)
+    for plan in calls:
+        changed = state.mark_call_target(plan["call_addr"], plan["target"])
+        changed |= state.mark_call_adjusted(plan["call_addr"], plan["target"])
+        if changed:
+            log_warn(f"[workflow] {func.name}: call target changed at {hex(plan['call_addr'])}")
+    state.mark_call_stable()
+    if cleaned:
+        state.invalidate_call_cleanup()
+    elif call_cleanup_needed:
+        state.mark_call_cleanup_done()
     if rewrites or adjustments:
         log_info(
             f"[workflow] {func.name}: resolved {rewrites} indirect call(s), "
@@ -300,10 +420,14 @@ def translate_branches_mlil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return
 
-    state = FunctionWorkflowState(func)
+    _profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
     if not state.branch_stable(func):
         return
     if not state.call_stable():
+        return
+    if not state.global_stable():
         return
 
     mlil = ctx.mlil
@@ -322,7 +446,7 @@ def translate_branches_mlil(ctx: AnalysisContext):
         cleanup_roots.update(state.branch_cleanup_root_indices())
         cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
         cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
-    installed = _commit_mlil(ctx, mlil) if n or cleaned else True
+    installed = _commit_mlil(ctx, mlil) if n else True
     if cleaned:
         state.invalidate_branch_cleanup()
     elif branch_cleanup_needed and (not n or installed):
@@ -338,7 +462,9 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return
 
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
     if not state.branch_stable(func):
         return
     if not state.call_stable():
@@ -348,13 +474,21 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    plans = active_profile(bv).plan_global_constant_slots(bv, mlil)
+    plans = _global_plan_consensus(profile.plan_global_constant_slots(bv, mlil))
+    if plans is None:
+        state.invalidate_globals()
+        log_warn(f"[workflow] {func.name}: rejected conflicting or malformed global plan")
+        return
     if not plans:
         if _global_receipts_verified(bv, state):
             state.mark_global_stable()
         else:
             state.invalidate_globals()
         return
+
+    # A current plan is unmet evidence until every requested view-level type is
+    # verified.  Never carry a previous stable receipt across a failed attempt.
+    state.invalidate_globals()
 
     slot_types = {}
     applied = 0
@@ -401,14 +535,16 @@ def recover_phi_stores_mlil(ctx: AnalysisContext):
     if bv.arch.name != "aarch64" or not _ensure_analysis_settings(func):
         return
 
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
     if not state.branch_stable(func) or not state.call_stable() or not state.global_stable():
         return
 
     mlil = ctx.mlil
     if mlil is None:
         return
-    plans = active_profile(bv).plan_correlated_store_rewrites(bv, func, mlil)
+    plans = profile.plan_correlated_store_rewrites(bv, func, mlil)
     new_mlil, applied = apply_correlated_stores_mlil(ctx, mlil, plans)
     if applied and new_mlil is not None and _commit_mlil(ctx, new_mlil):
         log_info(f"[workflow] {func.name}: recovered {applied} correlated store(s)")
@@ -423,7 +559,9 @@ def string_decrypt_mlil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return 0
 
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return 0
     if not state.branch_stable(func):
         return 0
     if not state.call_stable():
@@ -432,7 +570,7 @@ def string_decrypt_mlil(ctx: AnalysisContext):
         return 0
 
     mlil_stable = bv.session_data.get("dispatchthis_mlil_stable", {})
-    facts = active_profile(bv).plan_string_decrypt_calls(bv, func, ctx.mlil, mlil_stable)
+    facts = profile.plan_string_decrypt_calls(bv, func, ctx.mlil, mlil_stable)
     annotated = apply_decrypted_string_comments(func, facts)
     if annotated:
         state.invalidate_cleanup()
@@ -455,13 +593,15 @@ def deflatten_mlil(ctx: AnalysisContext):
 
     # Don't deflatten until the LLIL pass has drained every indirect jump;
     # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
-    state = FunctionWorkflowState(func)
+    profile, state = _active_profile_state(bv, func)
+    if state is None:
+        return
     if not state.branch_stable(func):
         return
     if not state.global_stable():
         return
 
-    redirections = active_profile(bv).plan_deflatten_redirections(bv, func, mlil)
+    redirections = profile.plan_deflatten_redirections(bv, func, mlil)
     if not redirections:
         return
 

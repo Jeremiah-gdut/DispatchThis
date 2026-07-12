@@ -23,10 +23,12 @@ _Avoid_: generic rule engine
 
 **Resolver profile contract**:
 The narrow agreement a resolver profile must satisfy: recognize one binary's
-indirect branch, indirect call, global constant, and string decrypt shapes, then
-return standard recovery facts or deflatten redirection plans without owning
-workflow mutations. A profile may implement a hook as a no-op when that binary
-does not use the capability.
+indirect branch, indirect call, global constant, correlated-store, deflatten, and
+string-decrypt shapes, then return standard recovery facts or plans without
+owning workflow mutations. The plan hooks are
+`plan_correlated_store_rewrites`, `plan_deflatten_redirections`, and
+`plan_string_decrypt_calls`. A profile may implement a hook as a no-op when that
+binary does not use the capability.
 _Avoid_: middleware, adapter framework, plugin rewrite layer
 
 **Binary profile**:
@@ -40,6 +42,12 @@ A stable lowercase snake_case identifier for a binary profile. It should be
 traceable to the binary without exposing local paths, usernames, customer names,
 or other sensitive project labels.
 _Avoid_: sample1, current, default2, full local paths
+
+**Profile provenance**:
+The resolver profile ID stored with function-scoped workflow evidence. Empty
+state may bind to the active profile; state containing recovery evidence cannot
+be rebound or reused under a different profile.
+_Avoid_: implicit profile migration, unowned legacy receipts
 
 **Profile helper**:
 A reusable BNIL or BinaryView inspection helper used by resolver profiles and
@@ -64,8 +72,8 @@ _Avoid_: full value engine, constant folder
 
 **Expression operation query**:
 A helper-level check for whether an MLIL expression tree, optionally including
-followed variable definitions, contains one of a caller-provided set of MLIL
-operation names.
+followed variable definitions, contains one of a caller-provided set of native
+MLIL operation enums or enum-derived compatibility names.
 _Avoid_: pattern matcher, string decrypt recognizer
 
 **Active resolver profile**:
@@ -103,6 +111,33 @@ that the other members are invalid. It can erase valid CFG edges and is never a
 safe single-target convenience.
 _Avoid_: pick first, best-effort target
 
+**Verified branch frontier**:
+The branch sources whose complete receipt target tuples exactly match Binary
+Ninja's current non-auto user branch metadata. Only these sources may be omitted
+from an incremental recognition run; receipt-only, automatic, missing, subset,
+superset, or changed mappings remain in the decode frontier.
+_Avoid_: cached branches, assumed-resolved sources
+
+**Complete value evidence**:
+Every concrete value supported by every semantic path of one BNIL expression.
+A helper returns the complete set or an explicit unknown result; an unsupported
+arm, bounded-expansion miss, unreadable load, or invalid target never licenses a
+known-subset result.
+_Avoid_: best-effort values, known arms only
+
+**Current IL witness**:
+The Binary Ninja instruction object retained by a recovery plan and rebound at
+the mutation boundary by exact operation, address, instruction/expression
+indices, relevant operands, and owning IL function. A similar instruction found
+by scanning is not the same witness.
+_Avoid_: nearby match, stale plan object
+
+**Mixed-IL operation-name seam**:
+The narrow compatibility boundary where a matcher intentionally handles both
+LLIL and MLIL and therefore compares enum-derived names to avoid equal `IntEnum`
+values crossing levels. Single-IL modules use Binary Ninja operation enums.
+_Avoid_: hand-written MLIL_* string, hand-written LLIL_* string
+
 **Global constant recovery fact**:
 A recovery fact that identifies a global data slot and the const-qualified type it
 should receive. Values, resolved addresses, and use sites that justified recognition
@@ -119,6 +154,14 @@ _Avoid_: profile helper, generic rule engine
 **Indirect call resolving**:
 Recovering the concrete callee of a computed call target.
 _Avoid_: deincall
+
+**Call-target definition slice**:
+The complete current SSA reaching-definition chain feeding `call.dest`, including every
+PHI input. Only exact whole-variable SSA definitions mapped to current non-SSA assignments
+belong to the slice. Once the destination is replaced, only assignments in this owned
+slice whose SSA values have no other consumers may be cleaned; xrefs do not define
+ownership.
+_Avoid_: preceding instructions, whole-function dead-load scan
 
 **Global constant resolving**:
 Recovering read-only semantics for global data slots that the sample family stores in writable sections but uses as constants.
@@ -193,6 +236,19 @@ _Avoid_: symbolic range recovery, assumed comparison arm
 **State variable**:
 The value consumed by the dispatcher to select the next original block.
 
+**Dispatcher comparison variable**:
+The row-local/root value read by dispatcher comparisons. It is normally the
+state variable itself. When every dispatcher ingress passes through one proved
+equal-width whole-variable latch, it may be a refreshed copy of the transition
+state variable.
+
+**Shared state latch**:
+The unique dispatcher-ingress copy chain that refreshes the dispatcher
+comparison variable from the variable written by original blocks. It is a
+dispatcher boundary only when at least two independent dispatcher target-head
+regions own distinct writes feeding it; an OBB-local state-selection join is not
+a shared latch.
+
 **State token**:
 The opaque dispatcher value compared against the state variable. Its bit width is
 part of its identity; do not assume all state tokens are 32-bit.
@@ -242,4 +298,7 @@ Dead target-decode IL removal for the indirect branch or call phase after its
 owning workflow phase reaches stability. Its receipt is marked done only after
 the current IL has no phase-owned cleanup changes left, so Binary Ninja
 reanalysis can replay erased cleanup overlays. Deflatten state-write NOPs belong
-to the atomic deflatten replacement, not phase cleanup.
+to the atomic deflatten replacement, not phase cleanup. Branch condition
+translation may contribute the exact contiguous assignment prefix of its proved
+source IF; SSA liveness, rather than prefix membership alone, decides what is
+dead.

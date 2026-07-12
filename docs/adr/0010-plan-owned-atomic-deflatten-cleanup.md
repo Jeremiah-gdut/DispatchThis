@@ -2,7 +2,9 @@
 
 Deflatten state-write cleanup will be derived from the same current-MLIL analysis
 that proves each recovered transition. Every redirection plan carries an
-`obsolete_state_writes` set of exact instruction indices. Target proof and
+`obsolete_state_writes` set of exact instruction indices plus an
+`obsolete_state_write_witnesses` mapping to the recorded current-MLIL instructions.
+Target proof and
 cleanup proof are independent: an uncertain target produces no plan, while a
 proved target with uncertain cleanup remains a valid plan with an empty set.
 Matching a state variable, token value, or low token bits elsewhere in the
@@ -27,12 +29,15 @@ region. Pointer-based state stores require one complete, unique definition
 chain from the store destination to the address of the state variable.
 Every definition on that chain must dominate its use.
 
-Concrete replay treats dispatcher pass-through blocks as token-preserving only
-when they contain NOP/GOTO operations or direct copies between variables on the
-proved state dependency chain. Unrelated assignments, side effects, constant
-state replacement, or non-dispatcher observers of derived comparison variables
-reject the affected dispatcher. Entry and arm ownership is checked across the
-whole rewritten region, not only at its final exit.
+Concrete replay implicitly expands dispatcher pass-through blocks only when
+they contain `NOP* + GOTO`. Direct copies are token-preserving only inside an
+explicitly proved comparison row or one unique equal-width shared state latch.
+That latch must be the dispatcher ingress for at least two independent
+target-head regions with distinct state writers; an OBB-local selection join is
+not enough. Unrelated assignments, side effects, constant state replacement, or
+non-dispatcher observers of derived comparison variables reject the affected
+dispatcher. Entry and arm ownership is checked across the whole rewritten
+region, not only at its final exit.
 
 Each comparison value must be produced by a unique direct-copy chain inside its
 own dispatcher row, ending at the state input shared by the selected rows. The
@@ -75,9 +80,11 @@ unconditionally because their state semantics cannot be proved.
 conditional rewrite together with every exact state-write NOP in one MLIL
 copy-transform. If any selected instruction is missing, has an unsupported
 operation, conflicts with another replacement, or fails to copy, the complete
-replacement is discarded. A plan's source operation, expression identity, and
-address must still match the instruction at that index in current MLIL before
-copying. Rewrite and cleanup indices must be non-negative exact `int` values
+replacement is discarded. A plan's source owner, operation, expression identity,
+address, and relevant GOTO/IF operands must still match the instruction at that
+index in current MLIL before copying. Each cleanup witness is rebound the same way,
+and its SET_VAR or STORE destination, source, size, and applicable offset must match
+before it can become a NOP. Rewrite and cleanup indices must be non-negative exact `int` values
 (not booleans), the current instruction must report the same index, and every
 target basic-block start obeys the same exact-integer rule. This preserves CFG
 recovery when cleanup is merely uncertain without permitting a partial graph
@@ -106,5 +113,8 @@ attempt and publishes it only after installing the atomic replacement. Binary
 Ninja reanalysis may erase the MLIL overlay, so plans and exact cleanup evidence
 are recomputed from the current MLIL on later workflow runs.
 
-Branch-target and call-target phase cleanup are unchanged. They remain narrowly
-rooted in their own recovery facts and do not remove deflatten state writes.
+Branch-target and call-target phase cleanup remain narrowly rooted in their own
+recovery facts and do not remove deflatten state writes. Call cleanup may additionally
+remove an SSA-dead load assignment only when the current call plan identifies that exact
+instruction as part of the complete `call.dest` definition slice. It does not use xrefs
+or make arbitrary loads globally pure.

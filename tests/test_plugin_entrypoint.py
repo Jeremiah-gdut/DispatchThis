@@ -103,6 +103,9 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
         if args[0] == "core.function.generateHighLevelIL"
     )
     assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
+        "extension.DispatchThis.BranchConditionTranslator"
+    )
+    assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
         "extension.DispatchThis.CorrelatedStoreRecovery"
     )
     assert high_level.index("extension.DispatchThis.CorrelatedStoreRecovery") < high_level.index(

@@ -1,6 +1,7 @@
 import types
 
 import pytest
+from binaryninja import MediumLevelILOperation
 
 from conftest import load_plugin_module
 
@@ -20,7 +21,7 @@ class Expr:
     _next_index = 1
 
     def __init__(self, op, **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation.__members__.get(op, Op(op))
         self.expr_index = attrs.pop("expr_index", Expr._next_index)
         Expr._next_index += 1
         self.address = attrs.pop("address", 0x1000 + self.expr_index)
@@ -103,6 +104,10 @@ class FakeMlil:
 
     def __getitem__(self, index):
         return self._by_index[index]
+
+    def get_basic_block_at(self, index):
+        instruction = self._by_index.get(index)
+        return getattr(instruction, "il_basic_block", None)
 
     def get_var_definitions(self, var):
         return self._defs.get(var, [])
@@ -191,7 +196,7 @@ def set_var(name, src, index):
 
 
 def goto(index):
-    return Expr("MLIL_GOTO", instr_index=index)
+    return Expr("MLIL_GOTO", instr_index=index, dest=index)
 
 
 def if_instr(cond, true_index, false_index, index):
@@ -203,6 +208,14 @@ def link(source, *targets):
         edge = Edge(source, target)
         source.outgoing_edges.append(edge)
         target.incoming_edges.append(edge)
+
+
+def append_block(mlil, block):
+    block.il_function = mlil
+    for instruction in block:
+        instruction.function = mlil
+        mlil._by_index[instruction.instr_index] = instruction
+    mlil.basic_blocks.append(block)
 
 
 def build_uncond_function():
@@ -227,6 +240,59 @@ def build_uncond_function():
     }
     mlil = FakeMlil([d1, d2, d3, obb1, obb2, obb3, exit_bb], defs)
     return FakeFunc(mlil), obb1, obb2
+
+
+def build_shared_state_latch_function(mode="pure"):
+    func, obb1, obb2 = build_uncond_function()
+    obbs = [bb for bb in func.mlil.basic_blocks if bb.start in {10, 20, 30}]
+    dispatcher = func.mlil.get_basic_block_at(0)
+    for obb in obbs:
+        write = obb[obb.start]
+        write.dest = "next_state"
+        write.vars_written = ["next_state"]
+        for edge in tuple(obb.outgoing_edges):
+            edge.target.incoming_edges.remove(edge)
+        obb.outgoing_edges.clear()
+
+    tail_instructions = [goto(50)]
+    if mode == "side_effect":
+        tail_instructions.insert(
+            0,
+            Expr("MLIL_CALL", dest=const(0x5000), params=[], instr_index=50),
+        )
+        tail_instructions[-1].instr_index = 51
+    shared_tail = Block(50, *tail_instructions)
+    copy_source = var("next_state")
+    if mode == "field_copy":
+        copy_source = Expr(
+            "MLIL_VAR_FIELD",
+            src="next_state",
+            offset=0,
+            size=4,
+        )
+    if mode == "commit_call":
+        commit = Block(
+            59,
+            Expr("MLIL_CALL", dest=const(0x5000), params=[], instr_index=59),
+            set_var("state", copy_source, 60),
+            goto(61),
+        )
+    else:
+        commit = Block(60, set_var("state", copy_source, 60), goto(61))
+    for obb in obbs:
+        link(obb, shared_tail)
+    link(shared_tail, commit)
+    link(commit, dispatcher)
+
+    for block in (shared_tail, commit):
+        block.il_function = func.mlil
+        for instruction in block:
+            instruction.function = func.mlil
+            func.mlil._by_index[instruction.instr_index] = instruction
+    func.mlil.basic_blocks.extend((shared_tail, commit))
+    func.mlil._defs["next_state"] = [obb[obb.start] for obb in obbs]
+    func.mlil._defs["state"] = [commit[60]]
+    return func, obb1, obb2, shared_tail, commit
 
 
 def build_ne_leaf_function():
@@ -568,6 +634,85 @@ def test_compute_redirections_recovers_unconditional_transition_from_dispatcher_
     )
 
 
+def test_compute_redirections_recovers_transition_before_shared_state_latch():
+    func, obb1, obb2, shared_tail, commit = build_shared_state_latch_function()
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    plan = next(plan for plan in redirections if plan["obb"] is obb1)
+    assert plan["target_bb"] is obb2
+    assert plan["state_token"] == (0x2222000022220002, 8)
+    assert plan["exit_jumps"] == (obb1[11],)
+    assert shared_tail[50] not in plan["exit_jumps"]
+    assert commit[61] not in plan["exit_jumps"]
+
+
+@pytest.mark.parametrize("mode", ("side_effect", "commit_call", "field_copy"))
+def test_shared_state_latch_rejects_impure_or_inexact_commit(mode):
+    func, obb1, _obb2, _shared_tail, _commit = build_shared_state_latch_function(mode)
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan["obb"] is not obb1 for plan in redirections)
+
+
+def test_shared_state_latch_rejects_copy_defined_after_its_use():
+    func, obb1, _obb2, _shared_tail, commit = build_shared_state_latch_function()
+    root_copy = set_var("state", var("latch_tmp"), 60)
+    late_copy = set_var("latch_tmp", var("next_state"), 61)
+    tail = goto(62)
+    commit.instructions = [root_copy, late_copy, tail]
+    commit.end = commit.start + len(commit.instructions)
+    for instruction in commit:
+        instruction.il_basic_block = commit
+        instruction.function = func.mlil
+        func.mlil._by_index[instruction.instr_index] = instruction
+    func.mlil._defs["state"] = [root_copy]
+    func.mlil._defs["latch_tmp"] = [late_copy]
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan["obb"] is not obb1 for plan in redirections)
+
+
+def test_shared_state_latch_rejects_another_dispatcher_root_write():
+    func, obb1, _obb2, _shared_tail, _commit = build_shared_state_latch_function()
+    extra_write = set_var("state", const(0xDEADBEEF), 70)
+    append_block(func.mlil, Block(70, extra_write, goto(71)))
+    func.mlil._defs["state"].append(extra_write)
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan["obb"] is not obb1 for plan in redirections)
+
+
+def test_shared_state_latch_rejects_transition_value_read_outside_latch():
+    func, obb1, _obb2, _shared_tail, _commit = build_shared_state_latch_function()
+    observer = set_var("observed", var("next_state"), 70)
+    append_block(func.mlil, Block(70, observer, goto(71)))
+    func.mlil._defs["observed"] = [observer]
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan["obb"] is not obb1 for plan in redirections)
+
+
+def test_shared_state_latch_rejects_partial_transition_write():
+    func, obb1, _obb2, _shared_tail, _commit = build_shared_state_latch_function()
+    partial_write = Expr(
+        "MLIL_SET_VAR_FIELD",
+        dest="next_state",
+        offset=0,
+        src=const(0xDEADBEEF),
+        instr_index=70,
+    )
+    append_block(func.mlil, Block(70, partial_write, goto(71)))
+
+    redirections = compute_redirections(FakeBv(), func)
+
+    assert all(plan["obb"] is not obb1 for plan in redirections)
+
+
 def test_dispatcher_ne_leaf_uses_false_branch_as_token_target():
     func, obb1, obb2 = build_ne_leaf_function()
 
@@ -830,13 +975,10 @@ def test_compute_redirections_ignores_stray_equality_compare():
     assert any(r["kind"] == "uncond" and r["obb"] is obb1 and r["target_bb"] is obb2 for r in redirections)
 
 
-def test_dispatcher_analysis_ignores_much_smaller_candidate_group():
+def test_dispatcher_analysis_rejects_even_a_smaller_competing_candidate_group():
     func = build_competing_groups_function()
 
-    analysis = deflatten._analyze_dispatcher(func.mlil)
-
-    assert analysis is not None
-    assert str(analysis["state_var"]) == "state"
+    assert deflatten._analyze_dispatcher(func.mlil) is None
 
 
 def test_dispatcher_analysis_rejects_close_candidate_groups():
@@ -852,6 +994,65 @@ def test_dispatcher_boundary_rejects_unrelated_assignment():
         goto(501),
     )
     mlil = FakeMlil([block], {"important": [block[500]]})
+
+    assert not deflatten._router_boundary_block(
+        mlil,
+        block,
+        "state",
+        {"state"},
+    )
+
+
+def test_dispatcher_boundary_rejects_unobserved_pure_state_arithmetic():
+    derived = set_var(
+        "dead_result",
+        Expr("MLIL_ADD", left=var("state"), right=const(1)),
+        500,
+    )
+    block = Block(500, derived, goto(501))
+    mlil = FakeMlil([block], {"dead_result": [derived]})
+
+    assert not deflatten._router_boundary_block(
+        mlil,
+        block,
+        "state",
+        {"state"},
+    )
+
+
+def test_dispatcher_boundary_rejects_observed_arithmetic_result():
+    derived = set_var(
+        "observed_result",
+        Expr("MLIL_ADD", left=var("state"), right=const(1)),
+        500,
+    )
+    block = Block(500, derived, goto(501))
+    observer = set_var("sink", var("observed_result"), 600)
+    mlil = FakeMlil(
+        [block, Block(600, observer, goto(601))],
+        {"observed_result": [derived], "sink": [observer]},
+    )
+
+    assert not deflatten._router_boundary_block(
+        mlil,
+        block,
+        "state",
+        {"state"},
+    )
+
+
+def test_dispatcher_boundary_rejects_state_dependent_load():
+    derived = set_var(
+        "dead_result",
+        Expr(
+            "MLIL_ADD",
+            left=var("state"),
+            right=Expr("MLIL_LOAD", src=var("state")),
+        ),
+        500,
+    )
+    block = Block(500, derived, goto(501))
+    mlil = FakeMlil([block], {"dead_result": [derived]})
 
     assert not deflatten._router_boundary_block(
         mlil,
@@ -1020,7 +1221,7 @@ def test_unconditional_transition_rejects_state_field_mutation():
 def test_partial_state_write_in_successor_prevents_predecessor_cleanup():
     func, obb1, obb2 = build_uncond_function()
     successor_write = obb2.instructions[0]
-    successor_write.operation = Op("MLIL_SET_VAR_FIELD")
+    successor_write.operation = MediumLevelILOperation.MLIL_SET_VAR_FIELD
     successor_write.offset = 0
 
     redirections = compute_redirections(FakeBv(), func)
@@ -1033,7 +1234,12 @@ def test_partial_state_write_in_successor_prevents_predecessor_cleanup():
 def test_split_state_read_in_successor_prevents_predecessor_cleanup():
     func, obb1, obb2 = build_uncond_function()
     state_write, tail = obb2.instructions
-    split = Expr("MLIL_VAR_SPLIT", high="state", low="other")
+    split = Expr(
+        "MLIL_VAR_SPLIT",
+        high="state",
+        low="other",
+        vars_read=("state", "other"),
+    )
     observed = set_var("observed", split, state_write.instr_index)
     call = Expr(
         "MLIL_CALL",
@@ -1282,6 +1488,8 @@ def test_compute_redirections_recovers_conditional_two_branch_transition():
     assert cond["true_token"] == (0x2222000022220002, 8)
     assert cond["false_token"] == (0x3333000033330003, 8)
     assert cond["obsolete_state_writes"] == {13}
+    assert cond["obsolete_state_write_witnesses"] == {13: func.mlil[13]}
+    assert 13 not in deflatten._analyze_dispatcher(func.mlil)["dispatcher_starts"]
 
 
 def test_compute_redirections_rejects_conditional_tail_writing_other_state():
@@ -1383,7 +1591,7 @@ def test_conditional_arm_exit_rewrite_rejects_external_entry():
 def test_transition_rejects_path_that_reaches_dispatcher_without_state_write():
     func, head, _true_jump, false_jump, _target = build_multi_exit_function()
     false_write = false_jump.il_basic_block.instructions[0]
-    false_write.operation = Op("MLIL_NOP")
+    false_write.operation = MediumLevelILOperation.MLIL_NOP
     func.mlil._defs["state"].remove(false_write)
 
     redirections = compute_redirections(FakeBv(), func)
@@ -1493,6 +1701,7 @@ def test_rewrite_redirections_emits_copied_label_edges(monkeypatch):
     func, chooser, obb2, obb3 = build_cond_function()
     uncond_jump = goto(200)
     source = Block(200, uncond_jump)
+    uncond_jump.function = func.mlil
     func.mlil._by_index[200] = uncond_jump
     ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
     copied = CopiedMlil()
@@ -1531,6 +1740,7 @@ def test_rewrite_redirections_emits_copied_label_edges(monkeypatch):
                 "false_target": obb3,
                 "obb": chooser,
                 "obsolete_state_writes": {13},
+                "obsolete_state_write_witnesses": {13: func.mlil[13]},
             },
         ],
     )
@@ -1668,6 +1878,249 @@ def test_rewrite_rejects_stale_source_object_at_current_instruction_index(
     assert applied == 0
 
 
+def test_rewrite_rejects_source_owned_by_another_mlil(monkeypatch):
+    func, obb1, obb2 = build_uncond_function()
+    current = obb1.instructions[-1]
+    source = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+        dest=current.dest,
+        function=object(),
+    )
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("foreign-owner plan reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "uncond",
+            "exit_jumps": (source,),
+            "target_bb": obb2,
+            "obb": obb1,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_rejects_stale_goto_destination(monkeypatch):
+    func, obb1, obb2 = build_uncond_function()
+    current = obb1.instructions[-1]
+    source = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+        dest=current.dest + 1,
+        function=func.mlil,
+    )
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("stale GOTO plan reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "uncond",
+            "exit_jumps": (source,),
+            "target_bb": obb2,
+            "obb": obb1,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+@pytest.mark.parametrize("field", ["condition", "true", "false"])
+def test_rewrite_rejects_stale_if_operands(monkeypatch, field):
+    func, chooser, obb2, obb3 = build_cond_function()
+    current = chooser[10]
+    source = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+        condition=current.condition,
+        true=current.true,
+        false=current.false,
+        function=func.mlil,
+    )
+    if field == "condition":
+        source.condition = types.SimpleNamespace(
+            operation=current.condition.operation,
+            expr_index=current.condition.expr_index + 1,
+            size=current.condition.size,
+        )
+    else:
+        setattr(source, field, getattr(source, field) + 1)
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("stale IF plan reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "if_else",
+            "rewrite_mode": "condition",
+            "if_il": source,
+            "true_target": obb2,
+            "false_target": obb3,
+            "obb": chooser,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_rejects_stale_cleanup_write_operand(monkeypatch):
+    func, chooser, obb2, obb3 = build_cond_function()
+    current = func.mlil[13]
+    recorded = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+        dest="stale_state",
+        src=current.src,
+        size=current.size,
+        function=func.mlil,
+    )
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail(
+            "stale cleanup witness reached copy backend"
+        ),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "if_else",
+            "rewrite_mode": "condition",
+            "if_il": chooser[10],
+            "true_target": obb2,
+            "false_target": obb3,
+            "obb": chooser,
+            "obsolete_state_writes": {13},
+            "obsolete_state_write_witnesses": {13: recorded},
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+@pytest.mark.parametrize("field", ["instr_index", "expr_index", "address"])
+def test_rewrite_rejects_non_exact_numeric_source_witness(monkeypatch, field):
+    func, obb1, obb2 = build_uncond_function()
+    current = obb1.instructions[-1]
+    source = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+    )
+    setattr(source, field, float(getattr(source, field)))
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("malformed source reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "uncond",
+            "exit_jumps": (source,),
+            "target_bb": obb2,
+            "obb": obb1,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+@pytest.mark.parametrize("field", ["instr_index", "expr_index", "address"])
+def test_rewrite_rejects_non_exact_numeric_current_source(monkeypatch, field):
+    func, obb1, obb2 = build_uncond_function()
+    current = obb1.instructions[-1]
+    source = types.SimpleNamespace(
+        operation=current.operation,
+        instr_index=current.instr_index,
+        expr_index=current.expr_index,
+        address=current.address,
+    )
+    setattr(current, field, float(getattr(current, field)))
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("malformed current source reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "uncond",
+            "exit_jumps": (source,),
+            "target_bb": obb2,
+            "obb": obb1,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_rejects_arm_exit_without_exact_instruction_index(monkeypatch):
+    func, chooser, obb2, obb3 = build_cond_function()
+    malformed_jump = types.SimpleNamespace(operation=MediumLevelILOperation.MLIL_GOTO)
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("malformed arm exit reached copy backend"),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [{
+            "kind": "if_else",
+            "rewrite_mode": "arm_exits",
+            "exit_targets": ((malformed_jump, obb2), (obb3.instructions[-1], obb3)),
+            "obb": chooser,
+            "obsolete_state_writes": set(),
+        }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
 @pytest.mark.parametrize("invalid_index", [False, -1])
 def test_rewrite_rejects_boolean_or_negative_cleanup_index(
     monkeypatch,
@@ -1728,6 +2181,7 @@ def test_rewrite_redirections_rejects_a_partial_multi_redirection_batch(monkeypa
     func, chooser, obb2, obb3 = build_cond_function()
     uncond_jump = goto(200)
     source = Block(200, uncond_jump)
+    uncond_jump.function = func.mlil
     func.mlil._by_index[200] = uncond_jump
     ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
 
@@ -1762,6 +2216,7 @@ def test_rewrite_redirections_rejects_a_partial_multi_redirection_batch(monkeypa
                 "false_target": obb3,
                 "obb": chooser,
                 "obsolete_state_writes": {13},
+                "obsolete_state_write_witnesses": {13: func.mlil[13]},
             },
         ],
     )
@@ -1775,7 +2230,7 @@ if __name__ == "__main__":
     test_compute_redirections_recovers_unconditional_transition_from_dispatcher_cluster()
     test_dispatcher_ne_leaf_uses_false_branch_as_token_target()
     test_compute_redirections_ignores_stray_equality_compare()
-    test_dispatcher_analysis_ignores_much_smaller_candidate_group()
+    test_dispatcher_analysis_rejects_even_a_smaller_competing_candidate_group()
     test_dispatcher_analysis_rejects_close_candidate_groups()
     test_compute_redirections_recovers_entry_state_transition()
     test_compute_redirections_recovers_conditional_two_branch_transition()

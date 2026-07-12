@@ -124,8 +124,8 @@ def register_workflows():
 
     workflow.insert("core.function.generateHighLevelIL", [
             "extension.DispatchThis.IndirectCallPatcher",
-            "extension.DispatchThis.BranchConditionTranslator",
             "extension.DispatchThis.GlobalConstantResolver",
+            "extension.DispatchThis.BranchConditionTranslator",
             "extension.DispatchThis.CorrelatedStoreRecovery",
             STRING_DECRYPT_SETTING,
             DEFLATTEN_SETTING,

@@ -225,16 +225,18 @@ def test_active_profile_uses_configured_profile(monkeypatch):
     assert profile is configured
 
 
-def test_active_profile_falls_back_to_default_and_warns(monkeypatch):
+def test_active_profile_rejects_unknown_setting_and_warns(monkeypatch):
     profiles = import_module("plugins.DispatchThis.profiles")
     warnings = []
     settings = FakeSettings({(profiles.ACTIVE_PROFILE_SETTING, "bv"): "missing"})
     monkeypatch.setattr(profiles, "log_warn", warnings.append)
 
-    profile = profiles.active_profile("bv", settings=settings)
+    with pytest.raises(profiles.InvalidResolverProfile, match="missing"):
+        profiles.active_profile("bv", settings=settings)
 
-    assert profile.id == "default"
-    assert warnings == ["[profiles] unknown resolver profile 'missing'; using default"]
+    assert warnings == [
+        "[profiles] unknown resolver profile 'missing'; refusing resolver work"
+    ]
 
 
 def test_setting_active_profile_only_writes_binaryview_profile_setting():

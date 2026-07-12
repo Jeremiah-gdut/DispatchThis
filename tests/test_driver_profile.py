@@ -3,6 +3,7 @@ from importlib import import_module
 
 import conftest  # noqa: F401
 import pytest
+from binaryninja import MediumLevelILOperation, TypeClass
 
 
 driver = import_module("plugins.DispatchThis.profiles.driver_2_6")
@@ -17,7 +18,7 @@ class Expr:
     _next_index = 1
 
     def __init__(self, op, children=(), **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation.__members__.get(op, Op(op))
         self.children = list(children)
         self.expr_index = Expr._next_index
         Expr._next_index += 1
@@ -45,6 +46,7 @@ class Block:
         self.instructions = []
         self.incoming_edges = []
         self.outgoing_edges = []
+        self.dominators = []
 
     def add(self, expr):
         expr.instr_index = self.end
@@ -69,9 +71,43 @@ class FakeMlil:
                 self.by_index[ins.instr_index] = ins
                 if ins.operation.name == "MLIL_SET_VAR":
                     self.defs.setdefault(ins.dest, []).append(ins)
+        self._set_dominators()
 
     def __getitem__(self, index):
         return self.by_index[index]
+
+    def get_basic_block_at(self, index):
+        instruction = self.by_index.get(index)
+        return getattr(instruction, "il_basic_block", None)
+
+    def _set_dominators(self):
+        if not self.basic_blocks:
+            return
+        entry = self.basic_blocks[0]
+        all_blocks = set(self.basic_blocks)
+        dominators = {
+            block: ({entry} if block is entry else set(all_blocks))
+            for block in self.basic_blocks
+        }
+        changed = True
+        while changed:
+            changed = False
+            for block in self.basic_blocks[1:]:
+                predecessors = [
+                    dominators[edge.source]
+                    for edge in block.incoming_edges
+                    if edge.source in dominators
+                ]
+                new = (
+                    {block}
+                    if not predecessors
+                    else {block} | set.intersection(*(set(items) for items in predecessors))
+                )
+                if new != dominators[block]:
+                    dominators[block] = new
+                    changed = True
+        for block, items in dominators.items():
+            block.dominators = list(items)
 
     def get_var_definitions(self, var):
         return self.defs.get(var, [])
@@ -99,7 +135,20 @@ class FakeBv:
 
 class DataVar:
     def __init__(self, type_name):
-        self.type = type_name
+        if type_name == "void*":
+            self.type = types.SimpleNamespace(
+                type_class=TypeClass.PointerTypeClass,
+                width=8,
+                target=types.SimpleNamespace(type_class=TypeClass.VoidTypeClass),
+            )
+        elif type_name == "int64_t":
+            self.type = types.SimpleNamespace(
+                type_class=TypeClass.IntegerTypeClass,
+                width=8,
+                signed=True,
+            )
+        else:
+            raise ValueError(type_name)
 
 
 class Section:
@@ -333,6 +382,44 @@ def test_driver_deflatten_hook_handles_stack_state_stores():
     assert uncond["state_token"] == (0x3333, 4)
 
 
+def test_driver_deflatten_rejects_a_narrow_state_store():
+    il, _entry_jump, _branch, real_b_jump, real_b, _real_c = build_driver_shape()
+    state_store = next(ins for ins in real_b if ins.operation == MediumLevelILOperation.MLIL_STORE)
+    state_store.size = 2
+    state_store.src.size = 2
+
+    plans = driver.plan_deflatten_redirections(None, types.SimpleNamespace(start=0x36D10), il)
+
+    assert real_b_jump not in {
+        jump
+        for plan in plans
+        for jump in plan.get("exit_jumps", ())
+    }
+
+
+def test_driver_dispatcher_boundary_rejects_a_different_token_width():
+    il, *_rest = build_driver_shape()
+    wide_row = Block(200)
+    wide_row.add(set_var("wide_state", var("state")))
+    condition = Expr(
+        "MLIL_CMP_E",
+        left=var("wide_state"),
+        right=const(0x1111, size=8),
+    )
+    wide_row.add(Expr("MLIL_IF", [condition], condition=condition, true=40, false=20))
+    il.basic_blocks.append(wide_row)
+    for instruction in wide_row:
+        il.instructions.append(instruction)
+        il.by_index[instruction.instr_index] = instruction
+        if instruction.operation == MediumLevelILOperation.MLIL_SET_VAR:
+            il.defs.setdefault(instruction.dest, []).append(instruction)
+
+    analysis = driver._analyze_driver_dispatcher(il)
+
+    assert analysis is not None
+    assert wide_row.start not in analysis["dispatcher_starts"]
+
+
 def test_driver_deflatten_hook_routes_stack_tokens_through_range_dispatcher():
     il, entry_jump, branch, real_b_jump, real_b, real_c = build_driver_shape(
         range_dispatch=True
@@ -433,7 +520,7 @@ def test_driver_transition_rejects_path_without_state_token_definition():
     il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
     false_tail = next(bb for bb in il.basic_blocks if bb.start == 60)
     false_definition = false_tail.instructions[0]
-    false_definition.operation = Op("MLIL_NOP")
+    false_definition.operation = MediumLevelILOperation.MLIL_NOP
     il.defs["next"].remove(false_definition)
     func = types.SimpleNamespace(start=0x36D10)
 
@@ -520,7 +607,7 @@ def test_driver_state_pointer_definition_must_dominate_store():
     il, _entry_jump, branch, _real_b_jump, _real_b, _real_c = build_driver_shape()
     entry = next(bb for bb in il.basic_blocks if bb.start == 0)
     old_definition = entry.instructions[1]
-    old_definition.operation = Op("MLIL_NOP")
+    old_definition.operation = MediumLevelILOperation.MLIL_NOP
     il.defs["state_ptr"].remove(old_definition)
     real_c = next(bb for bb in il.basic_blocks if bb.start == 90)
     tail = real_c.instructions[-1]
@@ -986,9 +1073,27 @@ def test_driver_global_constant_hook_plans_driver_blob_base_slot():
         },
         {
             "slot_addr": key_slot,
-            "type": "void const* const",
+            "type": "int64_t const",
         },
     ]
+
+
+def test_driver_global_constant_hook_rejects_a_slot_written_in_current_mlil():
+    bv = FakeBv()
+    slot = 0x2983C8
+    bv.data_vars[slot] = DataVar("void*")
+    bv.sections[slot] = [Section(".data")]
+    bv.memory[slot] = (0x1234).to_bytes(8, "little")
+    slot_load = set_var("x9", load(const(slot)))
+    source_arg = set_var("x1", binary("MLIL_ADD", var("x9"), const(8)))
+    il = one_block(
+        slot_load,
+        source_arg,
+        store(const(slot), const(0x5678)),
+        call(const(0x579CC), [const(0x2C8810), var("x1")]),
+    )
+
+    assert driver.plan_global_constant_slots(bv, il) == []
 
 
 def test_driver_string_decrypt_hook_recovers_clone_calls():

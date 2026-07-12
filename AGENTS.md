@@ -41,8 +41,10 @@ the pending tag-cleanup completion callback.
 Current phase order constraints:
 
 - Indirect branch resolving must stabilize before indirect call resolving.
-- Branch condition translation runs only after indirect branch resolving is
-  stable.
+- Global constant resolving runs after indirect call resolving and before
+  branch condition translation. Branch translation runs only after branch,
+  call, and global phases are stable so global type edits cannot erase an
+  expensive MLIL overlay on the next reanalysis.
 - Branch-target cleanup runs after branch condition translation.
 - Call-target cleanup runs after indirect call resolving is stable and no new
   call type adjustment was submitted in that run.

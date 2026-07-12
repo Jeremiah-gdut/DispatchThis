@@ -37,15 +37,23 @@ def test_branch_profile_returns_branch_facts(monkeypatch):
 
     il = FakeLlil([[jump]])
     il.ssa_form = object()
-    bv = type("BV", (), {"is_valid_offset": lambda _self, _addr: True})()
-    monkeypatch.setattr(dyzznb, "_resolve_llil_jump_targets", lambda *_args: [0x3000, 0x2000, 0x3000])
-
-    assert dyzznb.resolve_branch_gadget(bv, il) == [{
+    bv = object()
+    expected = [{
         "source": 0x2000,
         "dest_expr_index": 7,
         "targets": (0x2000, 0x3000),
-        "newly_resolved": True,
     }]
+    monkeypatch.setattr(
+        dyzznb.default,
+        "resolve_branch_gadget",
+        lambda passed_bv, passed_il, known_targets=None: (
+            expected
+            if (passed_bv, passed_il, known_targets) == (bv, il, None)
+            else None
+        ),
+    )
+
+    assert dyzznb.resolve_branch_gadget(bv, il) == expected
 
 
 def test_call_profile_returns_call_facts():
@@ -57,7 +65,8 @@ def test_call_profile_returns_call_facts():
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": decode_def,
-        "cleanup_roots": {7},
+        "cleanup_roots": {0},
+        "cleanup_load_roots": {0},
     }]
 
 

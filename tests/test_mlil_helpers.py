@@ -2,21 +2,18 @@ from importlib import import_module
 import types
 
 import conftest  # noqa: F401
+import pytest
+from binaryninja import MediumLevelILOperation, RegisterValueType
 
 
 mlil_helpers = import_module("plugins.DispatchThis.helpers.mlil")
-
-
-class Op:
-    def __init__(self, name):
-        self.name = name
 
 
 class Expr:
     _next_index = 1
 
     def __init__(self, op, children=(), **attrs):
-        self.operation = Op(op)
+        self.operation = MediumLevelILOperation[op]
         self.children = list(children)
         self.expr_index = Expr._next_index
         Expr._next_index += 1
@@ -58,7 +55,7 @@ def var(name, value=None):
     attrs = {"src": name}
     if value is not None:
         attrs["value"] = types.SimpleNamespace(
-            type=types.SimpleNamespace(name="ConstantValue"),
+            type=RegisterValueType.ConstantValue,
             value=value,
         )
     return Expr("MLIL_VAR", **attrs)
@@ -100,6 +97,23 @@ def call(dest):
 
 def call_like(op, dest):
     return Expr(op, [dest], dest=dest)
+
+
+def test_operation_families_pair_native_enums_with_generated_names():
+    families = (
+        (mlil_helpers.ADDRESS_OF_OPERATIONS, mlil_helpers.ADDRESS_OF_OPS),
+        (mlil_helpers.CALL_OPERATIONS, mlil_helpers.CALL_OPS),
+        (mlil_helpers.CONST_OPERATIONS, mlil_helpers.CONST_OPS),
+        (mlil_helpers.LOAD_OPERATIONS, mlil_helpers.LOAD_OPS),
+        (mlil_helpers.LOAD_STRUCT_OPERATIONS, mlil_helpers.LOAD_STRUCT_OPS),
+        (mlil_helpers.SET_VAR_OPERATIONS, mlil_helpers.SET_VAR_OPS),
+        (mlil_helpers.SLOT_LOAD_OPERATIONS, mlil_helpers.SLOT_LOAD_OPS),
+        (mlil_helpers.STORE_OPERATIONS, mlil_helpers.STORE_OPS),
+    )
+
+    for operations, names in families:
+        assert all(isinstance(operation, MediumLevelILOperation) for operation in operations)
+        assert names == tuple(operation.name for operation in operations)
 
 
 def nop(address=0x1000):
@@ -152,12 +166,19 @@ def test_instruction_write_detection_covers_partial_split_and_aliased_forms():
     ssa_state = types.SimpleNamespace(var="state")
     mutations = (
         Expr("MLIL_SET_VAR_FIELD", dest="state", offset=0, src=const(1)),
-        Expr("MLIL_SET_VAR_SPLIT", high="high", low="state", src=const(1)),
+        Expr(
+            "MLIL_SET_VAR_SPLIT",
+            high="high",
+            low="state",
+            src=const(1),
+            vars_written=("high", "state"),
+        ),
         Expr(
             "MLIL_SET_VAR_ALIASED",
             dest=ssa_state,
             prev=ssa_state,
             src=const(1),
+            vars_written=(ssa_state,),
         ),
         Expr(
             "MLIL_SET_VAR_ALIASED_FIELD",
@@ -196,8 +217,8 @@ def test_same_var_does_not_merge_distinct_variables_with_the_same_display_name()
 def test_instruction_read_detection_covers_split_and_aliased_forms():
     ssa_state = types.SimpleNamespace(var="state")
     reads = (
-        Expr("MLIL_VAR_SPLIT", high="state", low="other"),
-        Expr("MLIL_VAR_SPLIT_SSA", high=ssa_state, low=ssa_state),
+        Expr("MLIL_VAR_SPLIT", high="state", low="other", vars_read=("state", "other")),
+        Expr("MLIL_VAR_SPLIT_SSA", high=ssa_state, low=ssa_state, vars_read=(ssa_state,)),
         Expr("MLIL_VAR_ALIASED", src=ssa_state),
         Expr("MLIL_VAR_ALIASED_FIELD", src=ssa_state, offset=0),
     )
@@ -240,6 +261,144 @@ def test_address_may_escape_through_address_of_pointer_holder():
     mlil = FakeMlil([retain], defs={"holder": [holder_definition]})
 
     assert mlil_helpers.variable_address_escapes(mlil, "state")
+
+
+def test_address_escape_checker_shares_alias_work_across_effects_and_queries():
+    class CountingMlil(FakeMlil):
+        def __init__(self, instructions=(), defs=None):
+            super().__init__(instructions, defs)
+            self.definition_lookups = 0
+
+        def get_var_definitions(self, variable):
+            self.definition_lookups += 1
+            return super().get_var_definitions(variable)
+
+    mlil = CountingMlil((call(var("holder")), call(var("holder"))))
+    address_escapes = mlil_helpers.address_escape_checker(mlil)
+
+    assert not address_escapes("state")
+    assert not address_escapes("other state")
+    assert mlil.definition_lookups == 1
+
+    assert not mlil_helpers.address_escape_checker(mlil)("state")
+    assert mlil.definition_lookups == 2
+
+
+def test_address_escape_checker_fails_closed_on_definition_lookup_error():
+    class BrokenMlil(FakeMlil):
+        def get_var_definitions(self, _variable):
+            raise RuntimeError("definitions unavailable")
+
+    address_escapes = mlil_helpers.address_escape_checker(
+        BrokenMlil((call(var("holder")),)),
+    )
+
+    assert address_escapes("state")
+
+
+def test_address_escape_checker_keeps_visited_wrappers_alive():
+    destroyed = []
+
+    class Node:
+        def __init__(
+            self,
+            reads=(),
+            addressed=(),
+            tracked=False,
+            operation=MediumLevelILOperation.MLIL_VAR,
+        ):
+            self.operation = operation
+            self.vars_read = reads
+            self.vars_address_taken = addressed
+            self.tracked = tracked
+
+        def traverse(self, visit):
+            yield visit(self)
+
+        def __del__(self):
+            if self.tracked:
+                destroyed.append(True)
+
+    class Mlil:
+        def __init__(self):
+            self.instructions = [
+                Node((1,), operation=MediumLevelILOperation.MLIL_CALL),
+            ]
+
+        def get_var_definitions(self, variable):
+            if variable < 3:
+                return [Node((variable + 1,), tracked=True)]
+            if destroyed:
+                return []
+            return [Node(addressed=("state",), tracked=True)]
+
+    assert mlil_helpers.address_escape_checker(Mlil())("state")
+
+
+def test_scope_locality_checker_indexes_current_mlil_once():
+    class Block(list):
+        def __init__(self, start, *instructions):
+            super().__init__(instructions)
+            self.start = start
+
+    class Mlil:
+        def __init__(self):
+            self.scans = 0
+            self._blocks = (
+                Block(1, Expr("MLIL_VAR", src="state", vars_read=("state",))),
+                Block(2, Expr("MLIL_VAR", src="state", vars_read=("state",))),
+            )
+
+        @property
+        def basic_blocks(self):
+            self.scans += 1
+            return self._blocks
+
+    mlil = Mlil()
+    variables_are_local = mlil_helpers.scope_locality_checker(mlil)
+
+    assert not variables_are_local(("state",), {1})
+    assert variables_are_local(("state",), {1, 2})
+    assert mlil.scans == 1
+
+    assert mlil_helpers.scope_locality_checker(mlil)(("state",), {1, 2})
+    assert mlil.scans == 2
+
+
+def test_scope_locality_checker_never_publishes_a_partial_index():
+    class Block(list):
+        def __init__(self, start, *instructions):
+            super().__init__(instructions)
+            self.start = start
+
+    empty = Block(1)
+    external_read = Block(
+        2,
+        Expr("MLIL_VAR", src="state", vars_read=("state",)),
+    )
+
+    class Mlil:
+        scans = 0
+
+        @property
+        def basic_blocks(self):
+            self.scans += 1
+            if self.scans == 1:
+                def broken_blocks():
+                    yield empty
+                    raise RuntimeError("incomplete block list")
+
+                return broken_blocks()
+            return (empty, external_read)
+
+    mlil = Mlil()
+    variables_are_local = mlil_helpers.scope_locality_checker(mlil)
+
+    with pytest.raises(RuntimeError, match="incomplete block list"):
+        variables_are_local(("state",), {1})
+
+    assert not variables_are_local(("state",), {1})
+    assert mlil.scans == 2
 
 
 def test_address_alias_worklist_keeps_distinct_same_named_variables():
@@ -316,6 +475,10 @@ def test_expression_scalar_value_reads_constants_value_sets_and_single_definitio
 def test_operation_queries_scan_expression_trees():
     expr = add(load(const(0x1000)), var("x0"))
 
+    assert mlil_helpers.expression_has_operation(
+        expr,
+        MediumLevelILOperation.MLIL_LOAD,
+    )
     assert mlil_helpers.expression_has_operation(expr, "MLIL_LOAD")
     assert mlil_helpers.expression_has_operation(expr, ("MLIL_STORE", "MLIL_CONST_PTR"))
     assert not mlil_helpers.expression_has_operation(expr, "MLIL_STORE")
@@ -326,6 +489,11 @@ def test_operation_queries_can_follow_variable_definitions():
     mlil = FakeMlil(defs={"tmp": [definition]})
 
     assert not mlil_helpers.expression_has_operation(var("tmp"), "MLIL_XOR")
+    assert mlil_helpers.expression_or_definitions_have_operation(
+        mlil,
+        var("tmp"),
+        MediumLevelILOperation.MLIL_XOR,
+    )
     assert mlil_helpers.expression_or_definitions_have_operation(mlil, var("tmp"), "MLIL_XOR")
     assert mlil_helpers.expression_or_definitions_have_operation(
         mlil,
@@ -349,6 +517,22 @@ def test_peel_var_definitions_tracks_set_var_trail():
     assert trail == [definition]
 
 
+def test_peel_var_definitions_rejects_multiple_or_partial_definitions():
+    original = var("target")
+    first = set_var("target", const(1), instr_index=41)
+    second = set_var("target", const(2), instr_index=42)
+    partial = Expr("MLIL_SET_VAR_FIELD", [const(3)], src=const(3))
+
+    assert mlil_helpers.peel_var_definitions(
+        FakeMlil(defs={"target": [first, second]}),
+        original,
+    ) is original
+    assert mlil_helpers.peel_var_definitions(
+        FakeMlil(defs={"target": [partial]}),
+        original,
+    ) is original
+
+
 def test_fold_constant_value_folds_load_arithmetic_and_value_sets():
     bv = FakeBv()
     bv.memory[0x1000] = (0x40).to_bytes(8, "little")
@@ -356,6 +540,24 @@ def test_fold_constant_value_folds_load_arithmetic_and_value_sets():
 
     assert mlil_helpers.fold_constant_value(bv, mlil, add(load(const(0x1000)), const(2))) == 0x42
     assert mlil_helpers.fold_constant_value(bv, mlil, var("key", value=5)) == 5
+
+
+def test_fold_constant_value_requires_definition_consensus():
+    agreeing = FakeMlil(defs={
+        "key": [
+            set_var("key", const(5), instr_index=1),
+            set_var("key", add(const(2), const(3)), instr_index=2),
+        ],
+    })
+    divergent = FakeMlil(defs={
+        "key": [
+            set_var("key", const(5), instr_index=1),
+            set_var("key", const(6), instr_index=2),
+        ],
+    })
+
+    assert mlil_helpers.fold_constant_value(FakeBv(), agreeing, var("key")) == 5
+    assert mlil_helpers.fold_constant_value(FakeBv(), divergent, var("key")) is None
 
 
 def test_walk_expr_and_cleanup_roots_return_instruction_indices():
@@ -446,14 +648,58 @@ def test_fold_constant_value_load_masks_only_when_requested():
     )
 
 
+def test_fold_constant_value_honors_struct_offsets_and_cast_widths():
+    bv = FakeBv()
+    bv.memory[0x1020] = (0x55).to_bytes(8, "little")
+    source_byte = Expr("MLIL_CONST", constant=0x80, size=1)
+
+    assert mlil_helpers.fold_constant_value(
+        bv,
+        FakeMlil(),
+        load_struct(const(0x1000), 0x20),
+    ) == 0x55
+    assert mlil_helpers.fold_constant_value(
+        bv,
+        FakeMlil(),
+        Expr("MLIL_LOW_PART", [const(0x1234)], src=const(0x1234), size=1),
+    ) == 0x34
+    assert mlil_helpers.fold_constant_value(
+        bv,
+        FakeMlil(),
+        Expr("MLIL_SX", [source_byte], src=source_byte, size=8),
+    ) == 0xFFFFFFFFFFFFFF80
+
+    byte_add = add(
+        Expr("MLIL_CONST", constant=0xFF, size=1),
+        Expr("MLIL_CONST", constant=1, size=1),
+    )
+    byte_add.size = 1
+    byte_mul = Expr(
+        "MLIL_MUL",
+        [Expr("MLIL_CONST", constant=0x80, size=1), const(2)],
+        left=Expr("MLIL_CONST", constant=0x80, size=1),
+        right=const(2),
+        size=1,
+    )
+    assert mlil_helpers.fold_constant_value(bv, FakeMlil(), byte_add) == 0
+    assert mlil_helpers.fold_constant_value(bv, FakeMlil(), byte_mul) == 0
+
+
 def test_mlil_store_detection_matches_constant_slot_destinations():
     slot_store = Expr("MLIL_STORE", [const(0xA43D70)], dest=const(0xA43D70))
     other_store = Expr("MLIL_STORE", [const(0xA43D80)], dest=const(0xA43D80))
+    struct_store = Expr(
+        "MLIL_STORE_STRUCT",
+        [const(0xA43D00)],
+        dest=const(0xA43D00),
+        offset=0x70,
+    )
 
     assert mlil_helpers.mlil_stores_to_address(
         FakeMlil([other_store, slot_store]), 0xA43D70
     )
     assert not mlil_helpers.mlil_stores_to_address(FakeMlil([other_store]), 0xA43D70)
+    assert mlil_helpers.mlil_stores_to_address(FakeMlil([struct_store]), 0xA43D70)
 
 
 def test_set_roots_before_returns_contiguous_assignment_instruction_indices():
@@ -461,15 +707,20 @@ def test_set_roots_before_returns_contiguous_assignment_instruction_indices():
     second = set_var("b", const(2), instr_index=12, expr_index=112, address=0x1004)
     site = call(var("target"))
     site.address = 0x1008
+    site.instr_index = 2
     later = set_var("c", const(3), instr_index=13, address=0x100C)
     mlil = FakeMlil([first, second, site, later])
-    mlil.basic_blocks = [types.SimpleNamespace(start=0, end=4)]
+    block = types.SimpleNamespace(start=0, end=4)
+    mlil.basic_blocks = [block]
+    site.il_basic_block = block
 
     assert mlil_helpers.set_roots_before(mlil, {0x1008}) == {11, 12}
+    assert mlil_helpers.set_roots_before_instruction(mlil, site) == {11, 12}
 
     mlil.instructions.insert(1, nop(address=0x1002))
-    mlil.basic_blocks = [types.SimpleNamespace(start=0, end=5)]
+    block.end = 5
     assert mlil_helpers.set_roots_before(mlil, {0x1008}) == {12}
+    assert mlil_helpers.set_roots_before_instruction(mlil, site) == {12}
 
 
 if __name__ == "__main__":

@@ -1,5 +1,15 @@
 """BinaryView memory and address helpers for resolver profiles."""
 
+from binaryninja import SymbolType
+
+
+_FUNCTION_SYMBOL_TYPES = {
+    SymbolType.FunctionSymbol,
+    SymbolType.ImportedFunctionSymbol,
+    SymbolType.LibraryFunctionSymbol,
+    SymbolType.SymbolicFunctionSymbol,
+}
+
 
 def read_uint_le(bv, addr, width):
     """Read an unsigned little-endian integer, or ``None`` on normal misses."""
@@ -34,22 +44,38 @@ def read_qword_slot(bv, addr):
     return read_u64le(bv, addr)
 
 
-def is_valid_address(bv, addr):
+def is_mapped_address(bv, addr):
+    """Return whether ``addr`` belongs to the BinaryView address space."""
     try:
         return addr is not None and bool(bv.is_valid_offset(addr))
     except Exception:  # noqa: BLE001
         return False
 
 
-def is_valid_target(bv, addr):
-    return is_valid_address(bv, addr)
-
-
-def is_call_target(bv, addr):
-    if not is_valid_address(bv, addr):
+def is_executable_target(bv, addr):
+    """Return whether ``addr`` is an aligned executable control-flow target."""
+    if addr is None:
         return False
     try:
-        return bv.get_symbol_at(addr) is not None or bv.get_function_at(addr) is not None
+        alignment = getattr(getattr(bv, "arch", None), "instr_alignment", 1) or 1
+        return addr % alignment == 0 and bool(bv.is_offset_executable(addr))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def is_known_callee(bv, addr):
+    """Return whether BN identifies ``addr`` as executable or function-like."""
+    if not is_mapped_address(bv, addr):
+        return False
+    try:
+        if bv.get_function_at(addr) is not None or is_executable_target(bv, addr):
+            return True
+        get_symbols = getattr(bv, "get_symbols", None)
+        symbols = list(get_symbols(addr, 1) or ()) if get_symbols is not None else []
+        if not symbols:
+            symbol = bv.get_symbol_at(addr)
+            symbols = [] if symbol is None else [symbol]
+        return any(getattr(symbol, "type", None) in _FUNCTION_SYMBOL_TYPES for symbol in symbols)
     except Exception:  # noqa: BLE001
         return False
 
@@ -71,9 +97,9 @@ def in_section(bv, addr, names):
 
 __all__ = (
     "in_section",
-    "is_call_target",
-    "is_valid_address",
-    "is_valid_target",
+    "is_executable_target",
+    "is_known_callee",
+    "is_mapped_address",
     "read_qword_slot",
     "read_u8",
     "read_u16le",

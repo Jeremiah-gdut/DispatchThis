@@ -8,6 +8,12 @@ A profile is selected per BinaryView with
 still per function; selecting a profile does not enable DispatchThis for every
 function in the view.
 
+Function phase state records the profile ID that produced its recovery evidence.
+The UI refuses to switch profiles while any function in the view still contains
+branch, call, cleanup, or global recovery evidence. Workflow also fails closed on
+legacy evidence without provenance or evidence bound to another profile. Empty
+function state may be rebound because it contains no analysis claim to reuse.
+
 ## Agent workflow
 
 Do not start by editing code. First collect the binary facts below. If a field is
@@ -200,7 +206,7 @@ def resolve_call_gadget(bv, mlil_func):
     out = []
     for call_il in mlil.iter_indirect_calls(mlil_func):
         target = mlil.fold_constant_value(bv, mlil_func, call_il.dest)
-        if target is None or not memory.is_call_target(bv, target):
+        if target is None or not memory.is_known_callee(bv, target):
             continue
         roots = mlil.cleanup_roots_for_expr(mlil_func, call_il.dest)
         out.append(facts.call_fact(call_il, target, cleanup_roots=roots))
@@ -213,21 +219,22 @@ instructions feeding a recovered branch or call target. Expression indices are
 backend replacement details used only at the final `replace_expr` site, after the
 backend has mapped current SSA/non-SSA IL and decided whether cleanup is safe.
 
-`llil.const_values(bv, ssa, expr)` returns a set of concrete candidates, not a
-single value. An empty set means the helper could not recover a concrete value;
-multiple values mean the expression has multiple viable candidates, often from a
-PHI merge or loop-carried value. If a profile formula needs exactly one table
-base, key, or offset, enforce that at the call site:
+`llil.const_values(bv, ssa, expr)` returns a complete set of concrete candidates,
+or `None` when any semantic path is unknown. Multiple values mean the expression
+has several viable candidates, often from a PHI merge or loop-carried value. If
+a profile formula needs exactly one table base, key, or offset, enforce both
+completeness and cardinality at the call site:
 
 ```python
 offsets = llil.const_values(bv, ssa, offset_expr)
-if len(offsets) != 1:
+if offsets is None or len(offsets) != 1:
     return []
 offset = next(iter(offsets))
 ```
 
-`const_values` does not perform CFG path disambiguation. If one binary can prove
-only one PHI edge is feasible, keep that narrowing in its profile or pass.
+`const_values` does not perform CFG path disambiguation. A profile may narrow a
+PHI only from complete binary-specific path evidence; it must never keep the
+known arms of an otherwise unknown result.
 
 Global constant helpers provide inspection primitives. They can walk MLIL,
 extract constant slot addresses, read qword slots, check sections, detect stores,
@@ -264,7 +271,7 @@ Each profile module must expose:
 ```python
 PROFILE_ID = "dyzznb_main_202607"
 PROFILE_NAME = "DYZZNB main 2026-07"
-PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals, correlated stores, and strings."
+PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607: branch and call gadgets; no-op globals, correlated stores, deflatten, and strings."
 
 def resolve_branch_gadget(bv, llil, known_targets=None):
     return []
@@ -297,8 +304,8 @@ missing. No-op hooks are valid.
     "source": 0x1000,
     "dest_expr_index": 42,
     "targets": (0x2000, 0x3000),
-    "newly_resolved": True,
     "cleanup_roots": {123, 124},
+    "jump_il": jump_il,
 }
 ```
 
@@ -306,6 +313,14 @@ missing. No-op hooks are valid.
 addresses. `dest_expr_index` is used only for current-LLIL presentation rewrites;
 workflow owns `Function.set_user_indirect_branches`. `cleanup_roots` is optional
 and must contain instruction indices rooted in branch-target decode garbage.
+Bundled resolvers also retain the exact current `jump_il` witness; the backend
+rejects stale, missing, or same-source conflicting witnesses before any rewrite
+or metadata submission. Workflow supplies `known_targets` only for receipts whose
+complete target tuples exactly match Binary Ninja's current non-auto user branch
+metadata. A resolver may skip those sources as an already verified frontier, but
+must freshly recognize every other source. Callers must not pass an unverified
+cache: receipt-only, missing, automatic, subset, superset, or changed metadata is
+not `known_targets`, and it is never a fallback for failed current decoding.
 
 `resolve_call_gadget(bv, mlil)` returns call facts:
 
@@ -316,11 +331,19 @@ and must contain instruction indices rooted in branch-target decode garbage.
     "target": 0x5000,
     "decode_def": decode_def,
     "cleanup_roots": {123, 124},
+    "cleanup_load_roots": {123},
 }
 ```
 
 Workflow owns call type adjustments and cleanup receipt handling. `cleanup_roots`
-must be rooted in the call-target decode slice, not in unrelated constants.
+must describe the call-target decode slice, not unrelated constants. The backend
+rebinds `call_il` and the descriptive `decode_def` to exact current non-SSA MLIL, but
+rewrites only `call_il.dest`. Before cleanup it replaces both root sets with the exact current SSA
+reaching-definition slice. PHIs are followed completely; partial, split, or aliased
+definitions disable cleanup. `cleanup_load_roots` is optional and must be a subset of
+`cleanup_roots`; it permits SSA-dead load assignments to be removed without treating
+arbitrary loads as pure or consulting incomplete xrefs. Profile-supplied instruction
+indices are advisory only and never authorize a mutation after reanalysis.
 
 `plan_global_constant_slots(bv, mlil)` returns global constant facts:
 

@@ -79,8 +79,8 @@ def active_profile_id(bv, settings=None):
     profile_id = _settings(settings).get_string(ACTIVE_PROFILE_SETTING, bv) or DEFAULT_PROFILE_ID
     if profile_id in _PROFILES:
         return profile_id
-    log_warn(f"[profiles] unknown resolver profile {profile_id!r}; using default")
-    return DEFAULT_PROFILE_ID
+    log_warn(f"[profiles] unknown resolver profile {profile_id!r}; refusing resolver work")
+    raise InvalidResolverProfile(f"unknown resolver profile {profile_id!r}")
 
 
 def active_profile(bv, settings=None):

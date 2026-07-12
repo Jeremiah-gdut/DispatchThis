@@ -19,10 +19,18 @@ LLIL helpers inspect low-level IL for indirect branch target recovery.
 | Name | Purpose |
 | --- | --- |
 | `U48` | Current bundled branch resolver address mask, `0xffffffffffff`. |
-| `CONST_OPS` | LLIL operation names treated as immediate constants: `LLIL_CONST`, `LLIL_CONST_PTR`. |
-| `INDIRECT_JUMP_OPS` | LLIL terminator operations scanned as indirect control flow: `LLIL_JUMP`, `LLIL_JUMP_TO`, `LLIL_TAILCALL`. |
-| `LOAD_OPS` | LLIL load operations that may be inspected for stack spill/reload constants. |
-| `SET_REG_OPS` | LLIL SSA register assignment operations followed by register helpers. |
+| `CONST_OPERATIONS` | Native BN enums for immediate constants. |
+| `INDIRECT_JUMP_OPERATIONS` | Native BN enums for indirect jump/tail-call terminators. |
+| `LOAD_OPERATIONS` | Native BN enums for LLIL loads inspected for stack spill/reload constants. |
+| `SET_REG_OPERATIONS` | Native BN enums for LLIL SSA register assignments followed by register helpers. |
+| `CONST_OPS` | Compatibility names generated from `CONST_OPERATIONS`. |
+| `INDIRECT_JUMP_OPS` | Compatibility names generated from `INDIRECT_JUMP_OPERATIONS`. |
+| `LOAD_OPS` | Compatibility names generated from `LOAD_OPERATIONS`. |
+| `SET_REG_OPS` | Compatibility names generated from `SET_REG_OPERATIONS`. |
+
+LLIL-only code compares the native `*_OPERATIONS` enums. The generated
+`*_OPS` names exist only for callers that deliberately combine LLIL and MLIL
+selectors.
 
 ### `iter_indirect_jumps`
 
@@ -49,8 +57,8 @@ nothing.
 
 **Key behavior and limits**
 
-- Includes operations named in `INDIRECT_JUMP_OPS`.
-- Skips instructions whose `dest.operation.name` is in `CONST_OPS`.
+- Includes operations in `INDIRECT_JUMP_OPERATIONS`.
+- Skips instructions whose destination operation is in `CONST_OPERATIONS`.
 - Does not resolve targets, rewrite IL, or inspect workflow state.
 
 ### `peel_reg_definition`
@@ -86,7 +94,8 @@ expression rather than raising.
 - Follows only `LLIL_REG_SSA` expressions.
 - Stops at `LLIL_REG_PHI`; use `const_values` when PHI candidate recovery is
   needed.
-- Requires followed definitions to expose `src`.
+- Follows only a full `LLIL_SET_REG_SSA`; partial-register writes and every
+  other definition shape stop the peel.
 - Does not walk CFG paths or choose a PHI edge.
 
 ### `const_values`
@@ -113,8 +122,9 @@ expression.
 
 **Returns**
 
-A `set[int]` of recovered candidates. An empty set means no concrete candidate
-was recovered.
+A complete `set[int]` of recovered candidates, or `None` when any semantic path
+is unknown. Callers must distinguish `None` from a proved candidate set before
+checking its cardinality.
 
 **Key behavior and limits**
 
@@ -123,12 +133,14 @@ was recovered.
   stack spill/reload constants, and supported PHI candidate sets.
 - `LLIL_BOOL_TO_INT` contributes `{0, 1}` when the predicate cannot be uniquely
   folded.
-- PHI nodes contribute candidate values from their operands. Backedges/cycles are
-  bounded with a seen set.
+- PHI nodes contribute candidates only when every non-backedge arm is complete.
+  One unknown arm makes the whole result `None`; backedges/cycles are bounded.
 - Does not perform CFG path disambiguation or prove which PHI edge is feasible.
-  If a profile needs exactly one key, base, or offset, it must check
-  `len(values) == 1`.
-- Values are masked to the helper's current 48-bit LLIL address model.
+  If a profile needs exactly one key, base, or offset, it must first require a
+  non-`None` result and then check `len(values) == 1`.
+- Arithmetic and casts use each LLIL expression's own bit width. The bundled
+  branch gadget applies its 48-bit address mask at the binary-specific formula
+  boundary, not inside the general value folder.
 
 ### `correlated_const_values`
 
@@ -152,19 +164,22 @@ multiple sibling `LLIL_REG_PHI` nodes in one expression.
 
 **Returns**
 
-A `set[int]` of recovered candidates. If sibling PHIs cannot be safely
-correlated, falls back to `const_values`.
+A complete `set[int]` of recovered candidates. `None` from the correlation seam
+means there was no multi-PHI case and permits the documented `const_values`
+fallback. An empty set means a multi-PHI relation was found but could not be
+proved, so the caller must reject it rather than use a Cartesian fallback.
 
 **Key behavior and limits**
 
-- When an expression reads several PHIs with the same arm count, evaluates the
-  expression once per arm using all PHI operands from that arm together.
+- When an expression reads several PHIs at one join, aligns their operands by
+  exact predecessor basic block and evaluates the expression once per proven
+  predecessor arm.
 - Avoids impossible Cartesian-product combinations such as
   `phi(1, 2) + phi(10, 20) -> {11, 12, 21, 22}`; correlated evaluation returns
   `{11, 22}` for that shape.
 - Does not replace `const_values`; profiles should use this only when PHI
   operands are expected to come from the same predecessor split.
-- Values are masked through `const_values`' current 48-bit LLIL address model.
+- Values retain the expression widths established by `const_values`.
 
 ### `correlated_phi_values`
 
@@ -190,19 +205,42 @@ Generic same-arm PHI evaluator for profiles with their own value folder.
 
 **Returns**
 
-A `set[int]` when same-arm evaluation succeeds, otherwise `None`. Callers should
-fall back to their normal value folder on `None`.
+A `set[int]` when same-arm evaluation succeeds, `None` when there is no
+multi-PHI case, and an empty set when a detected multi-PHI relationship is
+ambiguous or incomplete. Only `None` permits fallback.
 
 **Key behavior and limits**
 
 - Owns only PHI-arm correlation; the caller's `value_func` owns arithmetic,
   loads, width masks, and binary-specific address models.
-- Requires every collected PHI to expose the same number of operands, and each
-  selected operand to fold to exactly one value.
-- Assumes sibling PHIs use matching operand order for the same predecessor
-  edges; callers should fall back when that shape is not known.
+- Requires every collected PHI to be in the same join block, expose one operand
+  for every exact incoming predecessor, and fold each selected operand to one
+  complete value.
 - Keeps distinct same-named register objects separate.
 - Does not mutate IL or workflow state.
+
+### `phi_registers`
+
+```python
+phi_registers(ssa, expr, max_depth=32)
+```
+
+Return the SSA registers read by `expr` whose definition chains terminate at
+`LLIL_REG_PHI`. Structural traversal uses Binary Ninja's `traverse`; only the
+definition-chain worklist is project logic.
+
+### `stack_store_sources`
+
+```python
+stack_store_sources(ssa, load_expr)
+```
+
+Return every exact-width stack-store source that can feed an LLIL load. Stack
+slots come from `RegisterValueType.StackFrameOffset`, and store
+provenance comes from `get_ssa_memory_definition`. Calls, unknown definitions,
+overlapping writes, cycles, or an unresolved PHI arm fail closed. Resolved PHI
+arms remain separate candidates; single-value callers accept them only when all
+arms fold to the same value.
 
 ## `mlil`
 
@@ -214,13 +252,28 @@ cleanup-root collection.
 
 | Name | Purpose |
 | --- | --- |
-| `CALL_OPS` | MLIL call and tail-call operations scanned by call iteration helpers, including typed, untyped, and SSA forms. |
-| `CONST_OPS` | MLIL constant operations: `MLIL_CONST`, `MLIL_CONST_PTR`. |
-| `LOAD_OPS` | MLIL load operations used by constant folding and load-shape recognition. |
-| `LOAD_STRUCT_OPS` | Struct load operations supported by slot-address helpers. |
-| `SLOT_LOAD_OPS` | Load operations accepted by `load_slot_address`. |
-| `SET_VAR_OPS` | MLIL variable assignment operations followed by peeling and cleanup helpers. |
-| `STORE_OPS` | MLIL store operations inspected by `mlil_stores_to_address`. |
+| `ADDRESS_OF_OPERATIONS` | Native BN enums accepted as whole-variable or field addresses. |
+| `CALL_OPERATIONS` | Native BN enums for typed, untyped, SSA, and tail calls. |
+| `CONST_OPERATIONS` | Native BN enums for immediate constants. |
+| `LOAD_OPERATIONS` | Native BN enums used by constant folding and load recognition. |
+| `LOAD_STRUCT_OPERATIONS` | Native BN enums for struct loads. |
+| `SLOT_LOAD_OPERATIONS` | Native BN enums accepted by `load_slot_address`. |
+| `SET_VAR_OPERATIONS` | Native BN enums for variable assignments followed by peeling and cleanup helpers. |
+| `STORE_OPERATIONS` | Native BN enums inspected by `mlil_stores_to_address`. |
+| `ADDRESS_OF_OPS` | Compatibility names generated from `ADDRESS_OF_OPERATIONS`. |
+| `CALL_OPS` | Compatibility names generated from `CALL_OPERATIONS`. |
+| `CONST_OPS` | Compatibility names generated from `CONST_OPERATIONS`. |
+| `LOAD_OPS` | Compatibility names generated from `LOAD_OPERATIONS`. |
+| `LOAD_STRUCT_OPS` | Compatibility names generated from `LOAD_STRUCT_OPERATIONS`. |
+| `SLOT_LOAD_OPS` | Compatibility names generated from `SLOT_LOAD_OPERATIONS`. |
+| `SET_VAR_OPS` | Compatibility names generated from `SET_VAR_OPERATIONS`. |
+| `STORE_OPS` | Compatibility names generated from `STORE_OPERATIONS`. |
+
+The `*_OPERATIONS` collections are the normal single-MLIL API. The matching
+`*_OPS` collections intentionally contain names because compatibility callers
+may combine LLIL and MLIL operations, whose `IntEnum` numeric values can
+collide. Every name is generated from Binary Ninja's enums; no operation name is
+hand-written in production code.
 
 ### `op_name`
 
@@ -355,6 +408,22 @@ Return whether an explicit store publishes, or an unknown memory-effecting
 operation receives and can retain, a direct or definition-derived address of one
 variable. Deflatten planners use this function-level fact so later no-argument
 calls or unresolved stores cannot silently recover and mutate dispatcher state.
+
+### `address_escape_checker`
+
+**Signature**
+
+```python
+address_escape_checker(mlil)
+```
+
+**Purpose**
+
+Build a current-MLIL-scoped escape predicate. Its first query traverses all
+explicit stores and unknown memory-effect roots in one shared alias worklist,
+then caches semantic base-variable answers. An incomplete definition lookup
+makes every answer conservatively true. The predicate must be discarded after
+MLIL mutation, finalization, copying, or reanalysis.
 
 ### `current_non_ssa_instruction`
 
@@ -565,26 +634,14 @@ definitions inside the selected basic-block scope.
   following those definitions.
 - Does not decide reaching-definition feasibility or prove an expression pure.
 
-### `transitive_definition_variables`
-
-**Signature**
+### `region_until`
 
 ```python
-transitive_definition_variables(mlil, variables)
+region_until(start_bb, stop_starts)
 ```
 
-**Purpose**
-
-Collect every variable reachable through the available definition-source graph,
-including definitions represented outside a selected block scope.
-
-**Key behavior and limits**
-
-- Follows every definition and guards variable cycles.
-- Is an inspection primitive for callers that intentionally need the complete
-  definition graph; it is not a reaching-definition proof.
-- Does not choose a reaching definition or prove that a definition dominates a
-  use.
+Return the basic-block starts reachable from `start_bb` without entering any
+stop block. This shared CFG helper replaces duplicate generic/driver walkers.
 
 ### `variables_are_scope_local`
 
@@ -605,6 +662,22 @@ block scope.
   `MLIL_ADDRESS_OF` and `MLIL_ADDRESS_OF_FIELD` uses.
 - Is deliberately conservative for non-SSA variables with unrelated uses.
 - Does not prove dominance or memory aliasing.
+
+### `scope_locality_checker`
+
+**Signature**
+
+```python
+scope_locality_checker(mlil)
+```
+
+**Purpose**
+
+Build a current-MLIL-scoped predicate that lazily indexes the basic blocks in
+which each semantic base variable is read or has its address taken. Repeated
+diamond ownership checks then use set containment instead of rescanning the
+whole function. The index is invocation-local and must not cross MLIL mutation
+or reanalysis.
 
 ### `definitions_cover_all_paths`
 
@@ -641,8 +714,8 @@ Return the expression tree rooted at `expr`.
 
 **Parameters**
 
-- `expr`: A Binary Ninja MLIL expression or instruction. Fake test objects may
-  be used if they expose compatible child attributes.
+- `expr`: A Binary Ninja MLIL expression or instruction. Test doubles must
+  expose a compatible `traverse` method.
 
 **Returns**
 
@@ -650,11 +723,8 @@ A list of expression nodes. If `expr` is `None`, returns `[]`.
 
 **Key behavior and limits**
 
-- Uses Binary Ninja's `expr.traverse(...)` when available.
-- Falls back to recursively visiting common child fields:
-  `src`, `dest`, `left`, `right`, `condition`, `params`, `output`,
-  `vars_read`, and `vars_written`.
-- Uses object identity to avoid repeated fallback visits.
+- Delegates structural traversal directly to Binary Ninja's
+  `expr.traverse(...)`.
 
 ### `expression_has_operation`
 
@@ -666,17 +736,18 @@ expression_has_operation(expr, ops)
 
 **Purpose**
 
-Return whether the expression tree rooted at `expr` contains any operation named
-by `ops`.
+Return whether the expression tree rooted at `expr` contains any selected
+operation.
 
 **Parameters**
 
 - `expr`: MLIL expression or instruction to inspect.
-- `ops`: Operation name string, or an iterable of operation name strings.
+- `ops`: A Binary Ninja MLIL operation enum, operation name string, or iterable
+  of either form.
 
 **Returns**
 
-`True` when any visited node has a matching operation name, otherwise `False`.
+`True` when any visited node has a matching operation, otherwise `False`.
 
 **Key behavior and limits**
 
@@ -695,14 +766,15 @@ expression_or_definitions_have_operation(mlil, expr, ops, max_depth=16)
 
 **Purpose**
 
-Return whether `expr` or any followed `MLIL_VAR` definition contains an operation
-named by `ops`.
+Return whether `expr` or any followed `MLIL_VAR` definition contains a selected
+operation.
 
 **Parameters**
 
 - `mlil`: MLIL function-like object supporting `get_var_definitions(var)`.
 - `expr`: MLIL expression or instruction to inspect.
-- `ops`: Operation name string, or an iterable of operation name strings.
+- `ops`: A Binary Ninja MLIL operation enum, operation name string, or iterable
+  of either form.
 - `max_depth`: Maximum recursive variable-definition depth.
 
 **Returns**
@@ -767,11 +839,12 @@ Recover a direct MLIL constant value after peeling single-definition variables.
 **Returns**
 
 The expression's `constant` value, or `None` if the peeled expression is not in
-`CONST_OPS`.
+`CONST_OPERATIONS`.
 
 **Key behavior and limits**
 
-- Calls `peel_var_definitions(..., require_single=True, allowed_ops=None)`.
+- Calls `peel_var_definitions(...)`, whose contract already requires one exact
+  whole-variable definition.
 - Stops when a variable has zero or multiple definitions.
 - Does not evaluate arithmetic, loads, or value-set information. Use
   `fold_constant_value` for broader folding.
@@ -802,7 +875,7 @@ not expose a Binary Ninja value object of type `ConstantValue`,
 
 **Key behavior and limits**
 
-- Calls `peel_var_definitions(..., require_single=True, allowed_ops=None)`.
+- Calls `peel_var_definitions(...)`.
 - Does not evaluate arithmetic, loads, PHI candidates, or memory. Use
   `fold_constant_value` or a profile-private value engine when those semantics
   are required.
@@ -868,7 +941,7 @@ The recovered slot address, including `MLIL_LOAD_STRUCT` offset when present, or
 
 **Key behavior and limits**
 
-- Accepts operations in `SLOT_LOAD_OPS`.
+- Accepts operations in `SLOT_LOAD_OPERATIONS`.
 - Requires `expr.size == width`.
 - For struct loads, requires `offset` to be an integer.
 - Does not implicitly apply U48. Pass `address_mask=U48` explicitly when the
@@ -902,8 +975,7 @@ offset shape was found.
 
 **Key behavior and limits**
 
-- Peels variables with `peel_var_definitions(..., require_single=True,
-  allowed_ops=None)`.
+- Peels variables with `peel_var_definitions(...)`.
 - Uses `load_slot_address` for the base slot load.
 - Folds only constant add/sub offsets around the slot load.
 - Does not decide whether a slot should become const or whether the resolved
@@ -946,7 +1018,7 @@ An iterator of `(expr, use_addr, slot_addr, offset)` tuples.
 **Signature**
 
 ```python
-iter_calls(mlil, ops=CALL_OPS)
+iter_calls(mlil, ops=CALL_OPERATIONS)
 ```
 
 **Purpose**
@@ -956,8 +1028,8 @@ Yield MLIL call-like instructions from an MLIL function.
 **Parameters**
 
 - `mlil`: MLIL function-like object exposing `instructions`.
-- `ops`: Operation name string or iterable of operation names to include. The
-  default is `CALL_OPS`.
+- `ops`: MLIL operation enum/name or iterable of either form. The default is
+  `CALL_OPERATIONS`.
 
 **Returns**
 
@@ -1024,11 +1096,30 @@ address.
 **Key behavior and limits**
 
 - Walks every expression below every instruction with `walk_expr`.
-- Checks store operations named in `STORE_OPS`.
+- Checks store operations in `STORE_OPERATIONS`.
 - Uses `constant_address` on each store destination, so variable peeling is
   single-definition only.
 - Does not decide whether a slot should become const; planners still own that
   binary-specific rule.
+
+### `slot_has_no_stores`
+
+**Signature**
+
+```python
+slot_has_no_stores(bv, current_mlil, slot_addr, address_mask=None)
+```
+
+**Purpose**
+
+Prove, fail-closed, that the current MLIL and every analyzed function referenced
+by the slot contain no store to it.
+
+**Returns**
+
+`True` only when every current code reference resolves to a function with
+available MLIL and none of those functions stores to the slot. Missing reference
+ownership, unavailable MLIL, or reference-query failures return `False`.
 
 ### `iter_indirect_calls`
 
@@ -1052,8 +1143,8 @@ An iterator of MLIL call instructions. If `mlil` is `None`, yields nothing.
 
 **Key behavior and limits**
 
-- Includes instructions whose operation name starts with `MLIL_CALL`.
-- Skips calls whose `dest.operation.name` is in `CONST_OPS`.
+- Includes the exact operations in `CALL_OPERATIONS`.
+- Skips calls whose destination operation is in `CONST_OPERATIONS`.
 - Does not resolve the callee or mutate the call destination.
 
 ### `peel_var_definitions`
@@ -1066,8 +1157,6 @@ peel_var_definitions(
     expr,
     trail=None,
     max_depth=64,
-    require_single=False,
-    allowed_ops=SET_VAR_OPS,
 )
 ```
 
@@ -1081,22 +1170,17 @@ Follow `MLIL_VAR` expressions through MLIL variable definitions.
 - `expr`: Starting MLIL expression.
 - `trail`: Optional list. Followed definitions are appended in traversal order.
 - `max_depth`: Maximum number of definition hops.
-- `require_single`: When `True`, stops unless the variable has exactly one
-  definition.
-- `allowed_ops`: Iterable of allowed definition operation names, or `None` to
-  allow any definition that exposes `src`.
 
 **Returns**
 
-The peeled MLIL expression. On missing definitions, unsupported definitions,
-multiple definitions when `require_single=True`, or Binary Ninja API errors,
-returns the current expression.
+The peeled MLIL expression. On missing, multiple, partial/field definitions,
+unsupported definitions, or Binary Ninja API errors, returns the current
+expression.
 
 **Key behavior and limits**
 
 - Follows only expressions whose operation is `MLIL_VAR`.
-- Requires each followed definition to expose `src`.
-- Default `allowed_ops` is `SET_VAR_OPS`.
+- Requires exactly one whole `MLIL_SET_VAR` definition at each hop.
 - Does not perform PHI/path reasoning.
 
 ### `fold_constant_value`
@@ -1132,9 +1216,11 @@ An integer value, or `None` when folding fails.
 - Handles constants, variable definitions, `MLIL_ADD`, `MLIL_SUB`, `MLIL_MUL`,
   zero/sign/low-part casts, MLIL loads, and Binary Ninja value objects of type
   `ConstantValue`, `ConstantPointerValue`, or `ImportedAddressValue`.
-- Follows the first `SET_VAR_OPS` definition for `MLIL_VAR`, matching the current
-  single-callee backend behavior.
-- Arithmetic is masked to 64 bits.
+- Accepts multiple whole `MLIL_SET_VAR` definitions only when every definition
+  folds completely to the same value; otherwise returns `None`.
+- Arithmetic and casts are masked to the current expression's Binary Ninja
+  width.
+- `MLIL_LOAD_STRUCT` includes its field offset before reading.
 - Load addresses are not implicitly masked. Pass `load_address_mask=U48` when a
   profile or pass is applying the bundled 48-bit address formula.
 - Returns `None` on invalid or short reads through `memory.read_uint_le`.
@@ -1164,7 +1250,7 @@ A `set[int]` of MLIL instruction indices.
 
 - Walks the expression tree with `walk_expr`.
 - For every `MLIL_VAR`, adds definition `instr_index` values whose operation is
-  in `SET_VAR_OPS`.
+  in `SET_VAR_OPERATIONS`.
 - Returns instruction indices, not expression indices. Cleanup backends map
   SSA/non-SSA forms before final `replace_expr` use.
 - Does not decide whether a root is safe to NOP; `phase_cleanup.cleanup_decode`
@@ -1199,9 +1285,25 @@ or `site_addrs` is empty.
 - Scans each basic block independently.
 - For every instruction whose `address` is in `site_addrs`, walks backward in the
   same block and collects contiguous assignments whose operation is in
-  `SET_VAR_OPS`.
+  `SET_VAR_OPERATIONS`.
 - Stops at the first non-assignment.
 - Does not inspect dataflow outside the contiguous block prefix.
+
+### `set_roots_before_instruction`
+
+**Signature**
+
+```python
+set_roots_before_instruction(mlil, instruction)
+```
+
+Collect the same contiguous assignment prefix for one exact current MLIL
+instruction. Unlike the address-based receipt helper, this variant never scans
+other blocks or instructions that share the same machine address. It returns an
+empty set when the instruction cannot be mapped uniquely inside its current
+basic block. Branch condition translation uses this exact form after proving the
+source `MLIL_IF`; phase cleanup still decides which collected definitions are
+actually dead.
 
 ## `memory`
 
@@ -1362,17 +1464,17 @@ An integer qword value, or `None`.
 - Alias for `read_u64le`.
 - Does not validate section membership or whether the qword is a pointer.
 
-### `is_valid_address`
+### `is_mapped_address`
 
 **Signature**
 
 ```python
-is_valid_address(bv, addr)
+is_mapped_address(bv, addr)
 ```
 
 **Purpose**
 
-Check whether a BinaryView offset is valid.
+Check whether an address belongs to the BinaryView address space.
 
 **Parameters**
 
@@ -1389,21 +1491,23 @@ otherwise `False`.
 - Catches BinaryView exceptions and returns `False`.
 - Does not require a symbol or function at the address.
 
-### `is_valid_target`
+### `is_executable_target`
 
 **Signature**
 
 ```python
-is_valid_target(bv, addr)
+is_executable_target(bv, addr)
 ```
 
 **Purpose**
 
-Check whether an address is valid as a generic recovered target.
+Check whether an address is aligned for the current architecture and Binary
+Ninja marks it executable.
 
 **Parameters**
 
-- `bv`: BinaryView-like object.
+- `bv`: BinaryView-like object supporting `is_offset_executable(addr)` and an
+  optional `arch.instr_alignment`.
 - `addr`: Address candidate.
 
 **Returns**
@@ -1412,36 +1516,36 @@ Check whether an address is valid as a generic recovered target.
 
 **Key behavior and limits**
 
-- Currently delegates to `is_valid_address`.
-- Use `is_call_target` when a callee-like target is required.
+- Catches BinaryView exceptions and returns `False`.
+- Does not accept a merely mapped data address.
 
-### `is_call_target`
+### `is_known_callee`
 
 **Signature**
 
 ```python
-is_call_target(bv, addr)
+is_known_callee(bv, addr)
 ```
 
 **Purpose**
 
-Check whether an address looks like a concrete call target.
+Check whether Binary Ninja has code evidence for a concrete callee.
 
 **Parameters**
 
-- `bv`: BinaryView-like object supporting `is_valid_offset`, `get_symbol_at`,
-  and `get_function_at`.
+- `bv`: BinaryView-like object supporting address/executable queries, function
+  lookup, and symbol lookup.
 - `addr`: Address candidate.
 
 **Returns**
 
-`True` when the address is valid and has either a symbol or a function at that
-address; otherwise `False`.
+`True` when the address is mapped and has a function, executable mapping, or an
+explicit function-like `SymbolType`; otherwise `False`.
 
 **Key behavior and limits**
 
+- A generic `DataSymbol` or `ExternalSymbol` is not callee evidence.
 - Catches BinaryView exceptions and returns `False`.
-- Does not inspect calling convention or function type.
 
 ### `sections_at`
 
@@ -1533,7 +1637,13 @@ An exception instance.
 **Signature**
 
 ```python
-branch_fact(source, dest_expr_index, targets, newly_resolved=True, cleanup_roots=None)
+branch_fact(
+    source,
+    dest_expr_index,
+    targets,
+    jump_il,
+    cleanup_roots=None,
+)
 ```
 
 **Purpose**
@@ -1546,8 +1656,8 @@ Build an indirect branch recovery fact.
 - `dest_expr_index`: Current LLIL destination expression index, used only for
   current-LLIL presentation rewrites.
 - `targets`: Iterable of target addresses.
-- `newly_resolved`: Boolean-like marker for compatibility with branch plan
-  consumers.
+- `jump_il`: Required current LLIL instruction witness retained for exact
+  mutation-boundary validation.
 - `cleanup_roots`: Optional iterable of instruction indices for branch target
   decode cleanup.
 
@@ -1558,15 +1668,15 @@ A dict with:
 - `source`: integer branch address.
 - `dest_expr_index`: integer LLIL expression index.
 - `targets`: sorted tuple of unique integer targets.
-- `newly_resolved`: boolean.
 - `cleanup_roots`: set of integer instruction indices, present only when the
   argument is not `None`.
+- `jump_il`: supplied current instruction witness.
 
 **Key behavior and limits**
 
 - Raises `MalformedRecoveryFact` when required integer fields are not integers,
   when `targets` is not iterable, or when `targets` is empty.
-- `bool` is rejected for integer fields.
+- `bool` and negative integers are rejected for address/index fields.
 - Does not validate target addresses against a BinaryView.
 - Does not call `Function.set_user_indirect_branches`; workflow owns that
   mutation.
@@ -1576,7 +1686,14 @@ A dict with:
 **Signature**
 
 ```python
-call_fact(call_il, target, decode_def=None, cleanup_roots=None, call_addr=None)
+call_fact(
+    call_il,
+    target,
+    decode_def=None,
+    cleanup_roots=None,
+    call_addr=None,
+    cleanup_load_roots=None,
+)
 ```
 
 **Purpose**
@@ -1587,11 +1704,16 @@ Build an indirect call recovery fact.
 
 - `call_il`: MLIL call instruction object.
 - `target`: Concrete callee address.
-- `decode_def`: Optional MLIL definition instruction that computed the target.
+- `decode_def`: Optional descriptive MLIL definition witness that computed the target;
+  it is not a rewrite target.
 - `cleanup_roots`: Optional iterable of instruction indices for call target
-  decode cleanup.
+  decode cleanup. The backend replaces these with the current call's exact SSA
+  reaching-definition slice before mutation.
 - `call_addr`: Optional call-site address override. When omitted,
   `call_il.address` is used.
+- `cleanup_load_roots`: Optional subset of `cleanup_roots` whose current
+  assignments contain loads believed to belong to the call-target definition slice;
+  the backend independently recomputes this set before mutation.
 
 **Returns**
 
@@ -1602,13 +1724,18 @@ A dict with:
 - `target`: integer callee address.
 - `decode_def`: supplied decode definition or `None`.
 - `cleanup_roots`: set of integer instruction indices.
+- `cleanup_load_roots`: set of integer instruction indices, present only when
+  non-empty.
 
 **Key behavior and limits**
 
 - Raises `MalformedRecoveryFact` when `call_il` is `None`, when `call_addr` is
-  missing or not an integer, when `target` is not an integer, or when
-  `cleanup_roots` is not an iterable of integers.
+  missing, negative, or not an integer, when `target` is not a non-negative integer, or when
+  `cleanup_roots`/`cleanup_load_roots` are not iterables of integers, or when a
+  load root is not a subset of all cleanup roots.
 - Does not validate that `target` is a call target.
+- Does not grant cleanup authority: plan indices are advisory until rebound from the
+  current call's exact SSA reaching definitions.
 - Does not apply call type adjustments or rewrite MLIL; workflow and pass
   backends own those actions.
 
@@ -1676,7 +1803,7 @@ A dict with:
 
 **Key behavior and limits**
 
-- Raises `MalformedRecoveryFact` when address fields are not integers or
+- Raises `MalformedRecoveryFact` when address fields are not non-negative integers or
   `plaintext` is not `bytes`/`bytearray`.
 - Converts `bytearray` plaintext to `bytes`.
 - Does not write comments; the string-decrypt backend owns annotation.

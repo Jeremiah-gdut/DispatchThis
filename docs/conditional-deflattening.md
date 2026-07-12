@@ -58,6 +58,9 @@ discarded if any selected rewrite cannot be emitted.
 Cleanup proof is deliberately weaker than target proof. If both targets are proved but no
 state-write instruction can be proved obsolete, the plan keeps an empty
 `obsolete_state_writes` set and still reconstructs the conditional CFG.
+Non-empty cleanup also carries exact current-MLIL write witnesses; stale owner or
+operand evidence rejects the whole copy instead of NOPing an instruction that merely
+reused the index.
 This applies only when the selected rewrite preserves execution of those writes.
 If distinct arm-exit rewrites are unavailable, cleanup or ownership uncertainty
 rejects the IF shortcut because an empty set cannot make bypassed writes execute.
@@ -70,9 +73,12 @@ This is intentionally narrower than a symbolic predicate rebuild. It does not tr
 solve state ranges, variable/variable comparisons, arbitrary multi-step state-selection
 chains, or impure branch tails. A token-width mismatch or ambiguous route also rejects the
 transition. Unsupported shapes are left intact for Binary Ninja to display normally.
-Dispatcher pass-through blocks are limited to NOP/GOTO routing and direct
-copies on the state dependency chain; unrelated assignments or externally
-observed dispatcher temporaries are not bypassed.
+Implicit dispatcher pass-through expansion is limited to `NOP* + GOTO` routing.
+Direct copies are accepted only inside an explicitly proved comparison row or
+the unique shared state latch; unrelated assignments or externally observed
+dispatcher temporaries are not bypassed. The latch must be an equal-width
+whole-variable chain shared by at least two independent target-head regions, so
+an OBB-local conditional state-selection join remains part of its OBB.
 Field, split, aliased, and unresolved struct/pointer writes that may modify the
 state channel are not ignored: the affected transition is left flattened.
 Taking either the whole state address or a field address also counts as an

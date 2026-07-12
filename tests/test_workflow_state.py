@@ -1,9 +1,15 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from plugins.DispatchThis.workflow_state import FunctionWorkflowState, ROOT_KEY
+from plugins.DispatchThis.workflow_state import (
+    FunctionWorkflowState,
+    ProfileStateMismatch,
+    ROOT_KEY,
+)
 
 
 class FakeBranch:
@@ -18,6 +24,16 @@ class FakeFunction:
         self.session_data = {}
         self.unresolved_indirect_branches = []
         self.indirect_branches = []
+        self.call_adjustments = {}
+
+    def get_call_type_adjustment(self, call_addr):
+        return self.call_adjustments.get(call_addr)
+
+    def set_call_type_adjustment(self, call_addr, adjust_type=None):
+        if adjust_type is None:
+            self.call_adjustments.pop(call_addr, None)
+        else:
+            self.call_adjustments[call_addr] = adjust_type
 
 
 def test_branch_receipts_gate_repeated_mutations_and_invalidate_calls():
@@ -37,42 +53,50 @@ def test_branch_receipts_gate_repeated_mutations_and_invalidate_calls():
     assert state.branch_updates_for(first_plan) == {}
     assert state.branch_stable(func)
 
+    func.set_call_type_adjustment(0x4000, "type-a")
     state.mark_call_adjusted(0x4000, 0x5000)
-    assert not state.call_adjustment_needed(0x4000, 0x5000)
+    assert not state.call_adjustment_needed(0x4000, "type-a")
 
     changed_plan = {0x1000: (0x2000, 0x4000)}
     assert state.branch_updates_for(changed_plan) == changed_plan
     assert state.mark_branch_applied(0x1000, changed_plan[0x1000]) is True
-    assert state.call_adjustment_needed(0x4000, 0x5000)
+    assert state.call_receipts == {}
     assert not state.branch_stable(func)
 
 
 def test_call_receipts_gate_repeated_adjustments():
-    state = FunctionWorkflowState(FakeFunction())
+    func = FakeFunction()
+    state = FunctionWorkflowState(func)
 
     assert not state.call_stable()
-    assert state.call_adjustment_needed(0x1111, 0x2222)
+    assert state.call_adjustment_needed(0x1111, "type-a")
+    func.set_call_type_adjustment(0x1111, "type-a")
     assert state.mark_call_adjusted(0x1111, 0x2222) is False
-    assert not state.call_adjustment_needed(0x1111, 0x2222)
+    assert not state.call_adjustment_needed(0x1111, "type-a")
+    assert state.call_adjustment_needed(0x1111, "type-b")
+    func.set_call_type_adjustment(0x1111, "type-b")
     assert state.mark_call_adjusted(0x1111, 0x3333) is True
-    assert not state.call_adjustment_needed(0x1111, 0x3333)
+    assert not state.call_adjustment_needed(0x1111, "type-b")
     state.mark_call_stable()
     assert state.call_stable()
 
 
 def test_call_target_receipts_feed_cleanup_without_gating_type_adjustments():
-    state = FunctionWorkflowState(FakeFunction())
+    func = FakeFunction()
+    state = FunctionWorkflowState(func)
 
     state.mark_call_cleanup_done()
     assert state.mark_call_target(0x1111, 0x2222) is False
     assert state.call_target_receipts == {0x1111: 0x2222}
-    assert state.call_adjustment_needed(0x1111, 0x2222)
+    assert state.call_adjustment_needed(0x1111, "type-a")
     assert state.call_cleanup_needed()
 
     state.mark_call_adjusted(0x1111, 0x2222)
+    func.set_call_type_adjustment(0x1111, "type-a")
     state.mark_call_cleanup_done()
     assert state.mark_call_target(0x1111, 0x3333) is True
-    assert state.call_adjustment_needed(0x1111, 0x3333)
+    assert state.call_receipts == {}
+    assert not state.call_adjustment_needed(0x1111, "type-a")
     assert state.call_cleanup_needed()
 
 
@@ -178,6 +202,37 @@ def test_stale_branch_receipts_reapply_when_bn_metadata_is_missing():
     assert state.branch_updates_for(plan) == {}
     assert state.branch_stable(func)
 
+    func.set_call_type_adjustment(0x4000, "type-a")
+    state.mark_call_adjusted(0x4000, 0x5000)
+    state.mark_call_stable()
+    state.mark_branch_applied(0x1000, plan[0x1000])
+
+    assert not state.branch_stable(func)
+    assert not state.call_stable()
+    assert state.call_receipts == {}
+
+
+def test_verified_branch_targets_require_exact_current_user_metadata():
+    func = FakeFunction()
+    state = FunctionWorkflowState(func)
+    state.mark_branch_applied(0x1000, (0x2000, 0x3000))
+    state.mark_branch_applied(0x4000, (0x5000,))
+    state.mark_branch_applied(0x6000, (0x7000, 0x8000))
+    state.mark_branch_applied(0x9000, (0xA000,))
+    state.mark_branch_applied(0xB000, (0xC000,))
+    func.indirect_branches = [
+        FakeBranch(0x1000, 0x3000),
+        FakeBranch(0x1000, 0x2000),
+        FakeBranch(0x6000, 0x7000),
+        FakeBranch(0x9000, 0xA000, auto_defined=True),
+        FakeBranch(0xB000, 0xC000),
+        FakeBranch(0xB000, 0xD000),
+    ]
+
+    assert state.verified_branch_targets() == {
+        0x1000: (0x2000, 0x3000),
+    }
+
 
 def test_cleanup_receipts_invalidate_with_phase_targets():
     state = FunctionWorkflowState(FakeFunction())
@@ -193,7 +248,7 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
     state.mark_branch_applied(0x1000, (0x2000,))
     assert state.branch_cleanup_needed()
     assert state.call_target_receipts == {}
-    assert state.call_adjustment_needed(0x4000, 0x5000)
+    assert state.call_adjustment_needed(0x4000, "type-a")
     assert state.call_cleanup_needed()
 
     state.mark_call_adjusted(0x4000, 0x6000)
@@ -201,6 +256,20 @@ def test_cleanup_receipts_invalidate_with_phase_targets():
     assert not state.call_cleanup_needed()
     state.mark_call_adjusted(0x4000, 0x7000)
     assert state.call_cleanup_needed()
+
+
+def test_stale_call_receipt_never_hides_a_changed_bn_adjustment():
+    func = FakeFunction()
+    func.set_call_type_adjustment(0x4000, "old-type")
+    state = FunctionWorkflowState(func)
+    state.mark_call_adjusted(0x4000, 0x5000)
+    state.mark_call_stable()
+    state.mark_global_stable()
+
+    assert state.call_receipts == {0x4000: 0x5000}
+    assert state.call_adjustment_needed(0x4000, "new-type")
+    assert not state.call_stable()
+    assert not state.global_stable()
 
 
 def test_old_cleanup_receipts_are_invalidated_once():
@@ -225,6 +294,22 @@ def test_old_cleanup_receipts_are_invalidated_once():
     assert state.call_cleanup_needed()
     assert state.global_receipts == {}
     assert not state.global_stable()
+
+
+def test_profile_provenance_rejects_mismatch_and_legacy_receipts():
+    func = FakeFunction()
+    state = FunctionWorkflowState(func, "dyzznb")
+    state.mark_branch_applied(0x1000, (0x2000,))
+
+    with pytest.raises(ProfileStateMismatch, match="dyzznb"):
+        FunctionWorkflowState(func, "valorant_2_6")
+
+    legacy = FakeFunction()
+    legacy.session_data[ROOT_KEY] = {
+        "branch": {"receipts": {0x1000: (0x2000,)}},
+    }
+    with pytest.raises(ProfileStateMismatch, match="legacy"):
+        FunctionWorkflowState(legacy, "dyzznb")
 
 
 if __name__ == "__main__":

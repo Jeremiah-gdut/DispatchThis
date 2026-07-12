@@ -1,10 +1,28 @@
 """MLIL copy-transform helpers for medium pass control-flow rewrites."""
 
+from collections.abc import Mapping
+
 from binaryninja import ILSourceLocation, MediumLevelILFunction
 
 
-def _instruction_index(ins, fallback):
-    return getattr(ins, "instr_index", fallback)
+def _instruction_index(ins, expected):
+    index = getattr(ins, "instr_index", None)
+    if type(index) is not int or index < 0 or index != expected:
+        raise ValueError(f"invalid current MLIL instruction index {index!r} at {expected}")
+    return index
+
+
+def _validated_rewrites(rewrites):
+    if rewrites is None:
+        return {}
+    if not isinstance(rewrites, Mapping):
+        return None
+    if any(
+        type(index) is not int or index < 0 or not callable(callback)
+        for index, callback in rewrites.items()
+    ):
+        return None
+    return dict(rewrites)
 
 
 def copied_label_for_source(mlil, instr_index):
@@ -24,9 +42,15 @@ def copy_mlil_with_instruction_rewrites(ctx, replacements, mlil=None, preludes=N
     ``preludes`` uses the same callback arguments and returns a non-empty
     iterable of expressions to append before that source instruction.
     """
-    old_mlil = mlil or getattr(ctx, "mlil", None)
-    replacements = replacements or {}
-    preludes = preludes or {}
+    old_mlil = mlil if mlil is not None else getattr(ctx, "mlil", None)
+    replacements = _validated_rewrites(replacements)
+    preludes = _validated_rewrites(preludes)
+    if (
+        replacements is None
+        or preludes is None
+        or set(replacements) & set(preludes)
+    ):
+        return old_mlil, 0
     selected = set(replacements) | set(preludes)
     if old_mlil is None or not selected:
         return old_mlil, 0
