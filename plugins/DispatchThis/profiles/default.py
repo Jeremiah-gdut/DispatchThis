@@ -1,38 +1,18 @@
-from ..passes.low.gadget_llil import resolve_llil_jump_plan
-from ..passes.medium.deflatten import compute_redirections
-from ..passes.medium.global_constants import plan_global_constant_slots as _plan_global_constant_slots
-from ..passes.medium.indirect_calls import plan_indirect_calls
-from ..passes.medium.string_decrypt import plan_string_decrypt_calls as _plan_string_decrypt_calls
+"""Compatibility profile for existing views configured with ``default``."""
+
+from . import dyzznb
 
 
 PROFILE_ID = "default"
 PROFILE_NAME = "Default"
-PROFILE_DESCRIPTION = "Built-in rules for the current DispatchThis binary."
+PROFILE_DESCRIPTION = "Compatibility alias for the bundled DYZZNB sample profile."
+U48 = dyzznb.U48
+CONST_SLOT_TYPE = dyzznb.CONST_SLOT_TYPE
 
-# Supported:
-# - branch gadget: custom
-# - indirect call gadget: custom
-# - global constants: custom
-# - correlated stores: omitted
-# - deflatten: custom
-# - string decrypt: custom
-
-
-def resolve_branch_gadget(bv, llil, known_targets=None):
-    return resolve_llil_jump_plan(bv, llil, known_targets)
-
-
-def resolve_call_gadget(bv, mlil):
-    return plan_indirect_calls(bv, mlil)
-
-
-def plan_global_constant_slots(bv, mlil):
-    return _plan_global_constant_slots(bv, mlil)
-
-
-def plan_deflatten_redirections(bv, func, mlil):
-    return compute_redirections(bv, func, mlil=mlil)
-
-
-def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
-    return _plan_string_decrypt_calls(bv, func, mlil, mlil_stable)
+# Keep historical BinaryView settings and profile provenance intact. New sample
+# semantics belong in a named profile, not in this compatibility surface.
+resolve_branch_gadget = dyzznb.resolve_branch_gadget
+resolve_call_gadget = dyzznb.resolve_call_gadget
+plan_global_constant_slots = dyzznb.plan_global_constant_slots
+plan_deflatten_redirections = dyzznb.plan_deflatten_redirections
+plan_string_decrypt_calls = dyzznb.plan_string_decrypt_calls

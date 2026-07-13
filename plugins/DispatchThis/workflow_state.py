@@ -2,7 +2,7 @@
 
 
 ROOT_KEY = "dispatchthis_workflow_state"
-CLEANUP_RECEIPT_VERSION = 3
+CLEANUP_RECEIPT_VERSION = 6
 
 
 class ProfileStateMismatch(RuntimeError):
@@ -15,8 +15,8 @@ def _fresh_state():
         "branch": {
             "stable": False,
             "receipts": {},
-            "cleanup_roots": {},
             "cleanup_done": False,
+            "cleanup_overlay_ready": False,
             "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
         "call": {
@@ -37,7 +37,6 @@ def _has_recovery_evidence(data):
     return any((
         data.get("branch", {}).get("stable", False),
         data.get("branch", {}).get("receipts"),
-        data.get("branch", {}).get("cleanup_roots"),
         data.get("call", {}).get("stable", False),
         data.get("call", {}).get("receipts"),
         data.get("call", {}).get("targets"),
@@ -58,14 +57,6 @@ def _targets_tuple(targets):
     return tuple(sorted(set(targets)))
 
 
-def _int_set(values):
-    if values is None:
-        return set()
-    if isinstance(values, int):
-        return {values}
-    return set(values)
-
-
 def _user_branch_targets(func):
     by_source = {}
     for branch in getattr(func, "indirect_branches", ()):
@@ -83,13 +74,14 @@ def _normalize_state(data):
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
-    branch["cleanup_roots"] = {
-        source: _int_set(roots)
-        for source, roots in branch.setdefault("cleanup_roots", {}).items()
-    }
+    # An instruction index only identifies one MLIL generation. Never reuse a
+    # persisted cleanup root after reanalysis can assign that index to other IL.
+    branch.pop("cleanup_roots", None)
     branch.setdefault("cleanup_done", False)
+    branch.setdefault("cleanup_overlay_ready", False)
     if branch.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
         branch["cleanup_done"] = False
+        branch["cleanup_overlay_ready"] = False
         branch["cleanup_version"] = CLEANUP_RECEIPT_VERSION
     call = data.setdefault("call", {})
     call.setdefault("stable", False)
@@ -153,16 +145,6 @@ class FunctionWorkflowState:
             if applied_targets.get(source) == targets
         }
 
-    @property
-    def branch_cleanup_roots(self):
-        return self.data["branch"]["cleanup_roots"]
-
-    def branch_cleanup_root_indices(self):
-        roots = set()
-        for root_set in self.branch_cleanup_roots.values():
-            roots.update(root_set)
-        return roots
-
     def seed_branch_receipts(self, func=None):
         """Import existing user indirect-branch metadata as branch receipts.
 
@@ -196,24 +178,11 @@ class FunctionWorkflowState:
         targets = _targets_tuple(targets)
         previous = self.branch_receipts.get(source)
         self.branch_receipts[source] = targets
-        if previous != targets:
-            self.branch_cleanup_roots.pop(source, None)
         self.data["branch"]["stable"] = False
         self.data["branch"]["cleanup_done"] = False
+        self.data["branch"]["cleanup_overlay_ready"] = False
         self.invalidate_calls()
         return previous is not None and previous != targets
-
-    def set_branch_cleanup_roots(self, source, cleanup_roots):
-        roots = _int_set(cleanup_roots)
-        previous = self.branch_cleanup_roots.get(source, set())
-        if previous == roots:
-            return False
-        if roots:
-            self.branch_cleanup_roots[source] = roots
-        else:
-            self.branch_cleanup_roots.pop(source, None)
-        self.data["branch"]["cleanup_done"] = False
-        return True
 
     def mark_branch_stable(self):
         self.data["branch"]["stable"] = True
@@ -230,10 +199,29 @@ class FunctionWorkflowState:
 
     def mark_branch_cleanup_done(self):
         self.data["branch"]["cleanup_done"] = True
+        self.data["branch"]["cleanup_overlay_ready"] = False
         self.data["branch"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
     def invalidate_branch_cleanup(self):
         self.data["branch"]["cleanup_done"] = False
+        self.data["branch"]["cleanup_overlay_ready"] = False
+
+    def mark_branch_cleanup_overlay_ready(self):
+        """Permit one downstream current-MLIL cleanup fixed-point check.
+
+        This is set only after the branch translator NOPs and settles decode
+        assignments in its current installed overlay. It is deliberately not a
+        receipt: the next translator attempt or any phase invalidation clears
+        it before a new MLIL generation can be trusted.
+        """
+        self.data["branch"]["cleanup_done"] = False
+        self.data["branch"]["cleanup_overlay_ready"] = True
+
+    def clear_branch_cleanup_overlay_ready(self):
+        self.data["branch"]["cleanup_overlay_ready"] = False
+
+    def branch_cleanup_overlay_ready(self):
+        return bool(self.data["branch"].get("cleanup_overlay_ready", False))
 
     @property
     def call_receipts(self):
@@ -250,6 +238,7 @@ class FunctionWorkflowState:
         except Exception:  # noqa: BLE001
             needed = True
         if needed:
+            self.invalidate_call_cleanup()
             self.invalidate_call_stable()
         return needed
 

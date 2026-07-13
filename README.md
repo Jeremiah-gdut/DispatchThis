@@ -1,126 +1,107 @@
 # DispatchThis
 
-DispatchThis is a Binary Ninja workflow plugin for ARM64 ELF deobfuscation. It
-recovers indirect branch targets, indirect call targets, selected global
-constants, decrypted string comments, and flattened dispatcher edges at the IL
-level. It does not patch bytes.
+DispatchThis 是用于 ARM64 ELF 反混淆的 Binary Ninja 工作流插件。它在 IL
+层恢复间接跳转目标、间接调用目标、部分全局常量、解密字符串注释和控制流
+平坦化调度器边；不会修改二进制字节。
 
 ![license: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Binary Ninja 5.3+](https://img.shields.io/badge/Binary%20Ninja-5.3%2B-black)
 
-## What it does
+## 功能
 
-The target obfuscator flattens control flow with a compare-tree dispatcher keyed
-on a state variable. Original basic blocks set opaque state tokens, route through
-decode gadgets, and return to the dispatcher.
+目标混淆器以状态变量为键，用比较树调度器平坦化控制流。原始基本块写入不透明
+状态令牌，经解码 gadget 回到调度器。
 
-For the current ARM64 obfuscation breakdown including indirect branches, control
-flow flattening, global constants, and indirect call gadgets, see
-[`docs/obfuscation.md`](docs/obfuscation.md).
+当前 ARM64 混淆形态（间接跳转、控制流平坦化、全局常量和间接调用 gadget）见
+[`docs/obfuscation.md`](docs/obfuscation.md)。
 
-## Installation
+## 安装
 
-### Prerequisites
+### 前提条件
 
-- Binary Ninja (see [Compatibility](#compatibility)).
+- Binary Ninja（见[兼容性](#兼容性)）。
 
-### Install the plugin
+### 安装插件
 
-Copy `plugins/DispatchThis` into your Binary Ninja user plugins directory and
-restart Binary Ninja.
+将 `plugins/DispatchThis` 复制到 Binary Ninja 用户插件目录后，重启 Binary
+Ninja。
 
-For example: `~/.binaryninja/plugins/DispatchThis`
+例如：`~/.binaryninja/plugins/DispatchThis`
 
-| OS | Plugins path |
+| 操作系统 | 插件目录 |
 | --- | --- |
 | **macOS** | `~/Library/Application Support/Binary Ninja/plugins/` |
 | **Linux** | `~/.binaryninja/plugins/` |
 | **Windows** | `%APPDATA%\Binary Ninja\plugins` |
 
-## Usage
+## 使用方法
 
-The fastest way to test one function is the function context menu. With the
-target function open, right-click inside the function and use:
+测试单个函数最快的方法是函数右键菜单。打开目标函数后，在函数内右键并选择：
 
-- **DispatchThis ▸ Profile ▸ Use default** or **Use dyzznb** - selects the active
-  resolver profile for the current BinaryView.
-- **DispatchThis ▸ Toggle Resolver** - toggles only indirect jump/call resolving
-  for the current function.
-- **DispatchThis ▸ Toggle Deflatten** - toggles only deflattening for the current
-  function.
-- **DispatchThis ▸ Toggle String Decrypt** - toggles only string decrypt for the
-  current function.
-- **DispatchThis ▸ Disable All** - disables all DispatchThis function toggles for
-  the current function.
+- **DispatchThis ▸ Profile ▸ Use default** 或 **Use dyzznb**：为当前
+  BinaryView 选择解析 profile。`default` 为历史设置保留的 dyzznb 兼容入口；新适配请选用
+  具名 profile。
+- **DispatchThis ▸ Toggle Resolver**：仅切换当前函数的间接跳转/调用解析。
+- **DispatchThis ▸ Toggle Deflatten**：仅切换当前函数的去平坦化。
+- **DispatchThis ▸ Toggle String Decrypt**：仅切换当前函数的字符串解密。
+- **DispatchThis ▸ Disable All**：关闭当前函数的全部 DispatchThis 开关。
 
-Default shortcuts are `Alt+Q` for Resolver, `Alt+W` for Deflatten,
-`Alt+E` for String Decrypt, and `Alt+R` for Disable All.
+默认快捷键：Resolver 为 `Alt+Q`，Deflatten 为 `Alt+W`，String Decrypt 为
+`Alt+E`，Disable All 为 `Alt+R`。
 
-The same toggles are also available from the **Function Settings** context menu.
-If Binary Ninja does not reanalyze automatically after changing a setting, run
-*Analysis ▸ Reanalyze All Functions*.
+相同开关也在 **Function Settings** 右键菜单中。若改设置后 Binary Ninja 没有
+自动重新分析，执行 *Analysis ▸ Reanalyze All Functions*。
 
-**Deflatten depends on indirect branch resolving.** The Deflatten setting also enables the
-indirect branch and indirect call resolvers, so the full CFG can become visible before the
-deflattener reconstructs dispatcher edges. Exact obsolete state writes are NOPed in the
-same atomic replacement as those edge rewrites, so unresolved indirect branches usually
-leave the deflatten workflow phase idle.
+**去平坦化依赖间接跳转解析。** Deflatten 设置也会启用间接跳转和间接调用解析，
+以便在重建调度器边前获得完整 CFG。已严格证明过时的状态写入会与边改写在同一次
+原子替换中 NOP；未解析的间接跳转通常会使去平坦化阶段保持空闲。
 
-## Pipeline at a glance
+## 流水线概览
 
-Eight workflow activities are inserted per function. One is the no-op
-`Indirect Jumps/Calls` setting activity; the remaining seven are recovery workflow phases:
+每个函数插入八个工作流 activity。其中 `Indirect Jumps/Calls` 是无操作的设置
+activity，其余七个为恢复阶段：
 
-1. **Indirect Jumps/Calls toggle** (LLIL insertion point) - surfaces the per-function
-   resolver setting.
-2. **Indirect branch resolver** (LLIL) - rewrites each decode-gadget `jump(reg)` into
-   `jump(const)` in the current IL. The workflow callback owns user branch metadata and
-   analysis-completion tag cleanup scheduling. Re-runs to a fixpoint as the function grows.
-3. **Indirect call resolver** (MLIL) - folds each import call's decode and rewrites the
-   call destination to a constant pointer. The workflow callback owns call type adjustments
-   and call-target phase cleanup.
-4. **Branch condition translator** (MLIL) - turns resolved two-target indirect branch
-   switches back into `if` expressions, then runs branch-target phase cleanup.
-5. **Global constant resolver** (MLIL) - types read-only global pointer slots as constants.
-6. **Correlated store recovery** (MLIL) - restores path-specific global stores when a
-   merge has lost the relationship between sibling PHI values.
-7. **String decrypt** (MLIL, *opt-in*) - waits for branch, call, and global phases to
-   stabilize for the current function, then annotates recognized direct decrypt calls.
-8. **Deflattener** (MLIL, *opt-in*) - recovers the dispatcher cluster and builds an atomic
-   replacement MLIL where each original basic block's dispatcher jump becomes a direct
-   `goto` to the real successor. Conditional transitions redirect private arm exits,
-   redirect one private shared semantic-tail exit, or shortcut the original condition
-   only after the skipped state channel is proved private. Equality, inequality, and signed or
-   unsigned ordering dispatchers are routed by replaying each concrete state token. Every
-   private dispatcher exit and each exactly proven obsolete state write is rewritten in the
-   same all-or-nothing copy-transform. Comparison aliases must be whole-variable,
-   equal-width copies established inside their own dispatcher rows; unresolved field,
-   split, aliased, escaped-address, or pointer state mutations leave the affected
-   transition intact. Stale current-MLIL plan objects are rejected before rewriting.
+1. **Indirect Jumps/Calls 开关**（LLIL 插入点）：暴露按函数生效的解析器设置。
+2. **间接跳转解析器**（LLIL）：将每个解码 gadget `jump(reg)` 改写为当前 IL 中的
+   `jump(const)`。工作流回调负责用户跳转元数据和分析完成后的标签清理调度；随着
+   函数扩展会反复运行直至不再变化。
+3. **间接调用解析器**（MLIL）：折叠每个导入调用的解码，并将调用目标改写为常量
+   指针。工作流回调负责调用类型调整和调用目标阶段清理。
+4. **分支条件翻译器**（MLIL）：将已解析的双目标间接跳转 switch 还原为 `if`
+   表达式，然后执行分支目标阶段清理。
+5. **全局常量解析器**（MLIL）：将只读全局指针槽位标注为常量。
+6. **关联存储恢复**（MLIL）：当合并丢失同级 PHI 值之间的对应关系时，恢复按路径
+   区分的全局存储。
+7. **字符串解密**（MLIL，*可选*）：等待当前函数的分支、调用和全局阶段稳定后，
+   为已识别的直接解密调用添加注释。
+8. **去平坦化器**（MLIL，*可选*）：恢复调度器比较簇，并构造原子替换 MLIL，
+   将每个原始基本块的调度器跳转改为真实后继的直接 `goto`。条件转移会改写私有臂
+   出口、私有共享语义尾部出口，或只在被跳过的状态通道已证明私有时捷径化原始条件。
+   相等、不等及有符号/无符号有序调度器均通过重放具体状态令牌路由。所有私有调度器
+   出口和每一条被精确证明过时的状态写入，都在同一全有或全无的 copy-transform 中
+   改写。比较别名必须是其各自调度器行内建立的整变量、等宽复制；未解决的字段、
+   split、aliased、地址逃逸或指针状态修改会保留受影响的转移。改写前会拒绝过期的
+   当前 MLIL 计划对象。
 
-Full details, ordering rationale, and the `session_data` contract are in
-[`docs/pipeline.md`](docs/pipeline.md); workflow phase coordination rules live in
-[`docs/adr/0003-function-phase-state-for-workflow.md`](docs/adr/0003-function-phase-state-for-workflow.md).
-Conditional deflattening has its own write-up in
-[`docs/conditional-deflattening.md`](docs/conditional-deflattening.md). A file-by-file map
-of the source is in [`docs/files.md`](docs/files.md).
+完整细节、排序原因及 `session_data` 契约见
+[`docs/pipeline.md`](docs/pipeline.md)；工作流阶段协调规则见
+[`docs/adr/0003-function-phase-state-for-workflow.md`](docs/adr/0003-function-phase-state-for-workflow.md)。
+条件去平坦化另见 [`docs/conditional-deflattening.md`](docs/conditional-deflattening.md)。
+源码逐文件说明见 [`docs/files.md`](docs/files.md)。
 
-## Scope
+## 范围
 
-DispatchThis is scoped to ARM64 ELF samples handled by explicit resolver
-profiles. Legacy non-ARM64 sample support is out of scope; add new binary support
-as a named resolver profile instead of widening `default`.
+DispatchThis 面向由显式解析 profile 处理的 ARM64 ELF 样本。旧版非 ARM64 样本不在
+范围内；应为新二进制添加具名解析 profile，而不是扩大 `default` 兼容入口的适用范围。
 
-## Compatibility
+## 兼容性
 
-Designed for **Binary Ninja 5.3 or newer** and tested on **5.3.9757
-(a99f2380)**. Exact patch and build versions are not enforced; releases before
-5.3 are unsupported. Control-flow rewrites use Binary Ninja's copy-transform APIs and
-`AnalysisContext.set_mlil_function`; legacy MLIL assignment fallbacks are unsupported.
-For each enabled function, the earliest resolver callback verifies DispatchThis's
-required analysis environment at Function scope; those overrides remain in place after
-the plugin is disabled.
+设计目标为 **Binary Ninja 5.3 或更高版本**，已在 **5.3.9757 (a99f2380)** 上测试。
+不强制具体 patch/build 版本；5.3 以前不受支持。控制流改写使用 Binary Ninja 的
+copy-transform API 和 `AnalysisContext.set_mlil_function`，不支持旧式 MLIL 赋值回退。
+每个启用函数最早的解析回调都会在 Function 作用域检查 DispatchThis 所需的分析环境；
+这些覆盖设置在插件禁用后仍会保留。
 
-## License
+## 许可证
 
-Released under the [MIT License](LICENSE).
+按 [MIT License](LICENSE) 发布。

@@ -1,23 +1,17 @@
-# Resolver profiles
+# 解析配置（profile）
 
-Resolver profiles adapt DispatchThis to one binary without moving workflow
-ownership into profile-specific code.
+解析 profile 让 DispatchThis 适配一个二进制，同时不把工作流所有权移入 profile 特定代码。
 
-A profile is selected per BinaryView with
-`analysis.plugins.dispatchThis.resolverProfile`. Function workflow enablement is
-still per function; selecting a profile does not enable DispatchThis for every
-function in the view.
+通过 `analysis.plugins.dispatchThis.resolverProfile` 按 BinaryView 选择 profile。函数工作流
+启用状态仍按函数控制；选择 profile 不会为视图中每个函数启用 DispatchThis。
 
-Function phase state records the profile ID that produced its recovery evidence.
-The UI refuses to switch profiles while any function in the view still contains
-branch, call, cleanup, or global recovery evidence. Workflow also fails closed on
-legacy evidence without provenance or evidence bound to another profile. Empty
-function state may be rebound because it contains no analysis claim to reuse.
+函数阶段状态记录产生其恢复证据的 profile ID。只要视图内任一函数仍含分支、调用、清理或
+全局恢复证据，UI 就拒绝切换 profile。工作流也会对没有来源的旧证据或绑定到其他 profile
+的证据按失败即关闭处理。空函数状态没有可复用的分析断言，因此可重新绑定。
 
-## Agent workflow
+## 代理工作流
 
-Do not start by editing code. First collect the binary facts below. If a field is
-not used by the binary, write `none`.
+不要先改代码。先收集以下二进制事实；二进制未使用的字段填写 `none`。
 
 ```text
 binary:
@@ -46,7 +40,6 @@ call_gadget:
   mlil_excerpt:
   notes:
   decoded_callee:
-  cleanup_roots:
 
 global_constants:
   slot_addr:
@@ -75,51 +68,46 @@ string_decrypt:
 validation:
   pytest:
   bn_commands:
-  manual_bndb_checks:
+  raw_binary_checks:
 ```
 
-Then implement the smallest profile that satisfies those facts:
+然后实现满足这些事实的最小 profile：
 
-1. Add `plugins/DispatchThis/profiles/<profile_id>.py`.
-2. Define the metadata and only the semantic hooks this binary supports.
-3. Omit unsupported hooks; the registry normalizes them to an empty result.
-4. Register the module in `plugins/DispatchThis/profiles/__init__.py`.
-5. Complete the definition of done below.
+1. 新增 `plugins/DispatchThis/profiles/<profile_id>.py`。
+2. 定义元数据，并且只定义该二进制支持的语义 hook。
+3. 省略不支持的 hook；注册表会将其规范为空结果。
+4. 在 `plugins/DispatchThis/profiles/__init__.py` 注册模块。
+5. 完成下方的完成定义。
 
-`llil_excerpt` and `mlil_excerpt` must be raw Binary Ninja IL copied from the
-target. Notes may explain the interpretation, but they do not replace the raw
-IL. Keep excerpts short, but include the addresses, instruction indices,
-variables, and key expressions needed to reproduce the shape.
+`llil_excerpt` 和 `mlil_excerpt` 必须是从目标复制的原始 Binary Ninja IL。notes 可以说明
+解释，但不能替代原始 IL。片段应短，但必须包括可复现形态所需的地址、指令索引、变量和
+关键表达式。
 
-Keep binary-specific matching in the profile file until two profiles need the
-same helper or the profile becomes hard to read. Shared profile code must move
-to stable helper modules under `helpers/`, or a profile must explicitly delegate
-to another named profile. Do not add `profiles/_shared.py`,
-`profiles/<family>_shared.py`, or any resolver engine/DSL/base class.
-Shared `passes/` code is for stable workflow-level capabilities, not for one
-binary or speculative reuse.
+二进制特定匹配应保留在 profile 文件中，直到两个 profile 都需要相同 helper 或 profile
+难以阅读。共享 profile 代码必须移至 `helpers/` 下稳定 helper 模块，或显式委托给另一
+具名 profile。不得添加 `profiles/_shared.py`、`profiles/<family>_shared.py`，或任何解析
+引擎/DSL/base class。共享 `passes/` 代码服务于稳定的工作流级能力，而非单一二进制或推测
+性的复用。
 
-## Naming
+## 命名
 
-Create one profile per binary by default. `PROFILE_ID` must be stable lowercase
-snake_case, such as `dy_libdyzznb_202607` or `dyzznb_main`.
+默认每个二进制一个 profile。`PROFILE_ID` 必须是稳定的小写 snake_case，例如
+`dy_libdyzznb_202607` 或 `dyzznb_main`。
 
-Do not use vague names such as `sample1`, `new_profile`, `current`, or
-`default2`. Do not include full local paths, usernames, customer names, or other
-sensitive project labels. `PROFILE_NAME` can be human-readable, and
-`PROFILE_DESCRIPTION` should state the binary identity and supported capabilities.
+不得使用 `sample1`、`new_profile`、`current` 或 `default2` 等模糊名称。不得包含完整本地
+路径、用户名、客户名或其他敏感项目标签。`PROFILE_NAME` 可以面向人类阅读，
+`PROFILE_DESCRIPTION` 应说明二进制身份和支持能力。
 
-## Sensitive information
+## 敏感信息
 
-Profile code, metadata, tests, comments, and capability matrices must not include
-local absolute paths, usernames, customer names, private sample sources, or other
-sensitive project labels. If traceability is needed, use a file basename, date,
-hash prefix, or another non-sensitive identifier.
+profile 代码、元数据、测试、注释和能力矩阵不得包含本地绝对路径、用户名、客户名、私有
+样本来源或其他敏感项目标签。需要可追溯性时，使用文件 basename、日期、hash prefix 或
+其他非敏感标识。
 
-## Capability matrix
+## 能力矩阵
 
-Every binary profile must declare which semantic hooks are custom, aliases, or
-intentionally omitted. Keep this near the top of the profile module as a comment:
+每个二进制 profile 都必须声明哪些语义 hook 是自定义、别名或刻意省略。将下列注释放在
+profile 模块顶部附近：
 
 ```text
 Supported:
@@ -127,7 +115,7 @@ Supported:
 - indirect call gadget: alias valorant_2_6
 - global constants: custom
 - correlated stores: omitted
-- deflatten: alias default
+- deflatten: alias dyzznb
 - string decrypt: omitted
 
 Validation:
@@ -135,72 +123,59 @@ Validation:
 - call: 0x...
 ```
 
-This distinguishes "not needed by this binary" from "not implemented yet".
+这样可区分“该二进制不需要”与“尚未实现”。
 
-## Reuse
+## 复用
 
-A binary profile may reuse behavior only through stable helper modules or by
-explicitly aliasing a hook from another named profile:
+二进制 profile 只能通过稳定 helper 模块复用行为，或从另一个具名 profile 显式别名 hook：
 
 ```python
-from . import default
+from . import dyzznb
 
-resolve_branch_gadget = default.resolve_branch_gadget
+resolve_branch_gadget = dyzznb.resolve_branch_gadget
 ```
 
-Use a wrapper only when the profile intentionally changes arguments or behavior.
+只有 profile 有意改变参数或行为时才使用 wrapper。
 
-A profile may not import recovery pass modules directly. The current
-`default` profile is the temporary exception because it is the facade for the
-existing pass backend; specialized profiles should use helpers or explicit
-profile delegation instead.
+profile 不得导入会应用 IL 改写、提交 workflow context 或触发重新分析的后端，也不得直接
+调用这些 mutation API。具名 profile 可以调用既有只读 planner，将该样本的 gadget 形态、公式
+和验证条件绑定为 recovery fact 或 plan；真正的 apply 仍留在 pass/workflow。
 
-Do not add profile base classes, factories, mixins, shared profile modules, or
-automatic inheritance. The profile module must make hook ownership obvious:
-document which hooks reuse another profile and which hooks are binary-specific.
+不得添加 profile base class、factory、mixin、共享 profile 模块或自动继承。profile 模块必须
+明确 hook 所有权：记录哪些 hook 复用另一个 profile、哪些 hook 是二进制特定的。
 
-Do not change `profiles/default.py` while adding a new binary profile unless the
-task is explicitly to fix the current default binary. Reuse default by aliasing
-its hooks. Widening default behavior for a new binary risks regressing the
-existing default binary.
+新增二进制 profile 时不得扩大 `profiles/default.py` 的行为；它只保留历史设置的兼容别名。
+应通过具名 profile 或稳定 helper 复用 hook。为了新二进制扩大兼容 profile 会有回归已有视图
+设置的风险。
 
-## Helper authoring path
+## 辅助函数编写路径
 
-Profile helpers are inspection primitives, not a resolver engine. A resolver
-profile still owns binary-specific recognition, target formulas, and the recovery
-facts it returns. The recovery backend owns CFG recovery, call-target
-application, global slot typing, branch condition translation, IL rewrites, phase
-receipts, and cleanup application.
+Profile helper 是检查 primitive，不是解析引擎。解析 profile 仍拥有二进制特定识别、目标
+公式和它返回的恢复事实；恢复后端拥有 CFG 恢复、调用目标应用、全局槽位类型设置、分支
+条件翻译、IL 改写、阶段回执及清理应用。
 
-Bundled profiles should import helper modules at module level and call through
-the module names:
+内置 profile 应在模块级导入 helper 模块，并通过模块名调用：
 
 ```python
 from ..helpers import facts, llil, memory, mlil
 ```
 
-This is the stable import surface. Do not import private helper implementation
-details, and do not build profile base classes, pattern DSLs, automatic resolver
-engines, or external profile loaders around the helpers.
-For detailed helper API signatures and behavior, see [`API.md`](API.md).
+这是稳定导入面。不要导入私有 helper 实现细节，也不要围绕 helper 构建 profile base class、
+模式 DSL、自动解析引擎或外部 profile loader。详细 helper API 签名与行为见
+[`API.md`](API.md)。
 
-Use the helper modules by IL level and purpose:
+按 IL 层和用途使用 helper 模块：
 
-- `llil`: indirect-jump iteration, register definition peeling, and
-  `const_values` for PHI-aware constant candidate sets.
-- `mlil`: direct/indirect call iteration, variable definition peeling,
-  constant/value extraction, single-value constant folding, expression walking
-  and operation queries, variable/state-token normalization, concrete dispatcher
-  comparison parsing/evaluation, address/slot extraction, store checks, and
-  cleanup-root discovery.
-- `memory`: explicit-width little-endian reads, section checks, and target or
-  address validation.
-- `facts`: branch, call, global constant, and string decrypt recovery-fact
-  builders.
+- `llil`：间接跳转遍历、寄存器定义剥离，以及对 PHI 感知的具体常量候选集合
+  `const_values`。
+- `mlil`：直接/间接调用遍历、变量定义剥离、常量/值提取、单值常量折叠、表达式遍历和
+  operation 查询、变量/状态令牌规范化、具体调度器比较解析/计算、地址/槽位提取、store
+  检查。
+- `memory`：显式宽度的小端读取、section 检查、目标或地址校验。
+- `facts`：分支、调用、全局常量和字符串解密恢复事实构造器。
 
-Keep hook code focused on the binary shape. For example, an indirect-call hook
-may use MLIL helpers to find a candidate and facts helpers to build the result,
-but it should leave call type adjustment and cleanup to workflow:
+hook 代码应聚焦二进制形态。例如间接调用 hook 可用 MLIL helper 找到候选、用 facts helper
+构造结果，但调用类型调整和清理留给工作流：
 
 ```python
 def resolve_call_gadget(bv, mlil_func):
@@ -209,22 +184,16 @@ def resolve_call_gadget(bv, mlil_func):
         target = mlil.fold_constant_value(bv, mlil_func, call_il.dest)
         if target is None or not memory.is_known_callee(bv, target):
             continue
-        roots = mlil.cleanup_roots_for_expr(mlil_func, call_il.dest)
-        out.append(facts.call_fact(call_il, target, cleanup_roots=roots))
+        out.append(facts.call_fact(call_il, target))
     return out
 ```
 
-Cleanup roots are instruction-index sets. They identify top-level IL
-instructions that belong to the profile's decode slice, such as assignment
-instructions feeding a recovered branch or call target. Expression indices are
-backend replacement details used only at the final `replace_expr` site, after the
-backend has mapped current SSA/non-SSA IL and decided whether cleanup is safe.
+profile 不提供 cleanup 指令索引。分支翻译器和调用后端各自在同一次当前 MLIL callback 中
+构造精确 slice；表达式索引仅是后端替换细节，绝不跨重新分析写入 fact 或 session state。
 
-`llil.const_values(bv, ssa, expr)` returns a complete set of concrete candidates,
-or `None` when any semantic path is unknown. Multiple values mean the expression
-has several viable candidates, often from a PHI merge or loop-carried value. If
-a profile formula needs exactly one table base, key, or offset, enforce both
-completeness and cardinality at the call site:
+`llil.const_values(bv, ssa, expr)` 返回完整具体候选集合；任一语义路径未知时返回 `None`。
+多个值表示表达式有多个可行候选，常由 PHI 合并或循环携带值产生。profile 公式需要恰好
+一个表基址、key 或 offset 时，调用点必须同时检查完整性和基数：
 
 ```python
 offsets = llil.const_values(bv, ssa, offset_expr)
@@ -233,41 +202,34 @@ if offsets is None or len(offsets) != 1:
 offset = next(iter(offsets))
 ```
 
-`const_values` does not perform CFG path disambiguation. A profile may narrow a
-PHI only from complete binary-specific path evidence; it must never keep the
-known arms of an otherwise unknown result.
+`const_values` 不做 CFG 路径消歧。profile 只可根据完整的二进制特定路径证据缩小 PHI；
+绝不能保留其他未知结果中已知的臂。
 
-Global constant helpers provide inspection primitives. They can walk MLIL,
-extract constant slot addresses, read qword slots, check sections, detect stores,
-and build global constant facts, but the profile or pass still decides which
-slot-use shapes, offsets, sections, and resolved addresses are valid. Do not move
-an automatic global-constant planner into `helpers`.
+全局常量 helper 提供检查 primitive：遍历 MLIL、提取常量槽位地址、读取 qword 槽位、检查
+section、检测 store 和构造全局常量事实；仍由 profile 决定哪些槽位使用形态、offset、section
+和已解析地址有效。不得将自动全局常量规划器移入 `helpers`。
 
-String decrypt and deflatten algorithms are not part of the stable helper
-surface. Profiles may implement `plan_string_decrypt_calls` and
-`plan_deflatten_redirections` using reusable helper primitives, but comment
-writing and MLIL rewriting remain backend responsibilities.
+字符串解密和去平坦化算法不属于稳定 helper 表面。profile 可使用可复用 helper primitive
+实现 `plan_string_decrypt_calls` 和 `plan_deflatten_redirections`，但注释写入和 MLIL 改写
+仍是后端职责。
 
-## When adaptation fails
+## 适配失败时
 
-Escalate in this order:
+按以下顺序升级：
 
-1. Recheck the binary facts. Missing or summarized IL is not enough to implement
-   a shape safely.
-2. Add or tighten one failing test for the hook that misses the shape.
-3. Extend the binary profile's private helper.
-4. If two binary profiles need the same extension, move it to a stable helper
-   module or explicitly delegate the hook to the profile that owns that shape.
-5. If the blocker is workflow receipts, cleanup replay, phase ordering, or a BN
-   mutation boundary, stop profile work and diagnose or redesign that shared
-   contract first.
+1. 重新检查二进制事实。缺失或概述性 IL 不足以安全实现形态。
+2. 为漏识别该形态的 hook 添加或收紧一个失败测试。
+3. 扩展该二进制 profile 的私有 helper。
+4. 两个二进制 profile 都需要相同扩展时，将它移至稳定 helper 模块，或显式将 hook 委托
+   给拥有该形态的 profile。
+5. 若阻碍是工作流回执、清理重放、阶段顺序或 BN 修改边界，停止 profile 工作，先诊断或
+   重构该共享契约。
 
-Do not change `workflow.py` to make one binary profile pass unless the change is
-a deliberate general contract change.
+不得为了让一个二进制 profile 通过就修改 `workflow.py`，除非这是一项有意的通用契约变更。
 
-## Contract
+## 契约
 
-Each profile module must expose metadata:
+每个 profile 模块必须暴露元数据：
 
 ```python
 PROFILE_ID = "dyzznb_main_202607"
@@ -275,7 +237,7 @@ PROFILE_NAME = "DYZZNB main 2026-07"
 PROFILE_DESCRIPTION = "Rules for dyzznb_main_202607 branch and call gadgets."
 ```
 
-It may expose any of these six semantic capability hooks:
+可暴露下列六个语义能力 hook 中任意一个：
 
 ```python
 
@@ -298,48 +260,39 @@ def plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
     return []
 ```
 
-Missing hooks mean that the profile does not support that capability;
-`resolver_profile_from_module()` supplies one shared empty-result function to
-the workflow-facing `ResolverProfile`. A hook attribute that exists but is not
-callable is rejected as a profile error. This keeps hook names semantic without
-requiring boilerplate no-op functions, a profile base class, or a dispatch DSL.
+缺失 hook 表示 profile 不支持该能力；`resolver_profile_from_module()` 为面向工作流的
+`ResolverProfile` 提供一个共享无结果函数。存在但不可调用的 hook 属性会作为 profile
+错误拒绝。这样 hook 名保持语义化，同时不要求样板 no-op 函数、profile base class 或
+dispatch DSL。
 
-## Recovery facts
+## 恢复事实
 
-`resolve_branch_gadget(bv, llil, known_targets=None)` returns branch facts:
+`resolve_branch_gadget(bv, llil, known_targets=None)` 返回分支事实：
 
 ```python
 {
     "source": 0x1000,
     "dest_expr_index": 42,
     "targets": (0x2000, 0x3000),
-    "cleanup_roots": {123, 124},
     "jump_il": jump_il,
 }
 ```
 
-Build the fact from the exact current LLIL witness so repeated coordinates cannot
-disagree:
+必须从精确当前 LLIL 见证构造事实，避免重复坐标产生不一致：
 
 ```python
-return facts.branch_fact(jump_il, targets, cleanup_roots=cleanup_roots)
+return facts.branch_fact(jump_il, targets)
 ```
 
-`source` is derived from `jump_il.address`, while `dest_expr_index` is derived
-from `jump_il.dest.expr_index`. `targets` must contain valid target addresses.
-`dest_expr_index` is used only for current-LLIL presentation rewrites;
-workflow owns `Function.set_user_indirect_branches`. `cleanup_roots` is optional
-and must contain instruction indices rooted in branch-target decode garbage.
-Bundled resolvers also retain the exact current `jump_il` witness; the backend
-rejects stale, missing, or same-source conflicting witnesses before any rewrite
-or metadata submission. Workflow supplies `known_targets` only for receipts whose
-complete target tuples exactly match Binary Ninja's current non-auto user branch
-metadata. A resolver may skip those sources as an already verified frontier, but
-must freshly recognize every other source. Callers must not pass an unverified
-cache: receipt-only, missing, automatic, subset, superset, or changed metadata is
-not `known_targets`, and it is never a fallback for failed current decoding.
+`source` 从 `jump_il.address` 得出，`dest_expr_index` 从 `jump_il.dest.expr_index` 得出。
+`targets` 必须包含有效目标地址。`dest_expr_index` 仅用于当前 LLIL 展示改写；工作流拥有
+`Function.set_user_indirect_branches`。内置解析器还保留精确当前 `jump_il` 见证；任一改写或元数据提交前，后端拒绝过期、
+缺失或同源冲突见证。工作流仅向完整目标元组与 Binary Ninja 当前非自动用户分支元数据精确
+一致的回执提供 `known_targets`。解析器可将这些源作为已验证前沿跳过，但必须重新识别其他
+所有源。调用者不得传入未验证缓存：仅回执、缺失、自动、子集、超集或已变更元数据不是
+`known_targets`，也绝不是当前解码失败的回退。
 
-`resolve_call_gadget(bv, mlil)` returns call facts:
+`resolve_call_gadget(bv, mlil)` 返回调用事实：
 
 ```python
 {
@@ -347,22 +300,15 @@ not `known_targets`, and it is never a fallback for failed current decoding.
     "call_addr": call_il.address,
     "target": 0x5000,
     "decode_def": decode_def,
-    "cleanup_roots": {123, 124},
-    "cleanup_load_roots": {123},
 }
 ```
 
-Workflow owns call type adjustments and cleanup receipt handling. `cleanup_roots`
-must describe the call-target decode slice, not unrelated constants. The backend
-rebinds `call_il` and the descriptive `decode_def` to exact current non-SSA MLIL, but
-rewrites only `call_il.dest`. Before cleanup it replaces both root sets with the exact current SSA
-reaching-definition slice. PHIs are followed completely; partial, split, or aliased
-definitions disable cleanup. `cleanup_load_roots` is optional and must be a subset of
-`cleanup_roots`; it permits SSA-dead load assignments to be removed without treating
-arbitrary loads as pure or consulting incomplete xrefs. Profile-supplied instruction
-indices are advisory only and never authorize a mutation after reanalysis.
+工作流拥有调用类型调整和清理回执处理。后端将 `call_il` 和描述性 `decode_def` 重新绑定到
+精确当前非 SSA MLIL，但仅改写 `call_il.dest`。清理前，后端从当前调用的完整 SSA 到达定义
+切片推导 root 和可移除 load；部分、split 或 aliased 定义禁用清理并保持 cleanup receipt
+开放。这样 profile 无需重复扫描、也不能用过期指令索引授权修改。
 
-`plan_global_constant_slots(bv, mlil)` returns global constant facts:
+`plan_global_constant_slots(bv, mlil)` 返回全局常量事实：
 
 ```python
 {
@@ -371,13 +317,11 @@ indices are advisory only and never authorize a mutation after reanalysis.
 }
 ```
 
-Evidence relevant to the binary shape, such as an observed value, resolved
-address, or use site, remains private to the profile.
-Workflow owns `BinaryView.define_user_data_var` and function global-phase
-receipts.
+与二进制形态相关的证据（观察值、已解析地址或使用点等）保留在 profile 私有范围内。工作流
+拥有 `BinaryView.define_user_data_var` 和函数全局阶段回执。
 
-`plan_correlated_store_rewrites(bv, func, mlil)` returns plans for moving a
-join-block store back into the predecessor arms that own its correlated values:
+`plan_correlated_store_rewrites(bv, func, mlil)` 返回将 join-block store 移回拥有其关联值的
+前驱臂的计划：
 
 ```python
 {
@@ -390,11 +334,9 @@ join-block store back into the predecessor arms that own its correlated values:
 }
 ```
 
-The profile proves the PHI-arm correlation and concrete addresses. The backend
-owns the atomic MLIL copy-transform.
+profile 证明 PHI-臂关联和具体地址；后端拥有原子 MLIL copy-transform。
 
-`plan_deflatten_redirections(bv, func, mlil)` returns deflatten redirection
-plans:
+`plan_deflatten_redirections(bv, func, mlil)` 返回去平坦化重定向计划：
 
 ```python
 {
@@ -407,75 +349,49 @@ plans:
 }
 ```
 
-Profiles recognize the binary-specific dispatcher/state-write shape. Every
-unconditional plan must include all private dispatcher exits for that original
-region, and concrete token replay from every exit must prove the same target.
-For conditional plans, every path in each arm must terminate at a dispatcher
-entry and establish the same token. Work bypassed by a rewrite must stay on the
-state-selection dependency chain; modeled semantics may remain in a private
-shared-exit region because that whole region still executes. Multiple valid
-candidates must be rejected rather than ordered implicitly.
-Supported variable/constant dispatcher comparisons are `E`, `NE`, and signed or
-unsigned `LT`, `LE`, `GT`, and `GE`; comparison operand order and token width are
-part of the evidence. Profiles do not need to solve symbolic intervals.
+profile 识别二进制特定的调度器/状态写入形态。每个无条件计划必须包含该原始区域所有私有
+调度器出口，且从每个出口进行的具体令牌重放都必须证明同一目标。条件计划中，每条臂内
+每条路径都必须终止于调度器入口并建立同一令牌。被改写绕过的工作必须留在状态选择依赖链
+上；已建模语义可保留在私有共享出口区域中，因为整个区域仍会执行。多个有效候选必须被
+拒绝，而非隐式排序。支持的变量/常量调度器比较为 `E`、`NE` 及有符号/无符号
+`LT`、`LE`、`GT`、`GE`；比较操作数顺序和令牌宽度属于证据。profile 无需求解符号区间。
 
-`obsolete_state_writes` is a `set[int]` of exact current-MLIL instruction
-indices proved redundant because of that plan's redirection. Target proof and
-cleanup proof are independent: an uncertain target produces no plan, while
-uncertain cleanup produces a valid plan with an empty set. The backend validates
-and applies every selected exit/conditional rewrite and every exact NOP in one
-atomic copy-transform. Workflow publishes `dispatchthis_mlil_stable` only after
-installing that replacement; it does not publish token/variable cleanup maps.
-An external entry into a selected conditional arm rejects the plan because the
-exit mutation would affect an unproved foreign path. Profiles that recognize
-state stores through pointers must require one complete, unique definition
-chain to `&state`, with each definition dominating its use; historical
-assignment to a pointer variable is not sufficient.
+`obsolete_state_writes` 是 `set[int]`，包含因该计划重定向而证明冗余的精确当前 MLIL
+指令索引。目标证明和清理证明相互独立：目标不确定不产生计划；清理不确定产生带空集合的
+有效计划。后端在一个原子 copy-transform 中校验并应用所有已选出口/条件改写和每个精确
+NOP。工作流只在替换安装后发布 `dispatchthis_mlil_stable`；不发布令牌/变量清理 map。所选
+条件臂的外部入口会拒绝计划，因为出口修改会影响没有证明的外来路径。通过指针识别状态
+store 的 profile 必须要求一条完整、唯一、通向 `&state` 的定义链，且每个定义支配其使用；
+指针变量的历史赋值不足以证明。
 
-Conditional plans set `rewrite_mode` to `arm_exits` when `exit_targets` can
-redirect distinct arm GOTOs directly from the state-selection tails while
-preserving their execution. `rewrite_mode: condition` shortcuts `if_il` and is
-valid only with complete private cleanup plus proof that the skipped state
-channel has no non-dispatcher observer. Profiles must reject a condition
-shortcut when that stronger proof is unavailable.
+当 `exit_targets` 能直接从状态选择尾部重定向不同的臂 GOTO 且保留其执行时，条件计划将
+`rewrite_mode` 设为 `arm_exits`。`rewrite_mode: condition` 捷径化 `if_il`，仅在完整私有
+清理及被跳过状态通道不存在非调度器观察者的证明下有效。缺少该更强证明时，profile 必须
+拒绝条件捷径。
 
-Profiles must not classify arbitrary assignment blocks as dispatcher routing.
-Only NOP/GOTO routing and direct copies among proved state-dependency variables
-may be replayed as token-preserving. Selected comparison rows obey the same
-restriction, and dispatcher-derived temporaries must not be observed outside
-the dispatcher.
+profile 不得将任意赋值块归为调度器路由。只有 NOP/GOTO 路由和已证明状态依赖变量之间的
+直接复制可作为保留令牌的操作重放。所选比较行遵守同一限制，且调度器派生临时变量不得在
+调度器外被观察。
 
-The comparison variable must have one unique, equal-width whole-variable
-`MLIL_VAR`/`MLIL_VAR_SSA` direct-copy chain
-earlier in its own dispatcher row. All selected rows must end those chains at
-the same state input. A definition elsewhere that merely traces back to state is
-not sufficient because the comparison may consume a stale value. Treat
-`SET_VAR_FIELD`, `SET_VAR_SPLIT`, aliased writes, and `STORE_STRUCT` as possible
-state mutations; if the resulting token cannot be proved exactly, reject the
-transition. Treat `ADDRESS_OF_FIELD` as an address escape just like
-`ADDRESS_OF`.
+比较变量必须具有一条在其自身调度器行中更早的、唯一等宽整变量
+`MLIL_VAR`/`MLIL_VAR_SSA` 直接复制链。所有所选行必须以同一状态输入结束这些链。仅在其他
+位置追溯到状态的定义不足以证明，因为比较可能消费过期值。`SET_VAR_FIELD`、
+`SET_VAR_SPLIT`、aliased 写入和 `STORE_STRUCT` 应视为可能状态修改；无法精确证明所得令牌
+时，拒绝转移。`ADDRESS_OF_FIELD` 应与 `ADDRESS_OF` 一样视为地址逃逸。
 
-If an IF condition is a predicate variable, map its SSA definition through
-`non_ssa_form`, verify the exact current non-SSA instruction earlier in the same
-row, and use that comparison instruction
-as the copy-chain use point. A state copy performed after the comparison cannot
-justify replay. Calls, syscalls, and intrinsics that receive a possible state
-pointer invalidate the token even if an earlier write was constant. A state
-address stored into memory also makes later unknown calls possible mutations,
-even without an explicit pointer argument. Exact zero-offset pointer copies may
-be supported when their unique, width-preserving definition chain dominates the
-store; field values, truncating copies, and other pointer arithmetic remain
-possible mutations and must reject the transition.
+IF 条件为谓词变量时，将其 SSA 定义经 `non_ssa_form` 映射，验证同一行更早的精确当前非
+SSA 指令，并将该比较指令作为复制链使用点。比较之后执行的状态复制不能证明重放。收到
+可能状态指针的 call、syscall 和 intrinsic 即使先前写入为常量，也会使令牌失效。状态地址
+存入内存后，即便后续未知调用没有显式指针参数，也都是可能状态修改。唯一且保宽的定义链
+支配 store 时可支持精确零偏移指针复制；字段值、截断复制及其他指针算术仍是可能修改，
+必须拒绝转移。
 
-Profiles and shared helpers must key variables/registers by Binary Ninja's real
-identity/equality, not by display names from `str` or `repr`. Auxiliary
-comparison rows may be treated as dispatcher blocks only after their full prefix
-passes routing-purity validation; otherwise they remain visible to observer
-proofs. Address escape includes a pointer stored in memory or retained through
-an addressed holder. After escape, unknown effects and non-exact stores reject
-the transition; `MLIL_UNIMPL` and `MLIL_UNIMPL_MEM` reject unconditionally.
+profile 和共享 helper 必须使用 Binary Ninja 真实 identity/equality，而非 `str` 或 `repr`
+显示名来键控变量/register。辅助比较行只有完整前缀通过路由纯度校验后，才可视为调度器
+块；否则它们仍可见于观察者证明。地址逃逸包括指针存入内存或经取地址 holder 保留。逃逸
+后未知效果和非精确 store 会拒绝转移；`MLIL_UNIMPL` 和 `MLIL_UNIMPL_MEM` 无条件拒绝。
 
-`plan_string_decrypt_calls(bv, func, mlil, mlil_stable)` returns string facts:
+`plan_string_decrypt_calls(bv, func, mlil, mlil_stable)` 返回字符串事实：
 
 ```python
 {
@@ -486,36 +402,36 @@ the transition; `MLIL_UNIMPL` and `MLIL_UNIMPL_MEM` reject unconditionally.
 }
 ```
 
-Workflow writes comments through the string-decrypt pass. The hook may use
-`mlil_stable` to require a decrypt callee to be deflattened first.
+工作流通过字符串解密 pass 写注释。hook 可使用 `mlil_stable`，要求解密 callee 已先完成去
+平坦化。
 
-## Boundaries
+## 边界
 
-Profiles are pure recognizers. They must not call:
+profile 是纯识别器，不得调用：
 
 - `Function.set_user_indirect_branches`
 - `Function.set_call_type_adjustment`
 - `BinaryView.add_analysis_completion_event`
 - `BinaryView.define_user_data_var`
-- MLIL rewrite APIs such as `replace_expr`, `finalize`, or `generate_ssa_form`
-- comment-writing APIs
+- `replace_expr`、`finalize` 或 `generate_ssa_form` 等 MLIL 改写 API
+- 注释写入 API
 
-Those mutations stay in workflow callbacks or existing apply functions so phase
-receipts, reanalysis gates, and cleanup invalidation remain centralized.
+这些修改保留在工作流回调或既有 apply 函数中，使阶段回执、重新分析门控和清理失效保持
+集中管理。
 
-Profiles must not auto-detect and switch the active profile. If a binary needs a
-different profile, set `analysis.plugins.dispatchThis.resolverProfile` explicitly.
+profile 不得自动检测或切换活动 profile。二进制需要其他 profile 时，应显式设置
+`analysis.plugins.dispatchThis.resolverProfile`。
 
-## Definition of done
+## 完成定义
 
-- The binary facts template is complete; unused capabilities are marked `none`.
-- The profile has a stable non-sensitive ID, name, and description.
-- The capability matrix identifies custom hooks, aliases, and omitted capabilities.
-- Every declared hook is callable; unsupported capabilities are omitted.
-- The profile is registered and passes resolver contract validation.
-- Every real hook has a focused test.
-- `pytest -q` passes.
-- Validation on a freshly opened raw binary is recorded after a full Binary Ninja restart.
-- `workflow.py`, `profiles/default.py`, and `passes/` are unchanged unless the
-  change explicitly updates a shared contract.
-- Profile code, tests, and docs contain no sensitive local/project information.
+- 二进制事实模板完整，未使用能力标为 `none`。
+- profile 有稳定、非敏感的 ID、名称和说明。
+- 能力矩阵标明自定义 hook、别名和省略能力。
+- 每个声明的 hook 都可调用；不支持能力被省略。
+- profile 已注册并通过解析器契约校验。
+- 每个真实 hook 都有聚焦测试。
+- `pytest -q` 通过。
+- 完整重启 Binary Ninja 后，已在新打开的原始二进制上记录验证。
+- 除非修改明确更新共享契约，`workflow.py` 与 mutation pass 未改动；`profiles/default.py`
+  只允许同步既有具名 profile 的兼容别名。
+- profile 代码、测试和文档不含敏感本地/项目信息。

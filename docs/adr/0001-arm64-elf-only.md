@@ -1,3 +1,5 @@
-# Specialize DispatchThis for ARM64 ELF samples only
+# DispatchThis 仅面向 ARM64 ELF 样本
 
-DispatchThis will explicitly target ARM64 ELF analysis for the user's recurring sample family. This is accepted because the original plugin's pipeline is useful, but preserving legacy non-ARM64 sample support would keep unrelated decode, call, and state-machine assumptions in the way of the narrower daily-analysis workflow.
+DispatchThis 将明确面向用户反复遇到的 ARM64 ELF 样本族。原插件的 pipeline 仍有价值，但若
+保留旧有的非 ARM64 样本支持，会让无关的解码、调用和状态机假设干扰更窄的日常分析流程，
+因此接受这一取舍。

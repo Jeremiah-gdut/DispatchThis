@@ -111,6 +111,12 @@ def fake_apply_decrypted_string_comments(_func, facts):
     return len(facts)
 
 
+def fake_settle_cleanup_decode(*args, **kwargs):
+    cleanup_decode_calls.append((args, kwargs))
+    result = cleanup_decode_results.pop(0) if cleanup_decode_results else 0
+    return result if isinstance(result, tuple) else (result, True)
+
+
 def fake_active_profile(bv):
     active_profile_calls.append(bv)
     return types.SimpleNamespace(
@@ -127,7 +133,6 @@ def fake_active_profile(bv):
 class FakeWorkflowState:
     receipts = {}
     verified_receipts = None
-    branch_cleanup_root_map = {}
     unmapped = set()
     marked_stable = False
     stable = False
@@ -147,6 +152,7 @@ class FakeWorkflowState:
     calls_stable = False
     cleanup_invalidated = False
     branch_cleanup = True
+    branch_cleanup_overlay = False
     call_cleanup = True
 
     def __init__(self, _func, _profile_id=None):
@@ -169,16 +175,6 @@ class FakeWorkflowState:
     def branch_receipts(self):
         return FakeWorkflowState.receipts
 
-    @property
-    def branch_cleanup_roots(self):
-        return FakeWorkflowState.branch_cleanup_root_map
-
-    def branch_cleanup_root_indices(self):
-        roots = set()
-        for root_set in FakeWorkflowState.branch_cleanup_root_map.values():
-            roots.update(root_set)
-        return roots
-
     def branch_updates_for(self, _resolved_targets):
         return self.updates
 
@@ -191,21 +187,21 @@ class FakeWorkflowState:
     def mark_branch_cleanup_done(self):
         FakeWorkflowState.branch_cleanup_marked = True
         FakeWorkflowState.branch_cleanup = False
+        FakeWorkflowState.branch_cleanup_overlay = False
 
     def invalidate_branch_cleanup(self):
         FakeWorkflowState.branch_cleanup = True
+        FakeWorkflowState.branch_cleanup_overlay = False
 
-    def set_branch_cleanup_roots(self, source, cleanup_roots):
-        roots = set(cleanup_roots or ())
-        previous = FakeWorkflowState.branch_cleanup_root_map.get(source, set())
-        if previous == roots:
-            return False
-        if roots:
-            FakeWorkflowState.branch_cleanup_root_map[source] = roots
-        else:
-            FakeWorkflowState.branch_cleanup_root_map.pop(source, None)
+    def mark_branch_cleanup_overlay_ready(self):
         FakeWorkflowState.branch_cleanup = True
-        return True
+        FakeWorkflowState.branch_cleanup_overlay = True
+
+    def clear_branch_cleanup_overlay_ready(self):
+        FakeWorkflowState.branch_cleanup_overlay = False
+
+    def branch_cleanup_overlay_ready(self):
+        return FakeWorkflowState.branch_cleanup_overlay
 
     def mark_branch_applied(self, source, targets):
         FakeWorkflowState.applied.append((source, targets))
@@ -276,6 +272,7 @@ class FakeWorkflowState:
     def invalidate_cleanup(self):
         FakeWorkflowState.cleanup_invalidated = True
         FakeWorkflowState.branch_cleanup = True
+        FakeWorkflowState.branch_cleanup_overlay = False
         FakeWorkflowState.call_cleanup = True
 
 
@@ -299,26 +296,22 @@ _FAKE_MODULES = {
         apply_indirect_call_rewrites=fake_apply_indirect_call_rewrites,
         current_call_receipt_plans=fake_current_call_receipt_plans,
         plan_indirect_calls=forbidden_plan_indirect_calls,
-        validate_current_call_plans=lambda _mlil, plans: list(plans),
+        validate_current_call_plans=lambda _mlil, plans: [
+            {**plan, "cleanup_proven": plan.get("cleanup_proven", True)}
+            for plan in plans
+        ],
     ),
     "plugins.DispatchThis.passes.medium.branch_conditions": types.SimpleNamespace(
         translate_indirect_branch_conditions=lambda _bv, _ctx, mlil: (mlil, 0, set()),
     ),
     "plugins.DispatchThis.passes.medium.phase_cleanup": types.SimpleNamespace(
-        cleanup_decode=lambda *args, **kwargs: (
-            cleanup_decode_calls.append((args, kwargs)),
-            cleanup_decode_results.pop(0) if cleanup_decode_results else 0,
-        )[1],
+        settle_cleanup_decode=fake_settle_cleanup_decode,
     ),
     "plugins.DispatchThis.helpers.mlil": types.SimpleNamespace(
         set_roots_before=lambda *args, **kwargs: (
             set_roots_before_calls.append((args, kwargs)),
             set_roots_before_results.pop(0) if set_roots_before_results else set(),
         )[1],
-    ),
-    "plugins.DispatchThis.passes.medium.global_constants": types.SimpleNamespace(
-        CONST_SLOT_TYPE="uint64_t",
-        plan_global_constant_slots=forbidden_plan_global_constant_slots,
     ),
     "plugins.DispatchThis.passes.medium.string_decrypt": types.SimpleNamespace(
         apply_decrypted_string_comments=fake_apply_decrypted_string_comments,
@@ -541,7 +534,10 @@ def test_call_phase_stops_before_pending_branch_recovery_when_settings_fail(monk
 
 def test_deflatten_workflow_runs_without_branch_mirror_state():
     FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.call_cleanup = False
     calls.clear()
     active_profile_calls.clear()
     deflatten_rewrite_results.clear()
@@ -571,13 +567,19 @@ def test_deflatten_workflow_runs_without_branch_mirror_state():
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     assert "dispatchthis_llil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.call_cleanup = True
     deflatten_rewrite_results.clear()
 
 
 def test_deflatten_retries_without_publishing_state_after_commit_failure():
     FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.call_cleanup = False
     calls.clear()
     deflatten_rewrite_results.clear()
     ctx = FakeContext()
@@ -602,48 +604,18 @@ def test_deflatten_retries_without_publishing_state_after_commit_failure():
     assert commits == [(ctx, first_replacement), (ctx, second_replacement)]
     assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
     FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
-    deflatten_rewrite_results.clear()
-
-
-def test_deflatten_failures_revoke_prior_stability():
-    FakeWorkflowState.stable = True
-    FakeWorkflowState.globals_stable = True
-    other_function = 0x7000
-    old_commit = workflow._commit_mlil
-
-    try:
-        for rewrite_result, commit_result in (
-            ((None, 0), True),
-            ((object(), 0), True),
-            ((object(), 1), False),
-        ):
-            calls.clear()
-            deflatten_rewrite_results[:] = [rewrite_result]
-            ctx = FakeContext()
-            ctx.view.session_data = {
-                "dispatchthis_mlil_stable": {
-                    ctx.function.start: True,
-                    other_function: True,
-                },
-            }
-            workflow._commit_mlil = lambda _ctx, _mlil: commit_result
-
-            workflow.deflatten_mlil(ctx)
-            stable = ctx.view.session_data["dispatchthis_mlil_stable"]
-            assert ctx.function.start not in stable
-            assert stable[other_function] is True
-    finally:
-        workflow._commit_mlil = old_commit
-
-    FakeWorkflowState.stable = False
-    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.call_cleanup = True
     deflatten_rewrite_results.clear()
 
 
 def test_deflatten_waits_for_global_phase_stability():
     FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.call_cleanup = False
     calls.clear()
     ctx = FakeContext()
 
@@ -651,54 +623,156 @@ def test_deflatten_waits_for_global_phase_stability():
 
     assert calls == []
     FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.call_cleanup = True
 
 
-def test_deflatten_early_returns_revoke_prior_stability():
-    other_function = 0x7000
-    old_ensure = workflow._ensure_analysis_settings
-    old_active_profile = workflow.active_profile
+def test_deflatten_waits_for_branch_cleanup_confirmation():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.call_cleanup = False
+    calls.clear()
+    set_roots_before_results[:] = [{21621}]
 
-    def assert_revoked(ctx):
-        ctx.view.session_data = {
-            "dispatchthis_mlil_stable": {
-                ctx.function.start: True,
-                other_function: True,
-            },
-        }
-        workflow.deflatten_mlil(ctx)
-        stable = ctx.view.session_data["dispatchthis_mlil_stable"]
-        assert ctx.function.start not in stable
-        assert stable[other_function] is True
+    workflow.deflatten_mlil(FakeContext())
+
+    assert calls == []
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.call_cleanup = True
+    set_roots_before_results.clear()
+
+
+def test_deflatten_accepts_a_current_branch_cleanup_fixed_point():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_overlay = True
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    calls.clear()
+    deflatten_rewrite_results.clear()
+    set_roots_before_results[:] = [set()]
+    ctx = FakeContext()
+    deflatten_rewrite_results[:] = [(object(), 1)]
+
+    workflow.deflatten_mlil(ctx)
+
+    assert calls[0] == ("compute", ctx.function.start, ctx.mlil)
+    assert calls[1][0] == "rewrite"
+    assert FakeWorkflowState.branch_cleanup is True
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.call_cleanup = True
+    FakeWorkflowState.branch_cleanup_overlay = False
+    FakeWorkflowState.receipts = {}
+    deflatten_rewrite_results.clear()
+    set_roots_before_results.clear()
+
+
+def test_deflatten_requires_a_current_cleanup_overlay_for_empty_roots():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_overlay = False
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    calls.clear()
+    set_roots_before_calls.clear()
+    set_roots_before_results.clear()
+    ctx = FakeContext()
+
+    workflow.deflatten_mlil(ctx)
+
+    assert calls == []
+    assert set_roots_before_calls == []
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.call_cleanup = True
+    FakeWorkflowState.receipts = {}
+
+
+def test_failed_branch_cleanup_never_opens_the_current_overlay_gate():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_overlay = False
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    cleanup_decode_results[:] = [(0, False)]
+    calls.clear()
+    cleanup_decode_calls.clear()
+    set_roots_before_calls.clear()
+    set_roots_before_results.clear()
+    old_translate = workflow.translate_indirect_branch_conditions
+    workflow.translate_indirect_branch_conditions = lambda _bv, _ctx, mlil: (mlil, 0, set())
+    ctx = FakeContext()
 
     try:
-        FakeWorkflowState.stable = True
-        FakeWorkflowState.globals_stable = True
-        no_mlil = FakeContext()
-        no_mlil._mlil = None
-        assert_revoked(no_mlil)
-
-        workflow._ensure_analysis_settings = lambda _func: False
-        assert_revoked(FakeContext())
-        workflow._ensure_analysis_settings = old_ensure
-
-        FakeWorkflowState.stable = False
-        assert_revoked(FakeContext())
-
-        FakeWorkflowState.stable = True
-        FakeWorkflowState.globals_stable = False
-        assert_revoked(FakeContext())
-
-        FakeWorkflowState.globals_stable = True
-        workflow.active_profile = lambda _bv: types.SimpleNamespace(
-            id="test",
-            plan_deflatten_redirections=lambda *_args: []
-        )
-        assert_revoked(FakeContext())
+        workflow.translate_branches_mlil(ctx)
+        workflow.deflatten_mlil(ctx)
     finally:
-        workflow._ensure_analysis_settings = old_ensure
-        workflow.active_profile = old_active_profile
+        workflow.translate_indirect_branch_conditions = old_translate
+
+    assert cleanup_decode_calls == [((ctx.mlil, set(), "branch"), {})]
+    assert FakeWorkflowState.branch_cleanup_overlay is False
+    assert calls == []
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.call_cleanup = True
+    FakeWorkflowState.receipts = {}
+    cleanup_decode_results.clear()
+
+
+def test_deflatten_waits_for_call_cleanup_confirmation():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = False
+    FakeWorkflowState.call_cleanup = True
+    calls.clear()
+
+    workflow.deflatten_mlil(FakeContext())
+
+    assert calls == []
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+
+
+def test_branch_translation_revokes_prior_stability_before_a_new_attempt():
+    other_function = 0x7000
+    old_enabled = workflow._deflatten_enabled
+    ctx = FakeContext()
+    ctx.view.session_data = {
+        "dispatchthis_mlil_stable": {
+            ctx.function.start: True,
+            other_function: True,
+        },
+    }
+
+    try:
         FakeWorkflowState.stable = False
-        FakeWorkflowState.globals_stable = False
+        FakeWorkflowState.branch_cleanup_overlay = True
+        workflow._deflatten_enabled = lambda _func: True
+        workflow.translate_branches_mlil(ctx)
+    finally:
+        workflow._deflatten_enabled = old_enabled
+        FakeWorkflowState.stable = False
+
+    stable = ctx.view.session_data["dispatchthis_mlil_stable"]
+    assert ctx.function.start not in stable
+    assert stable[other_function] is True
+    assert FakeWorkflowState.branch_cleanup_overlay is False
 
 
 def test_branch_resolver_passes_only_verified_receipts_as_known_targets(monkeypatch):
@@ -708,7 +782,6 @@ def test_branch_resolver_passes_only_verified_receipts_as_known_targets(monkeypa
     }
     verified = {0x1000: (0x2000, 0x3000)}
     monkeypatch.setattr(FakeWorkflowState, "verified_receipts", verified)
-    FakeWorkflowState.branch_cleanup_root_map = {}
     FakeWorkflowState.unmapped = {0x1000}
     FakeWorkflowState.marked_stable = False
     FakeWorkflowState.stable = False
@@ -763,40 +836,6 @@ def test_branch_resolver_skips_llil_rewrite_for_multi_target_only_plan(monkeypat
     )
 
     assert rewrite_calls == []
-
-
-def test_branch_resolver_records_profile_cleanup_roots_without_target_mutation():
-    FakeWorkflowState.branch_cleanup_root_map = {}
-    FakeWorkflowState.updates = {}
-    ctx = FakeContext()
-    state = FakeWorkflowState(ctx.function)
-
-    workflow._submit_branch_mutations(
-        ctx.view,
-        ctx.function,
-        state,
-        {0x1000: (0x2000, 0x3000)},
-        {0x1000: {31, 32}},
-    )
-
-    assert FakeWorkflowState.branch_cleanup_root_map == {0x1000: {31, 32}}
-
-
-def test_branch_resolver_preserves_cleanup_roots_when_fact_omits_optional_field():
-    FakeWorkflowState.branch_cleanup_root_map = {0x1000: {31, 32}}
-    FakeWorkflowState.updates = {}
-    ctx = FakeContext()
-    state = FakeWorkflowState(ctx.function)
-
-    workflow._submit_branch_mutations(
-        ctx.view,
-        ctx.function,
-        state,
-        {0x1000: (0x2000, 0x3000)},
-        {},
-    )
-
-    assert FakeWorkflowState.branch_cleanup_root_map == {0x1000: {31, 32}}
 
 
 def test_branch_resolver_does_not_stabilize_unparsed_indirect_jumps():
@@ -1026,7 +1065,11 @@ def test_call_resolver_uses_active_profile_without_workflow_state():
 
     assert active_profile_calls == [ctx.view]
     assert call_plan_calls == [(ctx.view, ctx.mlil)]
-    assert call_rewrite_calls == [(ctx, ctx.mlil, [plan])]
+    assert call_rewrite_calls == [(
+        ctx,
+        ctx.mlil,
+        [{**plan, "cleanup_proven": True}],
+    )]
     assert FakeWorkflowState.call_targets == [(0x4000, 0x5000)]
     assert len(FakeWorkflowState.call_adjustment_checks) == 1
     assert len(FakeWorkflowState.call_adjustment_checks[0][1].parameters) == 1
@@ -1205,7 +1248,7 @@ def test_call_cleanup_respects_one_shot_receipt():
 
 def test_call_cleanup_does_not_infer_ownership_from_a_call_receipt_location():
     FakeWorkflowState.stable = True
-    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.call_cleanup = True
     FakeWorkflowState.call_cleanup_marked = False
     FakeWorkflowState.call_receipts = {0x8FB744: 0x8E04F8}
     FakeWorkflowState.call_target_receipts = {}
@@ -1219,13 +1262,13 @@ def test_call_cleanup_does_not_infer_ownership_from_a_call_receipt_location():
 
     assert cleanup_decode_calls == []
     assert ctx.committed is False
-    assert FakeWorkflowState.call_cleanup is False
+    assert FakeWorkflowState.call_cleanup is True
     assert FakeWorkflowState.call_cleanup_marked is False
     FakeWorkflowState.stable = False
     FakeWorkflowState.call_receipts = {}
 
 
-def test_call_cleanup_retries_after_current_mlil_was_changed():
+def test_call_cleanup_keeps_its_receipt_open_after_current_mlil_nops():
     FakeWorkflowState.stable = True
     FakeWorkflowState.call_cleanup = True
     FakeWorkflowState.call_cleanup_marked = False
@@ -1243,17 +1286,43 @@ def test_call_cleanup_retries_after_current_mlil_was_changed():
     call_plan_results[:] = [plan]
 
     workflow.resolve_calls_mlil(ctx)
+
+    assert cleanup_decode_calls == [((ctx.mlil, {21621}, "call"), {})]
+    assert ctx.committed is False
+    assert FakeWorkflowState.call_cleanup is True
+    assert FakeWorkflowState.call_cleanup_marked is False
+    assert FakeWorkflowState.call_stable_marked is True
+    FakeWorkflowState.stable = False
     call_plan_results.clear()
+    cleanup_decode_results.clear()
+
+
+def test_call_cleanup_stays_open_when_the_current_ssa_slice_is_unproven():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_cleanup = True
+    FakeWorkflowState.call_cleanup_marked = False
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
+    cleanup_decode_calls.clear()
+    ctx = FakeContext()
+    callee_type = _function_type(0)
+    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=callee_type)
+    call_plan_results[:] = [{
+        "call_il": types.SimpleNamespace(address=0x8FB744, params=[]),
+        "call_addr": 0x8FB744,
+        "target": 0x8E04F8,
+        "cleanup_proven": False,
+    }]
+
     workflow.resolve_calls_mlil(ctx)
 
-    assert cleanup_decode_calls == [
-        ((ctx.mlil, {21621}, "call"), {}),
-        ((ctx.mlil, set(), "call"), {}),
-    ]
-    assert ctx.committed is False
-    assert FakeWorkflowState.call_cleanup_marked is True
+    assert cleanup_decode_calls == []
+    assert FakeWorkflowState.call_cleanup is True
+    assert FakeWorkflowState.call_cleanup_marked is False
+    assert FakeWorkflowState.call_stable_marked is True
+    assert FakeWorkflowState.call_target_receipts == {0x8FB744: 0x8E04F8}
     FakeWorkflowState.stable = False
-    cleanup_decode_results.clear()
+    call_plan_results.clear()
 
 
 def test_branch_translation_waits_for_global_stability(monkeypatch):
@@ -1280,7 +1349,6 @@ def test_branch_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.globals_stable = True
     FakeWorkflowState.branch_cleanup = False
     FakeWorkflowState.receipts = {}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     FakeWorkflowState.branch_cleanup_marked = False
     cleanup_decode_calls.clear()
     ctx = FakeContext()
@@ -1295,14 +1363,13 @@ def test_branch_cleanup_respects_one_shot_receipt():
     FakeWorkflowState.branch_cleanup = True
 
 
-def test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil():
+def test_branch_cleanup_keeps_its_receipt_open_after_current_mlil_nops():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
     FakeWorkflowState.branch_cleanup = False
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
     cleanup_decode_results[:] = [1]
     set_roots_before_results[:] = [{21621}]
@@ -1322,14 +1389,13 @@ def test_branch_cleanup_replays_when_receipt_is_stale_in_current_mlil():
     set_roots_before_results.clear()
 
 
-def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
+def test_branch_cleanup_merges_translation_and_current_receipt_roots():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
     FakeWorkflowState.branch_cleanup = True
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {0x8DB6F8: {31, 32}}
     cleanup_decode_calls.clear()
     cleanup_decode_results[:] = [0]
     set_roots_before_results[:] = [{21621}]
@@ -1347,14 +1413,13 @@ def test_branch_cleanup_merges_profile_translation_and_fallback_roots():
         workflow.translate_indirect_branch_conditions = old_translate
 
     assert translated == [(ctx.view, ctx, ctx.mlil)]
-    assert cleanup_decode_calls == [((ctx.mlil, {31, 32, 44, 21621}, "branch"), {})]
+    assert cleanup_decode_calls == [((ctx.mlil, {44, 21621}, "branch"), {})]
     assert FakeWorkflowState.branch_cleanup_marked is True
     assert ctx.committed is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
     FakeWorkflowState.receipts = {}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_results.clear()
     set_roots_before_results.clear()
 
@@ -1400,10 +1465,9 @@ def test_branch_cleanup_retries_when_replacement_install_fails():
     FakeWorkflowState.branch_cleanup = True
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
-    cleanup_decode_results[:] = [0, 0]
-    set_roots_before_results[:] = [{21621}, {21621}]
+    cleanup_decode_results[:] = [0]
+    set_roots_before_results[:] = [{21621}]
     old_translate = workflow.translate_indirect_branch_conditions
     old_commit = workflow._commit_mlil
     ctx = FakeContext()
@@ -1415,10 +1479,14 @@ def test_branch_cleanup_retries_when_replacement_install_fails():
         {44},
     )
     install_results = [False, True]
-    workflow._commit_mlil = lambda ctx_arg, mlil_arg: (
-        commits.append((ctx_arg, mlil_arg)),
-        install_results.pop(0),
-    )[1]
+    def commit_translated_mlil(ctx_arg, mlil_arg):
+        commits.append((ctx_arg, mlil_arg))
+        installed = install_results.pop(0)
+        if installed:
+            ctx_arg._mlil = mlil_arg
+        return installed
+
+    workflow._commit_mlil = commit_translated_mlil
 
     try:
         workflow.translate_branches_mlil(ctx)
@@ -1429,10 +1497,7 @@ def test_branch_cleanup_retries_when_replacement_install_fails():
         workflow.translate_indirect_branch_conditions = old_translate
         workflow._commit_mlil = old_commit
 
-    assert cleanup_decode_calls == [
-        ((translated_mlil, {44, 21621}, "branch"), {}),
-        ((translated_mlil, {44, 21621}, "branch"), {}),
-    ]
+    assert cleanup_decode_calls == [((translated_mlil, {44, 21621}, "branch"), {})]
     assert commits == [(ctx, translated_mlil), (ctx, translated_mlil)]
     assert FakeWorkflowState.branch_cleanup is False
     assert FakeWorkflowState.branch_cleanup_marked is True
@@ -1451,7 +1516,6 @@ def test_branch_cleanup_retries_when_translation_is_rejected():
     FakeWorkflowState.branch_cleanup = True
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
     cleanup_decode_results[:] = [0]
     set_roots_before_results[:] = [{21621}]
@@ -1465,7 +1529,12 @@ def test_branch_cleanup_retries_when_translation_is_rejected():
     ]
     commits = []
     workflow.translate_indirect_branch_conditions = lambda *_args: translation_results.pop(0)
-    workflow._commit_mlil = lambda ctx_arg, mlil_arg: (commits.append((ctx_arg, mlil_arg)), True)[1]
+    def commit_translated_mlil(ctx_arg, mlil_arg):
+        commits.append((ctx_arg, mlil_arg))
+        ctx_arg._mlil = mlil_arg
+        return True
+
+    workflow._commit_mlil = commit_translated_mlil
 
     try:
         workflow.translate_branches_mlil(ctx)
@@ -1497,7 +1566,6 @@ def test_branch_cleanup_confirms_no_change_without_mlil_install():
     FakeWorkflowState.branch_cleanup = True
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
     cleanup_decode_results[:] = [0]
     set_roots_before_results[:] = [{21621}]
@@ -1527,16 +1595,14 @@ def test_branch_cleanup_confirms_no_change_without_mlil_install():
     set_roots_before_results.clear()
 
 
-def test_branch_cleanup_runs_on_translated_mlil():
+def test_branch_translation_commits_current_mlil_before_local_cleanup_replanning():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
     FakeWorkflowState.branch_cleanup = True
     FakeWorkflowState.branch_cleanup_marked = False
     FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
-    FakeWorkflowState.branch_cleanup_root_map = {}
     cleanup_decode_calls.clear()
-    cleanup_decode_results[:] = [1]
     set_roots_before_results[:] = [{21621}]
     old_translate = workflow.translate_indirect_branch_conditions
     old_commit = workflow._commit_mlil
@@ -1548,21 +1614,98 @@ def test_branch_cleanup_runs_on_translated_mlil():
         1,
         {44},
     )
-    workflow._commit_mlil = lambda ctx_arg, mlil_arg: (committed.append((ctx_arg, mlil_arg)), True)[1]
+    def commit_current_mlil(ctx_arg, mlil_arg):
+        committed.append((ctx_arg, mlil_arg))
+        ctx_arg._mlil = mlil_arg
+        return True
+
+    def settle_current_mlil(mlil_arg, roots, phase_name, **kwargs):
+        assert mlil_arg is translated_mlil
+        cleanup_decode_calls.append(((mlil_arg, roots, phase_name), kwargs))
+        return 1, True
+
+    workflow._commit_mlil = commit_current_mlil
+    old_settle_cleanup = workflow.settle_cleanup_decode
+    workflow.settle_cleanup_decode = settle_current_mlil
 
     try:
         workflow.translate_branches_mlil(ctx)
     finally:
         workflow.translate_indirect_branch_conditions = old_translate
         workflow._commit_mlil = old_commit
+        workflow.settle_cleanup_decode = old_settle_cleanup
 
     assert cleanup_decode_calls == [((translated_mlil, {44, 21621}, "branch"), {})]
     assert committed == [(ctx, translated_mlil)]
+    assert FakeWorkflowState.branch_cleanup is True
+    assert FakeWorkflowState.branch_cleanup_marked is False
+    assert FakeWorkflowState.branch_cleanup_overlay is True
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
     FakeWorkflowState.receipts = {}
+    FakeWorkflowState.branch_cleanup_overlay = False
     cleanup_decode_results.clear()
+    set_roots_before_results.clear()
+
+
+def test_branch_translation_defers_deflatten_to_downstream_activity():
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.calls_stable = True
+    FakeWorkflowState.globals_stable = True
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.call_cleanup = False
+    FakeWorkflowState.branch_cleanup_marked = False
+    FakeWorkflowState.receipts = {0x8DB6F8: (0x8DB6FC, 0x8DB700)}
+    calls.clear()
+    cleanup_decode_calls.clear()
+    set_roots_before_results[:] = [{21621}]
+    deflatten_rewrite_results.clear()
+    old_translate = workflow.translate_indirect_branch_conditions
+    old_commit = workflow._commit_mlil
+    old_enabled = workflow._deflatten_enabled
+    ctx = FakeContext()
+    translated_mlil = object()
+    deflattened_mlil = object()
+    commits = []
+    workflow.translate_indirect_branch_conditions = lambda _bv, _ctx, _mlil: (
+        translated_mlil,
+        1,
+        {44},
+    )
+    deflatten_rewrite_results[:] = [(deflattened_mlil, 1)]
+
+    def commit_current_mlil(ctx_arg, mlil_arg):
+        commits.append((ctx_arg, mlil_arg))
+        ctx_arg._mlil = mlil_arg
+        return True
+
+    workflow._commit_mlil = commit_current_mlil
+    workflow._deflatten_enabled = lambda _func: True
+
+    try:
+        workflow.translate_branches_mlil(ctx)
+        assert calls == []
+        workflow.deflatten_mlil(ctx)
+    finally:
+        workflow.translate_indirect_branch_conditions = old_translate
+        workflow._commit_mlil = old_commit
+        workflow._deflatten_enabled = old_enabled
+
+    assert cleanup_decode_calls == [((translated_mlil, {44, 21621}, "branch"), {})]
+    assert commits == [(ctx, translated_mlil), (ctx, deflattened_mlil)]
+    assert calls[0] == ("compute", ctx.function.start, translated_mlil)
+    assert calls[1][0] == "rewrite"
+    assert ctx.view.session_data["dispatchthis_mlil_stable"][ctx.function.start] is True
+    assert FakeWorkflowState.branch_cleanup is False
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    FakeWorkflowState.receipts = {}
+    FakeWorkflowState.branch_cleanup = True
+    FakeWorkflowState.branch_cleanup_overlay = False
+    FakeWorkflowState.call_cleanup = True
+    deflatten_rewrite_results.clear()
     set_roots_before_results.clear()
 
 

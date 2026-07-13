@@ -149,24 +149,22 @@ def test_explicit_noop_hooks_are_valid():
     assert profile.plan_string_decrypt_calls(None, None, None, {}) == []
 
 
-def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
+def test_dyzznb_profile_delegates_to_existing_planners(monkeypatch):
     profiles = import_module("plugins.DispatchThis.profiles")
-    default = import_module("plugins.DispatchThis.profiles.default")
+    dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
 
-    monkeypatch.setattr(default, "resolve_llil_jump_plan", lambda *args: ("branch", args))
-    monkeypatch.setattr(default, "plan_indirect_calls", lambda *args: ("call", args))
-    monkeypatch.setattr(default, "_plan_global_constant_slots", lambda *args: ("global", args))
-    monkeypatch.setattr(default, "compute_redirections", lambda *args, **kwargs: ("deflatten", args, kwargs))
-    monkeypatch.setattr(default, "_plan_string_decrypt_calls", lambda *args: ("string", args))
+    monkeypatch.setattr(dyzznb, "resolve_llil_jump_plan", lambda *args: ("branch", args))
+    monkeypatch.setattr(dyzznb, "plan_indirect_calls", lambda *args: ("call", args))
+    monkeypatch.setattr(dyzznb, "compute_redirections", lambda *args, **kwargs: ("deflatten", args, kwargs))
+    monkeypatch.setattr(dyzznb, "_plan_string_decrypt_calls", lambda *args: ("string", args))
 
-    profile = profiles.get_profile("default")
+    profile = profiles.resolver_profile_from_module(dyzznb)
 
     assert profile.resolve_branch_gadget("bv", "llil", {"known": "targets"}) == (
         "branch",
         ("bv", "llil", {"known": "targets"}),
     )
     assert profile.resolve_call_gadget("bv", "mlil") == ("call", ("bv", "mlil"))
-    assert profile.plan_global_constant_slots("bv", "mlil") == ("global", ("bv", "mlil"))
     assert profile.plan_correlated_store_rewrites("bv", "func", "mlil") == []
     assert profile.plan_deflatten_redirections("bv", "func", "mlil") == (
         "deflatten",
@@ -179,9 +177,18 @@ def test_default_profile_delegates_to_existing_resolvers(monkeypatch):
     )
 
 
-def test_specialized_profiles_do_not_import_pass_planners():
+def test_default_profile_keeps_dyzznb_callables_for_existing_views():
+    profiles = import_module("plugins.DispatchThis.profiles")
+    default = profiles.get_profile("default")
+    dyzznb = profiles.get_profile("dyzznb")
+
+    for hook in profiles.PROFILE_HOOKS:
+        assert getattr(default, hook) is getattr(dyzznb, hook)
+
+
+def test_compatibility_and_delegating_profiles_do_not_import_pass_planners():
     modules = (
-        import_module("plugins.DispatchThis.profiles.dyzznb"),
+        import_module("plugins.DispatchThis.profiles.default"),
         import_module("plugins.DispatchThis.profiles.driver_2_6"),
         import_module("plugins.DispatchThis.profiles.valorant_2_6"),
     )

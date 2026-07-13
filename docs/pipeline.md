@@ -1,301 +1,257 @@
-# The pipeline
+# 流水线
 
-DispatchThis registers a **clone of `core.function.metaAnalysis`** and inserts its
-own activities into it. Everything is IL expression rewriting - no bytes are patched.
+DispatchThis 注册 **`core.function.metaAnalysis` 的克隆**，并向其中插入自己的
+activity。所有操作都是 IL 表达式改写；不会修补字节。
 
-## Registration and ordering
+## 注册与顺序
 
-From `__init__.py` / `workflow.py`, eight activities are inserted. The
-`analysis.plugins.dispatchThis.indirectJumpsCalls` activity is a no-op setting activity;
-the others are recovery workflow phases:
+`__init__.py` / `workflow.py` 插入八个 activity。
+`analysis.plugins.dispatchThis.indirectJumpsCalls` 是无操作的设置 activity，其余为恢复
+工作流阶段：
 
-| Activity ID | Stage | Inserted before |
+| Activity ID | 阶段 | 插入位置（之前） |
 | --- | --- | --- |
-| `analysis.plugins.dispatchThis.indirectJumpsCalls` | LLIL toggle | `core.function.generateMediumLevelIL` |
+| `analysis.plugins.dispatchThis.indirectJumpsCalls` | LLIL 开关 | `core.function.generateMediumLevelIL` |
 | `extension.DispatchThis.IndirectPatcher` | LLIL | `core.function.generateMediumLevelIL` |
 | `extension.DispatchThis.IndirectCallPatcher` | MLIL | `core.function.generateHighLevelIL` |
-| `extension.DispatchThis.BranchConditionTranslator` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.GlobalConstantResolver` | MLIL | `core.function.generateHighLevelIL` |
+| `extension.DispatchThis.BranchConditionTranslator` | MLIL | `core.function.generateHighLevelIL` |
 | `extension.DispatchThis.CorrelatedStoreRecovery` | MLIL | `core.function.generateHighLevelIL` |
 | `analysis.plugins.dispatchThis.stringDecrypt` | MLIL | `core.function.generateHighLevelIL` |
 | `analysis.plugins.dispatchThis.deflatten` | MLIL | `core.function.generateHighLevelIL` |
 
-The indirect branch resolver runs **before MLIL is generated**, because the deflattener needs
-the flattened CFG to exist (the indirect jumps resolved to real edges) before MLIL analysis.
-The other six run before HLIL generation, in the order call-resolve → global-constant
-resolving → branch-condition translation → correlated-store recovery → string
-decrypt → deflatten. The MLIL activities gate themselves on function phase
-state, so they do not submit reanalysis-triggering mutations until indirect branch
-resolving is stable. Workflow callbacks own reanalysis-triggering Binary Ninja edits:
-`set_user_indirect_branches`, `set_call_type_adjustment`, global data-var typing, and
-analysis-completion callback scheduling.
-The coordination rules are captured in
-[`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md).
-Complete-evidence and current-witness rules are captured in
-[`adr/0011-complete-evidence-and-current-il-witnesses.md`](adr/0011-complete-evidence-and-current-il-witnesses.md).
-Plan-owned call load cleanup is captured in
-[`adr/0012-call-target-slice-owned-load-cleanup.md`](adr/0012-call-target-slice-owned-load-cleanup.md).
-Optional semantic profile hooks are captured in
-[`adr/0013-optional-semantic-profile-hooks.md`](adr/0013-optional-semantic-profile-hooks.md).
-New binary recognizers should be added as bundled resolver profiles; see
-[`resolver-profiles.md`](resolver-profiles.md).
+间接分支解析器在**生成 MLIL 前**运行，因为去平坦化需要先让平坦化 CFG 出现（间接跳转已
+成为真实边）。其余六项在生成 HLIL 前按“调用解析 → 全局常量解析 → 分支条件翻译 → 关联
+存储恢复 → 字符串解密 → 去平坦化”运行。MLIL activity 由函数阶段状态门控，只有间接分支
+解析稳定后才提交会触发重新分析的修改。工作流回调拥有这些修改：
+`set_user_indirect_branches`、`set_call_type_adjustment`、全局 data-var 类型设置和分析完成
+回调调度。
 
-## The activities
+协调规则见
+[`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md)，
+完整证据与当前见证规则见
+[`adr/0011-complete-evidence-and-current-il-witnesses.md`](adr/0011-complete-evidence-and-current-il-witnesses.md)，
+计划自有调用 load 清理见
+[`adr/0012-call-target-slice-owned-load-cleanup.md`](adr/0012-call-target-slice-owned-load-cleanup.md)，
+可选语义 profile hook 见
+[`adr/0013-optional-semantic-profile-hooks.md`](adr/0013-optional-semantic-profile-hooks.md)。
+新二进制识别器应作为内置解析 profile 添加；见
+[`resolver-profiles.md`](resolver-profiles.md)。
 
-### 1. Indirect branch resolver (LLIL) - `passes/low/gadget_llil.py`
+## 各活动
 
-`resolve_llil_jump_plan` parses each decode-gadget `jump(reg)` (and tail-call form),
-decodes its target(s) from the relocated jump table, and returns a read-only plan.
-`apply_llil_jump_rewrites` rewrites single-target jumps in the current LLIL. The workflow
-callback owns the reanalysis-triggering `set_user_indirect_branches` mutation and records
-a per-function receipt for each source. Once branch resolving is stable, the workflow also
-schedules the `Unresolved Indirect Control Flow` tag cleanup with
-`BinaryView.add_analysis_completion_event`.
+### 1. 间接分支解析器（LLIL）— `passes/low/gadget_llil.py`
 
-Each plan retains the current LLIL jump witness. Before a rewrite or metadata
-submission, the pass groups facts by source and requires one complete,
-non-conflicting semantic result whose operation, address, instruction/expression
-identity, destination expression, and IL owner still match current LLIL. A receipt
-alone never suppresses decoding. Only a receipt whose complete target tuple exactly
-matches Binary Ninja's current non-auto user branch metadata is outside the next
-decode frontier; missing, automatic, subset, superset, or changed metadata forces
-fresh recognition. This avoids repeatedly parsing the `LLIL_JUMP_TO` shape that
-user-informed dataflow creates for already resolved branches without hiding new work.
-An unmatched gadget shape is a debug event because an expanding CFG commonly exposes
-an intermediate shape before the next reanalysis; malformed, conflicting, or stale
-branch facts remain warnings.
+`resolve_llil_jump_plan` 解析每个解码 gadget `jump(reg)`（以及 tail-call 形态），从重定位
+跳转表解码目标并返回只读计划。`apply_llil_jump_rewrites` 在当前 LLIL 中改写单目标跳转。
+工作流回调拥有会触发重新分析的 `set_user_indirect_branches` 修改，并为每个源记录按函数
+回执。分支解析稳定后，工作流还会通过 `BinaryView.add_analysis_completion_event` 调度
+`Unresolved Indirect Control Flow` 标签清理。
 
-Because the function grows, the workflow re-runs and the next layer resolves, **iterating
-to a fixpoint** with no manual loop and no byte patching. Targets are resolved read-only
-first, then single-target current-IL rewrites are applied and SSA is rebuilt once.
-Multi-target plans do not enter the rewrite backend because their CFG is represented by
-user branch metadata rather than a constant jump destination. Branch resolving is stable
-only when every unresolved indirect-branch source is covered by user branch metadata and
-the current run did not submit a new branch mutation.
+每个计划保存当前 LLIL jump 见证。改写或提交元数据前，pass 会按源分组事实，要求一个
+完整且无冲突的语义结果，其 operation、地址、instruction/expression identity、目标表达式
+和 IL owner 仍与当前 LLIL 匹配。回执本身绝不抑制解码：只有完整目标元组与 Binary Ninja
+当前非自动用户分支元数据精确一致的回执，才会离开下一轮解码前沿；缺失、自动、子集、
+超集或已变更元数据都强制重新识别。这避免反复解析用户知情数据流为已解析分支创建的
+`LLIL_JUMP_TO` 形态，同时不隐藏新工作。未匹配 gadget 形态为 debug 事件，因为扩展的
+CFG 常在下次重新分析前暴露中间形态；畸形、冲突或过期的分支事实保持 warning。
 
-### 2. Indirect call resolver (MLIL) - `passes/medium/indirect_calls.py`
+函数会扩展，故工作流会以无需手工循环、无需字节修补的方式**迭代到不动点**。先只读地
+解析目标，再应用单目标当前 IL 改写并为整批重建一次 SSA。多目标计划不进入改写后端，
+因为其 CFG 由用户分支元数据而非常量跳转目标表示。仅当每个未解析间接分支源均被用户
+分支元数据覆盖，且本轮未提交新的分支修改时，分支解析才稳定。
 
-`plan_indirect_calls` folds each import call's decode (`target = (encoded + key) mod
-2^48`) without mutating function state. `apply_indirect_call_rewrites` pre-validates the
-complete plan batch, creates every replacement, then uses `replace_expr` to change only
-each current call **destination expression** to a `const_pointer`. It finalizes MLIL and
-regenerates SSA once for the batch. The workflow does not copy the whole function or call
-`AnalysisContext.set_mlil_function` for these expression-only overlays; doing so would
-force Binary Ninja to rebuild the complete LLIL-to-MLIL mappings. The pass deliberately
-does not rewrite a profile-provided `decode_def`; dead decode instructions are owned only
-by the recomputed SSA target slice and phase cleanup.
-Call and descriptive decode witnesses are rebound to the exact current non-SSA MLIL
-before call-destination or call-type mutation; stale profile facts fail closed. The decode
-witness itself is never rewritten.
+### 2. 间接调用解析器（MLIL）— `passes/medium/indirect_calls.py`
 
-Each call plan also owns the exact current SSA reaching-definition slice feeding only
-`call.dest`. PHIs expand to all inputs; only whole-variable SSA definitions that map to
-exact current non-SSA assignments become cleanup roots. Field, split, and aliased chains
-fail closed. Load assignments receive a separate `cleanup_load_roots` witness, because
-generic cleanup must continue treating loads as observable. Both root sets are recomputed
-from the current call at the mutation boundary, so stale/profile indices cannot authorize
-cleanup. After the destination rewrite, current SSA liveness may NOP a witnessed load
-only when its result has no use outside the now-obsolete target slice. This proof uses
-call-site dataflow, not BinaryView xrefs; callback arguments and any other real consumer
-therefore keep the assignment live. Calls, stores, intrinsics, unimplemented IL, and
-other behavior instructions are never admitted merely because they precede a call. A
-stored call receipt proves the callee, not cleanup ownership, so the workflow never
-reconstructs roots by scanning assignments before a receipt address.
+`plan_indirect_calls` 在不修改函数状态的前提下折叠每个导入调用的解码
+（`target = (encoded + key) mod 2^48`）。`apply_indirect_call_rewrites` 预校验完整计划批次，
+创建全部替换，再以 `replace_expr` 仅将每个当前调用**目标表达式**改为 `const_pointer`。
+它为整批 finalize MLIL 并生成一次 SSA。此类仅表达式 overlay 不复制整函数，也不调用
+`AnalysisContext.set_mlil_function`，以免 Binary Ninja 重建完整 LLIL 到 MLIL 映射。pass
+刻意不改写 profile 提供的 `decode_def`；死解码指令只属于重新计算的 SSA 目标切片和阶段
+清理。
 
-After the destination is a bare constant, the call carries only calling-convention guesses
-and no prototype, so HLIL could render arguments as `/* nop */`. The workflow builds a
-call-site type whose parameters come from the current MLIL argument expressions; the
-callee contributes only its return type, calling convention, and related ABI metadata.
-It installs that type via `set_call_type_adjustment`.
+调用与描述性解码见证会在调用目标或调用类型修改前重新绑定到精确当前非 SSA MLIL；过期
+profile 事实按失败即关闭处理。解码见证本身绝不改写。
+
+每个调用计划还拥有仅馈入 `call.dest` 的精确当前 SSA 到达定义切片。PHI 展开所有输入；
+只有映射到精确当前非 SSA 赋值的整变量 SSA 定义会成为清理根。字段、split 和 aliased
+链按失败即关闭处理。无法证明完整 slice 时，该 fresh plan 不具备 cleanup ownership，receipt
+保持开放。load 赋值具有单独的 `cleanup_load_roots` 见证，因为通用清理仍须
+把 load 视为可观察。两个根集合都在修改边界从当前调用重新计算，profile 不提供索引，也
+不能授权清理。目标改写后，当前 SSA 存活性仅在见证 load 的结果在已过时目标切片外无使用
+时 NOP 它。该证明使用调用点数据流而非 BinaryView xref；回调参数及任何真实消费者因此
+保持赋值存活。call、store、intrinsic、未实现 IL 及其他行为指令绝不因位于调用前而被接纳。
+保存的调用回执证明 callee，不证明清理所有权，因此工作流绝不通过扫描回执地址前的赋值
+重建根。仅由回执重新绑定出的 direct call 没有当前 cleanup slice；它会保持 cleanup receipt
+开放，而不会以空根集合宣告收敛。
+
+目标成为裸常量后，调用只有调用约定猜测而无原型，HLIL 可能把参数显示为 `/* nop */`。
+工作流构造调用点类型：参数取自当前 MLIL 参数表达式，callee 仅提供返回类型、调用约定
+和相关 ABI 元数据；随后用 `set_call_type_adjustment` 安装类型。
 
 > [!IMPORTANT]
-> `set_call_type_adjustment` is a *function-level* edit that schedules a fresh reanalysis
-> (unlike `replace_expr`, which the current pass simply consumes). Applying it every run
-> would loop analysis forever, so workflow records per-function call adjustment receipts
-> in `Function.session_data["dispatchthis_workflow_state"]`.
+> `set_call_type_adjustment` 是会安排重新分析的*函数级*编辑（不同于当前 pass 只消费的
+> `replace_expr`）。每轮都应用会使分析无限循环，因此工作流在
+> `Function.session_data["dispatchthis_workflow_state"]` 中记录按函数调用调整回执。
 
-The receipt is not the source of truth: for each safe concrete override, every run compares
-the desired prototype with `get_call_type_adjustment`, submits only a real difference, and
-reads it back before marking the call adjusted. Current call-site arguments therefore
-survive even when the callee is itself obfuscated and BN has inferred an empty or incomplete
-parameter list. Current fallthrough also overrides a premature noreturn inference. If the
-callee has no usable function type or any call-site argument has no usable expression type,
-workflow applies no override instead of inventing one. In particular it does not call
-`set_call_type_adjustment(addr, None)` or try to compare `None` with BN's effective
-automatically inferred type: clearing a user override can still expose that automatic type
-and would otherwise keep the workflow re-entering.
+回执不是事实来源：每轮对每个安全具体覆盖都将期望原型与 `get_call_type_adjustment` 比较，
+仅提交真实差异，读回后才标为已调整。因此即使 callee 自身被混淆、BN 推断出空或不完整
+参数表，当前调用点参数仍保留。当前 fallthrough 还会覆盖过早的 noreturn 推断。callee 没有
+可用函数类型，或任一调用点参数没有可用表达式类型时，工作流不应用覆盖，而不是虚构类型。
+特别是它不会调用 `set_call_type_adjustment(addr, None)`，也不会将 `None` 与 BN 有效自动
+推断类型比较：清除用户覆盖仍可能暴露自动类型，否则工作流会持续重新进入。
 
-### 3. Branch condition translator (MLIL) - `passes/medium/branch_conditions.py`
+### 3. 分支条件翻译器（MLIL）— `passes/medium/branch_conditions.py`
 
-`set_user_indirect_branches` uses Binary Ninja's user-informed dataflow behavior, so
-two-target indirect branches can appear as resolved `switch`/`MLIL_JUMP_TO` shapes.
-After indirect branch and global constant resolving are stable, the translator rewrites
-those two-target switches back into `MLIL_IF` expressions. Keeping this expensive CFG copy
-after global data-var edits and their required reanalysis avoids installing the same
-overlay twice. When the switch is the tail of an already existing
-`IF -> two private constant-selector arms -> one decode join` diamond, it redirects that
-source `IF` in place instead of creating a second condition at the join. Both decoded
-targets must be unique and every independently valid selector witness must agree. The arms
-and join must be private, side-effect-free target-decode code whose written variables are
-local to the diamond and belong to the jump-destination dependency chain. If that ownership
-proof fails, the translator keeps the existing join-site behavior rather than bypassing
-unknown code. A selector assigned in the arms must remain unchanged through the join prefix;
-when a fallback moves the source predicate to the join, that predicate must also remain
-unchanged through both arms and the join prefix. Rewriting the original source IF in place
-does not move its predicate and therefore does not impose that latter restriction. This
-repeatable presentation rewrite owns no mutation receipts. Its exact
-contiguous source assignment prefix is submitted as a branch cleanup root; SSA liveness
-keeps state/comparison copies and NOPs only dead target-decode results.
+`set_user_indirect_branches` 使用 Binary Ninja 的 user-informed dataflow，因此双目标间接
+跳转可呈现为已解析 `switch`/`MLIL_JUMP_TO` 形态。间接分支和全局常量解析稳定后，翻译器
+将这些双目标 switch 改写回 `MLIL_IF` 表达式。把昂贵 CFG copy 放到全局 data-var 编辑及其
+所需重新分析之后，可避免重复安装同一个 overlay。若 switch 是已有
+`IF -> two private constant-selector arms -> one decode join` 菱形的尾部，它会原地重定向
+源 `IF`，而不在 join 处创建第二个条件。两个解码目标必须唯一，且每个独立有效的 selector
+见证必须一致。臂和 join 必须是私有、无副作用的目标解码代码，其写入变量在菱形内局部且
+属于 jump-destination 依赖链。所有权证明失败时，翻译器保留既有 join-site 行为，不绕过
+未知代码。臂中赋值的 selector 必须在 join 前缀中不变；fallback 把源谓词移到 join 时，该
+谓词也必须在两臂和 join 前缀中不变。原地改写源 IF 不移动谓词，因而不施加后一限制。
+这种可重复的展示改写没有修改回执。其精确连续源赋值前缀作为分支清理根提交；SSA 存活性
+保留状态/比较复制，只 NOP 死亡目标解码结果。
 
-The ownership planner builds two lazy indexes for only the current translator
-invocation: one shared alias graph from all store/unknown-memory-effect roots,
-and one map from variables to read/address-taken basic blocks. This preserves the
-same fail-closed escape and scope-locality proofs without rescanning the whole
-function for every candidate diamond. Neither index survives an MLIL mutation or
-reanalysis. If at least one control-flow plan is accepted, all selected top-level
-`IF`/`JUMP_TO` replacements are installed through one MLIL copy-transform because
-they share copied labels and change CFG edges; an empty plan does not copy or
-install an MLIL function.
+翻译产生 copy 后，先以 `AnalysisContext.set_mlil_function` 安装中间 MLIL；同一 callback
+的分支 cleanup 只使用该 `new_mlil`，不用 Python binding 可能仍返回的旧 `ctx.mlil`。它在
+该 MLIL 上反复规划到空计划；失败或重复会停止本轮。即使局部收敛，只要本轮 NOP 了目标
+解码，branch cleanup receipt 仍保持开放，并只为该 translator 调用记录一次性的
+`cleanup_overlay_ready`。末尾的 deflatten activity 仅在该标记仍存在时，才会以同一份当前
+MLIL 再次检查 branch receipt 根；只有根为空才可读取它。新 translator 尝试、phase invalidation
+或 cleanup 失败都会清除标记；这不是跨轮缓存，也不放宽 call cleanup gate。去平坦化仍由独立 activity 执行，
+因此不会跳过关联存储恢复。
 
-### 4. Global constant resolver (MLIL) - `passes/medium/global_constants.py`
+HLIL 验证看控制流语义，不看 `switch/case` 形状或 workflow receipt：应追踪已识别的 dispatcher
+状态比较，确认它们没有被不透明 state token 比较重新表达；共享出口若能证明原条件不变，应
+显示原条件。无法证明时保留 token fallback 是安全的，不应为了外观强行改写。已解析的双目标
+branch transition 可以安全地成为 `MLIL_IF`；多目标 dispatcher 不强制改写。去平坦化只有在
+branch-target cleanup receipt 收敛后才读取 MLIL，避免残留 target-decode 破坏纯度证明。
 
-The active profile's `plan_global_constant_slots` returns proved slot/type facts.
-The workflow parses each fact's const-qualified type, applies the BinaryView-level
-`define_user_data_var` mutation, reads the current data-variable type back as
-view-level truth, and records a per-function receipt. Conflicting facts for one
-slot are rejected. The current function's global phase becomes stable only after
-all receipts still match the BinaryView types.
+所有权规划器仅为本次翻译器调用构建两个惰性索引：来自所有 store/未知内存效果根的共享
+alias 图，以及变量到读取/取地址基本块的映射。这样在不为每个候选菱形重扫整函数的同时，
+保留相同的失败即关闭逃逸和作用域局部性证明。两个索引都不跨越 MLIL 修改或重新分析。
+至少有一个控制流计划被接纳时，全部已选顶层 `IF`/`JUMP_TO` 替换通过一次 MLIL
+copy-transform 安装，因为它们共享复制标签并改变 CFG 边；空计划不复制或安装 MLIL 函数。
 
-The default profile's scope is intentionally narrow: a qword slot in `.data`, a
-nonzero constant offset chain, a valid resolved address, and no store to the slot
-in the known direct-ref functions. Other profiles may prove different shapes and
-types without moving mutation ownership out of workflow.
+### 4. 全局常量解析器（MLIL）— 活动 profile
 
-### 5. Correlated store recovery (MLIL) - `passes/medium/correlated_stores.py`
+活动 profile 的 `plan_global_constant_slots` 返回已证明槽位/类型事实。工作流解析每项事实的
+const 限定类型，应用 BinaryView 级 `define_user_data_var` 修改，读回当前 data-var 类型作为
+视图级事实，并记录按函数回执。同一槽位的冲突事实被拒绝。仅当全部回执仍与 BinaryView
+类型匹配时，当前函数全局阶段才稳定。
 
-After global constants stabilize, the active profile may identify a join-block store whose
-destination and source came from correlated sibling PHIs. `apply_correlated_stores_mlil`
-atomically inserts each concrete store in its owning predecessor arm and NOPs the merged
-store. Unsupported or incomplete plans leave the current MLIL unchanged.
+默认 profile 的范围刻意狭窄：`.data` 中 qword 槽位、非零常量偏移链、有效已解析地址，且
+已知直接引用函数中没有向该槽位存储。其他 profile 可证明不同形态和类型，无需把修改所有
+权移出工作流。
 
-### 6. String decrypt (MLIL, opt-in) - `passes/medium/string_decrypt.py`
+### 5. 关联存储恢复（MLIL）— `passes/medium/correlated_stores.py`
 
-Gated behind the `String Decrypt` setting. The workflow callback returns without work
-until indirect branch, indirect call, and global constant phases are stable. It does not
-require the current function to be deflattened first.
+全局常量稳定后，活动 profile 可识别目标与源来自关联同级 PHI 的 join-block store。
+`apply_correlated_stores_mlil` 原子地在各自前驱臂插入每个具体 store，并 NOP 合并 store。
+不支持或不完整计划保持当前 MLIL 不变。
 
-The active profile's `plan_string_decrypt_calls` inspects the current MLIL and
-returns plaintext facts without writing comments. Profiles may use
-`dispatchthis_mlil_stable` to require a candidate callee to have a successfully
-installed deflatten replacement. The shared backend
-`apply_decrypted_string_comments` turns accepted facts into function-level comments
-in the form
-`[decrypt] <escaped-string>, src=0x... dst=0x...`; existing manual comment lines are
-preserved.
+### 6. 字符串解密（MLIL，可选）— `passes/medium/string_decrypt.py`
 
-The default profile recognizes only direct calls to its sample-family decrypt
-shape: two arguments, key-prefix and encrypted-payload reads, one complete
-key-modulus/output-length pair, byte writes to the destination, and a one-shot
-done-flag write. Other profiles own their own complete recognition proof.
+由 `String Decrypt` 设置门控。间接分支、间接调用及全局常量阶段稳定前，工作流回调直接
+返回；它不要求当前函数先完成去平坦化。
 
-### 7. Deflattener (MLIL, opt-in) - `passes/medium/deflatten.py`
+活动 profile 的 `plan_string_decrypt_calls` 检查当前 MLIL 并返回明文事实，不写注释。
+profile 可使用 `dispatchthis_mlil_stable`，要求候选 callee 已成功安装去平坦化替换。共享
+后端 `apply_decrypted_string_comments` 将接纳事实变为以下形式的函数级注释：
+`[decrypt] <escaped-string>, src=0x... dst=0x...`；已有手工注释行会保留。
 
-Gated behind the `Enable Deflattening` setting, and only runs once function phase state
-reports that the LLIL indirect branch resolver has drained every indirect jump (otherwise
-the CFG - and the recovered state machine - would be incomplete).
+默认 profile 只识别其样本家族的直接解密调用形态：两个参数、key-prefix 与加密 payload
+读取、一个完整 key-modulus/output-length 对、向目标的字节写入以及一次性 done-flag 写入。
+其他 profile 自行承担完整识别证明。
 
-- The active resolver profile's `plan_deflatten_redirections` identifies the
-  binary-specific dispatcher/state-write shape and maps state tokens to target
-  original blocks. Dispatcher rows may use equality, inequality, or signed/unsigned
-  `LT`, `LE`, `GT`, and `GE` comparisons. The planner preserves operand order and token
-  width, then replays each concrete recovered token through the dispatcher CFG; it does
-  not solve symbolic intervals. Each comparison alias must be established by a unique
-  whole-variable, equal-width direct-copy chain earlier in its own row, ending at the
-  state input shared by the dispatcher rows. Field/split/aliased reads are possible
-  observers, not exact copies. Predicate-variable conditions must resolve through
-  exact SSA-to-non-SSA mapping to a current comparison earlier in that row, and the
-  copy chain must precede the comparison itself. Auxiliary comparison blocks join
-  the dispatcher boundary only after their complete prefix passes the routing-purity
-  proof. Branch-condition translation removes a proved private decode diamond before this
-  analysis, so deflatten does not carry a second recognizer for a synthetic translated-tail
-  shape. A separate OBB state variable may be mapped to
-  the comparison variable only through one equal-width, whole-variable latch that is the
-  unique dispatcher ingress and is shared by at least two independent target-head regions.
-  Backward boundary expansion outside that explicit latch accepts only `NOP* + GOTO`
-  blocks. The default profile delegates to `compute_redirections`.
-- `rewrite_redirections_mlil` uses the MLIL copy-transform backend to build an atomic
-  replacement: every private dispatcher exit is redirected to the one target proved for
-  it, conditional transitions explicitly choose private arm-exit rewrites, a private
-  shared-tail exit rewrite, or a fully proved condition shortcut, and only exact
-  instruction indices in each plan's
-  `obsolete_state_writes` set become NOPs - see
-  [`conditional-deflattening.md`](conditional-deflattening.md). Any rejected redirection
-  discards the entire replacement.
-- Target and cleanup proof are independent when the selected edge rewrite preserves state
-  execution. An uncertain target produces no plan; a proved target with uncertain cleanup
-  then keeps an empty `obsolete_state_writes` set. A condition shortcut that would bypass
-  those writes instead requires complete private cleanup/state-channel proof or is rejected.
-- Partial/split/aliased state writes, unresolved struct or pointer stores, and whole-variable
-  or field-address escapes are fail-closed rather than ignored as unrelated IL. A call,
-  syscall, or intrinsic receiving a possible state pointer invalidates target proof, not
-  merely cleanup proof. Once that address has escaped into memory, later unknown
-  memory effects or non-exact stores invalidate the token even without an explicit
-  pointer argument. Escape includes an unknown operation retaining `&holder` when
-  the holder contains `&state`. Unimplemented IL always rejects the transition.
-- The workflow installs the replacement through `AnalysisContext.set_mlil_function`, then
-  publishes `dispatchthis_mlil_stable` for cross-function string-decrypt recognition. It
-  publishes no deflatten token or variable cleanup maps.
+### 7. 去平坦化器（MLIL，可选）— `passes/medium/deflatten.py`
 
-The cleanup ownership and atomicity decision is recorded in
-[`adr/0010-plan-owned-atomic-deflatten-cleanup.md`](adr/0010-plan-owned-atomic-deflatten-cleanup.md).
+由 `Enable Deflattening` 设置门控，且仅在函数阶段状态报告 branch、call、global 均稳定，
+并且 call-target cleanup receipt 已收敛后运行。branch-target cleanup receipt 已收敛时可直接
+运行；若它仅因本轮已安装 overlay 的实际 NOP 保持开放，必须持有 `cleanup_overlay_ready` 并在
+同一当前 MLIL 上重新证明 branch cleanup 根为空。
+否则 CFG、调用语义或恢复出的状态机仍可能不完整；残留 target-decode 也会破坏调度器纯度证明。
 
-## Why the MLIL passes reapply every run
+- 活动解析 profile 的 `plan_deflatten_redirections` 识别二进制特定的调度器/状态写入形态，
+  并将状态令牌映射到目标原始块。调度器行可用相等、不等或有符号/无符号
+  `LT`、`LE`、`GT`、`GE` 比较。规划器保留操作数顺序和令牌宽度，随后通过调度器 CFG
+  重放每个已恢复的具体令牌；不求解符号区间。每个比较别名均须由该行中更早处唯一的整变量、
+  等宽直接复制链建立，并结束于调度器行共享的状态输入。字段/split/aliased 读取是可能的
+  观察者，而非精确复制。谓词变量条件必须通过精确 SSA 到非 SSA 映射解析为该行中更早的
+  当前比较，复制链也必须先于该比较。辅助比较块只有完整前缀通过路由纯度证明后，才加入
+  调度器边界。分支条件翻译会在本分析前移除已证明私有解码菱形，因此去平坦化不携带第二个
+  用于合成翻译尾部形态的识别器。独立 OBB 状态变量只有经一个等宽整变量 latch 才能映射到
+  比较变量，该 latch 必须是唯一调度器入口且至少由两个独立目标头区域共享。该显式 latch
+  之外的反向边界扩展只接受 `NOP* + GOTO` 块。默认 profile 委托给
+  `compute_redirections`。
+- `rewrite_redirections_mlil` 使用 MLIL copy-transform 后端构建原子替换：每个私有调度器
+  出口重定向至其唯一已证明目标；条件转移明确选择私有臂出口改写、私有共享尾出口改写或
+  完整证明的条件捷径。共享出口默认用具体 state token 路由；原 IF 为直接变量/常量比较且其
+  输入在 arm/共享尾中未改写、未逃逸且没有 STORE、未知内存效果或未建模语义时，改为复制原
+  条件。仅每个计划 `obsolete_state_writes` 集合内的精确指令索引才变为 NOP。
+  见 [`conditional-deflattening.md`](conditional-deflattening.md)。任一被拒绝的重定向都会
+  丢弃整次替换。
+- 所选边改写保留状态执行时，目标与清理证明相互独立。不确定目标不产生计划；目标已证明
+  但清理不确定时保留空 `obsolete_state_writes` 集合。会绕过这些写入的条件捷径则需要完整
+  私有清理/状态通道证明，否则被拒绝。
+- 部分/split/aliased 状态写入、未解析 struct 或 pointer store，以及整变量或字段地址逃逸
+  一律按失败即关闭处理，而非忽略为无关 IL。call、syscall 或 intrinsic 接收可能状态指针
+  会使目标证明而非仅清理证明失效。地址逃逸入内存后，即使后续未知内存效果或非精确 store
+  没有显式指针参数，也会使令牌失效。若 holder 含有 `&state`，未知操作保留 `&holder` 也
+  构成逃逸。未实现 IL 始终拒绝该转移。
+- 工作流通过 `AnalysisContext.set_mlil_function` 安装替换，然后发布
+  `dispatchthis_mlil_stable` 以便跨函数字符串解密识别；不发布去平坦化令牌或变量清理 map。
 
-The indirect call, branch condition, correlated-store, and atomic deflatten MLIL rewrites are *overlays*
-derived from the (unchanged) LLIL. Each reanalysis regenerates MLIL from LLIL and reverts
-them, so these passes **re-run every pass** to keep their rewrites in place rather than
-latching off after the first apply. Phase cleanup for branch/call target decodes is
-receipt-gated, but the receipt is marked done only after the current IL has no cleanup
-changes left; if cleanup NOPs anything, the next workflow run can replay or confirm the
-overlay after Binary Ninja reanalysis.
+清理所有权与原子性决策记录于
+[`adr/0010-plan-owned-atomic-deflatten-cleanup.md`](adr/0010-plan-owned-atomic-deflatten-cleanup.md)。
 
-## `session_data` keys
+## 为什么 MLIL 阶段每轮都会重放
 
-| Key | Meaning |
+间接调用、分支条件、关联存储和原子去平坦化的 MLIL 改写是从未改变的 LLIL 派生的
+*overlay*。每次重新分析都会从 LLIL 再生 MLIL 并撤销它们，所以这些 pass **每轮都会重跑**，
+以保持改写，而非首次应用后锁死。分支/调用目标解码 cleanup 在当前 MLIL 上收敛到空计划
+才关闭 receipt；不为确认它而安排重新分析。自然重新分析后，工作流从当前 IL 重建计划。
+
+## `session_data` 键
+
+| 键 | 含义 |
 | --- | --- |
-| `dispatchthis_mlil_stable` | `{start: bool}` - the atomic deflatten replacement was installed; used only as a cross-function string-decrypt gate |
-| `dispatchthis_tag_cleanup_pending` | `set(start)` - view-level analysis-completion callbacks pending |
+| `dispatchthis_mlil_stable` | `{start: bool}`：原子去平坦化替换已安装；仅作跨函数字符串解密门控 |
+| `dispatchthis_tag_cleanup_pending` | `set(start)`：等待分析完成回调的视图级集合 |
 
-Function-scoped phase state lives in `Function.session_data["dispatchthis_workflow_state"]`;
-see [`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md)
-for the workflow coordination rules:
+函数作用域阶段状态位于 `Function.session_data["dispatchthis_workflow_state"]`；协调规则见
+[`adr/0003-function-phase-state-for-workflow.md`](adr/0003-function-phase-state-for-workflow.md)：
 
-| Field | Meaning |
+| 字段 | 含义 |
 | --- | --- |
-| `profile_id` | resolver profile provenance for function-scoped evidence; state containing recovery evidence cannot be rebound to another profile, while empty state may be rebound |
-| `branch.stable` | indirect branch resolving has reached its current fixpoint |
-| `branch.receipts` | `{source_addr: (target_addr, ...)}` verified against current user branch metadata |
-| `branch.cleanup_done` | branch-target decode cleanup found no remaining changes for the current branch receipts |
-| `call.stable` | indirect call resolving has reached its current fixpoint |
-| `call.receipts` | `{call_addr: target_addr}` whose call-type decision completed: a concrete override was read back, or current call-site evidence required no override |
-| `call.targets` | `{call_addr: target_addr}` verified as current call destinations, including calls that need no type adjustment |
-| `call.cleanup_done` | call-target decode cleanup found no remaining changes for the current call receipts |
-| `global.stable` | global constant resolving has reached its current fixpoint for this function |
-| `global.receipts` | `{slot_addr: type_string}` verified as global constant data-var types for this function |
+| `profile_id` | 函数作用域证据的解析 profile 来源；含恢复证据的状态不能重绑到其他 profile，空状态可重绑 |
+| `branch.stable` | 间接分支解析已到达当前不动点 |
+| `branch.receipts` | `{source_addr: (target_addr, ...)}`，已针对当前用户分支元数据验证 |
+| `branch.cleanup_done` | 当前分支回执的分支目标解码清理已无剩余改动 |
+| `branch.cleanup_overlay_ready` | 仅当前 translator/MLIL overlay：已 NOP 且局部收敛，允许下游作一次空根复证 |
+| `call.stable` | 间接调用解析已到达当前不动点 |
+| `call.receipts` | `{call_addr: target_addr}`，调用类型决策已完成：读回具体覆盖，或当前调用点证据无需覆盖 |
+| `call.targets` | `{call_addr: target_addr}`，验证为当前调用目标，包含无需类型调整的调用 |
+| `call.cleanup_done` | 当前调用回执的调用目标解码清理已无剩余改动 |
+| `global.stable` | 全局常量解析已为该函数到达当前不动点 |
+| `global.receipts` | `{slot_addr: type_string}`，验证为该函数的全局常量 data-var 类型 |
 
-## Analysis environment
+## 分析环境
 
-On Binary Ninja 5.3+, the earliest eligible resolver callback establishes the required
-analysis environment on the current Function, not when DispatchThis is imported. It uses
-`SettingsResourceScope` to override inherited values only when needed, then reads all of
-them back before profile recognition or recovery work. A failed write or verification skips
-that workflow run; Function overrides are intentionally left in place after DispatchThis is
-disabled.
+在 Binary Ninja 5.3+ 上，最早符合条件的解析回调会为当前 Function 建立所需分析环境，而非
+在导入 DispatchThis 时。它仅在需要时用 `SettingsResourceScope` 覆盖继承值，并在 profile
+识别或恢复工作前全部读回验证。写入或验证失败则跳过该轮工作流；Function 覆盖设置在
+DispatchThis 禁用后刻意保留。
 
-| Setting | Required value |
+| 设置 | 必需值 |
 | --- | --- |
-| `analysis.limits.maxFunctionSize` | `0` (unlimited) |
+| `analysis.limits.maxFunctionSize` | `0`（无限制） |
 | `analysis.limits.expressionValueComputeMaxDepth` | `99999` |
-| `analysis.limits.maxFunctionAnalysisTime` | `1800000` ms (30 minutes) |
+| `analysis.limits.maxFunctionAnalysisTime` | `1800000` ms（30 分钟） |
 | `analysis.limits.maxFunctionUpdateCount` | `1024` |
 | `analysis.outlining.builtins` | `false` |

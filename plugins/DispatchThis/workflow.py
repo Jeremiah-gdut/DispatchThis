@@ -12,8 +12,7 @@ from .passes.medium.indirect_calls import (
     validate_current_call_plans,
 )
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
-from .passes.medium.phase_cleanup import cleanup_decode
-from .passes.medium.global_constants import CONST_SLOT_TYPE
+from .passes.medium.phase_cleanup import settle_cleanup_decode
 from .passes.medium.string_decrypt import apply_decrypted_string_comments
 from .helpers.mlil import set_roots_before
 from .passes.low.gadget_llil import (
@@ -34,6 +33,7 @@ _ANALYSIS_SETTINGS = (
     ("analysis.limits.maxFunctionUpdateCount", 1024),
     ("analysis.outlining.builtins", False),
 )
+_DEFLATTEN_SETTING = "analysis.plugins.dispatchThis.deflatten"
 
 
 def _ensure_analysis_settings(func):
@@ -68,6 +68,44 @@ def _commit_mlil(ctx, mlil):
         return False
 
 
+def _deflatten_enabled(func):
+    try:
+        return Settings().get_bool(_DEFLATTEN_SETTING, func)
+    except Exception as e:  # noqa: BLE001
+        log_warn(f"[workflow] {func.name}: failed to read deflatten setting: {e}")
+        return False
+
+
+def _clear_deflatten_stability(bv, func):
+    bv.session_data.get("dispatchthis_mlil_stable", {}).pop(func.start, None)
+
+
+def branch_cleanup_current(mlil, state):
+    """Whether this MLIL overlay has no branch decode assignments left to clean."""
+    if not state.branch_cleanup_needed():
+        return True
+    if not state.branch_cleanup_overlay_ready():
+        return False
+    return not set_roots_before(
+        mlil,
+        state.branch_receipts,
+    )
+
+
+def _apply_deflatten(ctx, bv, func, profile, mlil):
+    redirections = profile.plan_deflatten_redirections(bv, func, mlil)
+    if not redirections:
+        return False
+
+    new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
+    if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
+        return False
+
+    bv.session_data.setdefault("dispatchthis_mlil_stable", {})[func.start] = True
+    log_info(f"{func.name} has been deflattened")
+    return True
+
+
 def _active_profile_state(bv, func):
     """Bind one callback run to one profile and its function-scoped state."""
     try:
@@ -97,12 +135,12 @@ def _schedule_tag_cleanup(bv, func_start):
     bv.add_analysis_completion_event(clear_after_analysis)
 
 
-def _global_slot_type(bv, type_name=CONST_SLOT_TYPE):
+def _global_slot_type(bv, type_name):
     parsed, _ = bv.parse_type_string(f"{type_name} dispatchthis_global_constant_slot")
     return parsed
 
 
-def _global_type_applied(bv, slot_addr, type_name=CONST_SLOT_TYPE):
+def _global_type_applied(bv, slot_addr, type_name):
     data_var = bv.get_data_var_at(slot_addr)
     if data_var is None:
         return False
@@ -175,18 +213,12 @@ def _call_adjustment_type(mlil, call_il, callee):
     return True, adjusted
 
 
-def _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots=None):
-    cleanup_roots = cleanup_roots or {}
+def _submit_branch_mutations(bv, func, state, resolved_targets):
     mutations = state.branch_updates_for(resolved_targets)
-    for source, roots in cleanup_roots.items():
-        if source not in mutations:
-            state.set_branch_cleanup_roots(source, roots)
     for source, targets in mutations.items():
         try:
             func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
             changed = state.mark_branch_applied(source, targets)
-            if source in cleanup_roots:
-                state.set_branch_cleanup_roots(source, cleanup_roots[source])
             if changed:
                 log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
         except Exception as e:  # noqa: BLE001
@@ -215,8 +247,7 @@ def _converge_branches(
         apply_llil_jump_rewrites(bv, plan_llil, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    cleanup_roots = {item["source"]: item["cleanup_roots"] for item in plan if "cleanup_roots" in item}
-    mutations = _submit_branch_mutations(bv, func, state, resolved_targets, cleanup_roots)
+    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
     if mutations:
         return mutations
 
@@ -380,9 +411,10 @@ def resolve_calls_mlil(ctx: AnalysisContext):
             state.mark_call_adjusted(plan["call_addr"], plan["target"])
         return
 
+    cleanup_proven = all(plan.get("cleanup_proven", False) for plan in plans)
     cleaned = 0
-    call_cleanup_needed = state.call_cleanup_needed()
-    if call_cleanup_needed or plans:
+    settled = True
+    if plans and cleanup_proven:
         cleanup_roots = set()
         removable_load_roots = set()
         for plan in plans:
@@ -393,16 +425,27 @@ def resolve_calls_mlil(ctx: AnalysisContext):
             if removable_load_roots
             else {}
         )
-        cleaned = cleanup_decode(mlil, cleanup_roots, "call", **cleanup_options)
+        cleaned, settled = settle_cleanup_decode(
+            mlil,
+            cleanup_roots,
+            "call",
+            **cleanup_options,
+        )
     for plan in calls:
         changed = state.mark_call_target(plan["call_addr"], plan["target"])
         changed |= state.mark_call_adjusted(plan["call_addr"], plan["target"])
         if changed:
             log_warn(f"[workflow] {func.name}: call target changed at {hex(plan['call_addr'])}")
-    state.mark_call_stable()
-    if cleaned:
+    if not cleanup_proven or not settled:
         state.invalidate_call_cleanup()
-    elif call_cleanup_needed:
+    if not settled:
+        state.invalidate_call_stable()
+        log_warn(f"[workflow] {func.name}: call cleanup did not settle")
+        return
+    state.mark_call_stable()
+    if receipt_plans or not cleanup_proven or cleaned:
+        state.invalidate_call_cleanup()
+    elif state.call_cleanup_needed():
         state.mark_call_cleanup_done()
     if rewrites or adjustments:
         log_info(
@@ -420,9 +463,16 @@ def translate_branches_mlil(ctx: AnalysisContext):
     if not _ensure_analysis_settings(func):
         return
 
-    _profile, state = _active_profile_state(bv, func)
+    deflatten_enabled = _deflatten_enabled(func)
+    if deflatten_enabled:
+        _clear_deflatten_stability(bv, func)
+
+    _, state = _active_profile_state(bv, func)
     if state is None:
         return
+    # A current-overlay fixed-point exception is valid only for this translator
+    # attempt. Never let it survive a fresh MLIL generation or a failed cleanup.
+    state.clear_branch_cleanup_overlay_ready()
     if not state.branch_stable(func):
         return
     if not state.call_stable():
@@ -439,17 +489,25 @@ def translate_branches_mlil(ctx: AnalysisContext):
         return
     if n:
         log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
+        # Binary Ninja requires an intermediate copy-transform to be installed
+        # before a second MLIL transform can use correct mappings.
+        if not _commit_mlil(ctx, new_mlil):
+            return
+        # The Python binding can still expose the pre-transform value through
+        # ``ctx.mlil`` in this callback. The installed copy is the documented
+        # input to the next transform.
         mlil = new_mlil
     cleaned = 0
+    settled = True
     branch_cleanup_needed = state.branch_cleanup_needed()
-    if branch_cleanup_needed or state.branch_receipts or state.branch_cleanup_roots:
-        cleanup_roots.update(state.branch_cleanup_root_indices())
+    if branch_cleanup_needed or state.branch_receipts or cleanup_roots:
         cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
-        cleaned = cleanup_decode(mlil, cleanup_roots, "branch")
-    installed = _commit_mlil(ctx, mlil) if n else True
-    if cleaned:
+        cleaned, settled = settle_cleanup_decode(mlil, cleanup_roots, "branch")
+    if not settled:
         state.invalidate_branch_cleanup()
-    elif branch_cleanup_needed and (not n or installed):
+    elif cleaned:
+        state.mark_branch_cleanup_overlay_ready()
+    elif branch_cleanup_needed:
         state.mark_branch_cleanup_done()
 
 
@@ -580,7 +638,8 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 def deflatten_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
-    bv.session_data.get("dispatchthis_mlil_stable", {}).pop(func.start, None)
+    if bv.session_data.get("dispatchthis_mlil_stable", {}).get(func.start):
+        return
 
     mlil = ctx.mlil
     if mlil is None:
@@ -598,16 +657,12 @@ def deflatten_mlil(ctx: AnalysisContext):
         return
     if not state.branch_stable(func):
         return
+    if not state.call_stable():
+        return
     if not state.global_stable():
         return
-
-    redirections = profile.plan_deflatten_redirections(bv, func, mlil)
-    if not redirections:
+    if state.call_cleanup_needed():
         return
-
-    new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
-    if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
+    if not branch_cleanup_current(mlil, state):
         return
-
-    bv.session_data.setdefault("dispatchthis_mlil_stable", {})[func.start] = True
-    log_info(f"{func.name} has been deflattened")
+    _apply_deflatten(ctx, bv, func, profile, mlil)

@@ -1,43 +1,30 @@
-# Require complete evidence and current IL witnesses
+# 要求完整证据和当前 IL witness
 
-DispatchThis will publish recovery facts only from complete evidence. A value
-folder returns every value supported by every semantic path, or `None` when any
-path is unknown. A bounded expansion, unreadable load, unsupported operation,
-ambiguous PHI relation, or invalid member of a recovered target set is not
-permission to keep the remaining members.
+DispatchThis 只从完整证据发布 recovery fact。一个 value folder 要么返回每条语义路径支持的
+全部 value，要么在任一路径未知时返回 `None`。有界展开、不可读取的 load、不支持的
+operation、歧义 PHI relation 或恢复 target set 中的无效成员，都不能授权保留其余成员。
 
-The PHI-correlation seam has a separate control result: `None` means that no
-multi-PHI relation was detected and permits the ordinary complete-value folder,
-while an empty set means a relation was detected but could not be proved and
-forbids fallback. That empty set is a rejection sentinel, not a recovered value
-set or permission to keep an uncorrelated subset.
+PHI-correlation seam 有独立的控制结果：`None` 表示未检测到 multi-PHI relation，可继续普通
+完整 value folder；空 set 表示检测到了 relation 但无法证明，禁止 fallback。该空 set 是
+rejection sentinel，不是恢复出的 value set，也不允许保留未关联的子集。
 
-Consumers that require one value must first receive a complete set and then
-check that its cardinality is one. Helpers and profiles must not expose
-"first", "best", or valid-subset conveniences for branch or call targets.
-When several witnesses describe one site, all witnesses must agree on the same
-semantics before a fact is published.
+需要一个 value 的 consumer 必须先接收完整 set，再检查其 cardinality 是否为一。Helper 和
+profile 不得提供用于 branch 或 call target 的“first”“best”或有效子集 convenience。当多个
+witness 描述同一 site 时，所有 witness 必须在相同语义上一致，才能发布 fact。
 
-Recovery plans that later rewrite IL must retain their Binary Ninja instruction
-witnesses. At the mutation boundary, the backend maps each witness to the
-current `AnalysisContext` IL and verifies its instruction index, expression
-index, operation, address, relevant operands, and owning IL function. A stale or
-malformed witness rejects the plan atomically; it is never recovered by scanning
-for a similar instruction elsewhere in the function.
+后续会改写 IL 的 recovery plan 必须保留其 Binary Ninja instruction witness。在 mutation
+boundary，backend 将每个 witness 映射到当前 `AnalysisContext` IL，并验证其 instruction
+index、expression index、operation、address、相关 operand 和所属 IL function。过期或
+malformed witness 必须以原子方式拒绝计划；绝不可通过扫描函数中相似 instruction 恢复它。
 
-Binary Ninja's native operation enums are the implementation vocabulary for
-single-IL modules. Exported operation-name tuples remain only at the deliberate
-mixed-LLIL/MLIL compatibility seam, where equal `IntEnum` values could otherwise
-confuse the IL level. Those names are generated from Binary Ninja enums rather
-than hand-written.
+单 IL module 中，Binary Ninja 原生 operation enum 是实现词汇。仅在刻意保留的 mixed-LLIL/MLIL
+compatibility seam 输出 operation-name tuple，因为相同的 `IntEnum` value 否则可能混淆
+IL level。这些名称由 Binary Ninja enum 生成，不能手写。
 
-Workflow receipts are coordination state, not analysis truth. Branch metadata,
-call type adjustments, global data-variable types, and current IL witnesses are
-read back from Binary Ninja before a receipt is treated as satisfied. Function
-phase state is also bound to its resolver profile ID; state with recovery
-evidence cannot be reused under a different profile.
+Workflow receipt 是协调状态，不是分析真相。branch metadata、call type adjustment、global
+data-variable type 与当前 IL witness 都必须从 Binary Ninja 读回，receipt 才算满足。函数
+phase state 也与 resolver profile ID 绑定；带有 recovery evidence 的 state 不能在不同
+profile 下复用。
 
-This decision favors a missed optimization over an incorrect CFG edge, call
-prototype, state transition, or cleanup NOP. Support for a new obfuscation shape
-should add a complete proof for that shape rather than weakening these mutation
-boundaries.
+此决策宁可错过优化，也不接受错误的 CFG edge、call prototype、state transition 或 cleanup
+NOP。要支持新的混淆 shape，应为它增加完整证明，而不是削弱这些 mutation boundary。

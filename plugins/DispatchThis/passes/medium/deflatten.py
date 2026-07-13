@@ -516,14 +516,16 @@ def _analyze_dispatcher(mlil):
 
     target_heads = _dispatcher_target_heads(mlil, dispatcher_starts)
 
+    address_escapes = mlil_helpers.address_escape_checker(mlil)
     return {
         "state_var": state_var,
         "dispatcher_var": dispatcher_var,
         "state_vars": state_vars,
         "state_address_escapes": any(
-            mlil_helpers.variable_address_escapes(mlil, variable)
+            address_escapes(variable)
             for variable in {state_var, dispatcher_var}
         ),
+        "address_escapes": address_escapes,
         "token_size": next(iter(sizes)),
         "dispatcher_starts": dispatcher_starts,
         "dispatcher_rows": rows_by_start,
@@ -873,6 +875,74 @@ def _shared_semantic_exit(
     return first
 
 
+def _shared_condition_witness(if_il):
+    parts = mlil_helpers.comparison_parts(getattr(if_il, "condition", None))
+    if parts is None:
+        return None
+    return (
+        parts["op"],
+        parts["var"],
+        parts["bound"],
+        parts["var_on_left"],
+    )
+
+
+def _addresses_variable_before_if(if_il, variable):
+    """Whether the source block takes ``variable``'s address before its IF."""
+    block = getattr(if_il, "il_basic_block", None)
+    if block is None:
+        return True
+    for instruction in block:
+        if getattr(instruction, "instr_index", None) == getattr(if_il, "instr_index", None):
+            break
+        if any(
+            addressed is not None and _same_var(addressed, variable)
+            for expression in mlil_helpers.walk_expr(instruction)
+            for addressed in (mlil_helpers.addressed_var(expression),)
+        ):
+            return True
+    return False
+
+
+def _replayable_shared_condition(mlil, if_il, scope, analysis):
+    """Return a source IF whose direct predicate remains valid at the merge."""
+    condition = getattr(if_il, "condition", None)
+    left = getattr(condition, "left", None)
+    right = getattr(condition, "right", None)
+    if not (
+        (_op(left) == M.MLIL_VAR and _op(right) == M.MLIL_CONST)
+        or (_op(left) == M.MLIL_CONST and _op(right) == M.MLIL_VAR)
+    ):
+        return None
+    witness = _shared_condition_witness(if_il)
+    if witness is None:
+        return None
+    variable = witness[1]
+    if (
+        analysis["address_escapes"](variable)
+        or _addresses_variable_before_if(if_il, variable)
+    ):
+        return None
+    for bb in mlil.basic_blocks:
+        if bb.start not in scope:
+            continue
+        for instruction in bb:
+            if (
+                mlil_helpers.instruction_writes_variable(instruction, variable)
+                or _op(instruction) in mlil_helpers.STORE_OPERATIONS
+                or mlil_helpers.has_unknown_memory_effect(instruction)
+                or mlil_helpers.has_unmodeled_semantics(instruction)
+            ):
+                return None
+            if any(
+                addressed is not None and _same_var(addressed, variable)
+                for expression in mlil_helpers.walk_expr(instruction)
+                for addressed in (mlil_helpers.addressed_var(expression),)
+            ):
+                return None
+    return if_il
+
+
 def _conditional_candidates(mlil, head, region, analysis):
     root = analysis["state_var"]
     token_size = analysis["token_size"]
@@ -928,6 +998,16 @@ def _conditional_candidates(mlil, head, region, analysis):
             true_route,
             false_route,
         )
+        shared_condition = (
+            _replayable_shared_condition(
+                mlil,
+                if_il,
+                scopes,
+                analysis,
+            )
+            if shared_exit is not None
+            else None
+        )
         if shared_exit is not None:
             rewrite_mode = "shared_exit"
             cleanup_indices = set()
@@ -978,6 +1058,12 @@ def _conditional_candidates(mlil, head, region, analysis):
                 "obb": head,
                 "if_il": if_il,
                 "shared_exit": shared_exit,
+                "shared_condition": shared_condition,
+                "shared_condition_witness": (
+                    _shared_condition_witness(shared_condition)
+                    if shared_condition is not None
+                    else None
+                ),
                 "state_var": root,
                 "true_target": true_route["target"],
                 "false_target": false_route["target"],
@@ -1264,20 +1350,40 @@ def _replacements_for_redirection(redirection):
         rewrite_mode = redirection.get("rewrite_mode")
         if rewrite_mode == "shared_exit":
             jump = redirection.get("shared_exit")
-            state_var = redirection.get("state_var")
-            true_token = redirection.get("true_token")
-            false_token = redirection.get("false_token")
             true_start = getattr(redirection.get("true_target"), "start", None)
             false_start = getattr(redirection.get("false_target"), "start", None)
             if (
                 _op(jump) != M.MLIL_GOTO
-                or state_var is None
+                or not _valid_instruction_index(true_start)
+                or not _valid_instruction_index(false_start)
+            ):
+                return None
+
+            shared_condition = redirection.get("shared_condition")
+            if shared_condition is not None:
+                if _op(shared_condition) != M.MLIL_IF:
+                    return None
+
+                def replace(mlil, old_jump):
+                    loc = ILSourceLocation.from_instruction(old_jump)
+                    return mlil.if_expr(
+                        _copy_condition(mlil, shared_condition.condition),
+                        copied_label_for_source(mlil, true_start),
+                        copied_label_for_source(mlil, false_start),
+                        loc,
+                    )
+
+                return ((jump, replace),)
+
+            state_var = redirection.get("state_var")
+            true_token = redirection.get("true_token")
+            false_token = redirection.get("false_token")
+            if (
+                state_var is None
                 or not _valid_state_token(true_token)
                 or not _valid_state_token(false_token)
                 or true_token[1] != false_token[1]
                 or true_token[0] == false_token[0]
-                or not _valid_instruction_index(true_start)
-                or not _valid_instruction_index(false_start)
             ):
                 return None
 
@@ -1397,6 +1503,22 @@ def _current_plan_source(mlil, source):
     return current
 
 
+def _same_instruction_identity(left, right):
+    """Compare two BN wrappers for one exact current IL instruction."""
+    if left is None or right is None:
+        return False
+    values = ("instr_index", "expr_index", "address")
+    left_values = tuple(getattr(left, name, None) for name in values)
+    right_values = tuple(getattr(right, name, None) for name in values)
+    return (
+        getattr(left, "function", None) is getattr(right, "function", None)
+        and all(_valid_instruction_index(value) for value in left_values)
+        and left_values == right_values
+        and _op(left) == _op(right)
+        and _source_operand_witness(left) == _source_operand_witness(right)
+    )
+
+
 def rewrite_redirections_mlil(ctx, mlil, redirections):
     """Create an atomic replacement MLIL function for planned redirections."""
     if mlil is None:
@@ -1411,6 +1533,24 @@ def rewrite_redirections_mlil(ctx, mlil, redirections):
     for redirection in redirections:
         if not isinstance(redirection, dict):
             return None, 0
+        if redirection.get("rewrite_mode") == "shared_exit":
+            shared_condition = redirection.get("shared_condition")
+            if shared_condition is not None:
+                source_if = redirection.get("if_il")
+                if not _same_instruction_identity(shared_condition, source_if):
+                    return None, 0
+                current_source_if = _current_plan_source(mlil, source_if)
+                current_condition = _current_plan_source(mlil, shared_condition)
+                if (
+                    current_source_if is None
+                    or current_condition is None
+                    or not _same_instruction_identity(current_condition, current_source_if)
+                    or redirection.get("shared_condition_witness") is None
+                    or redirection["shared_condition_witness"]
+                    != _shared_condition_witness(current_condition)
+                ):
+                    return None, 0
+                redirection = {**redirection, "shared_condition": current_condition}
         planned = _replacements_for_redirection(redirection)
         if planned is None:
             return None, 0

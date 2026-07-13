@@ -1,4 +1,4 @@
-"""One-shot phase cleanup for resolved target decode computations."""
+"""Phase-owned cleanup for resolved target decode computations."""
 
 from binaryninja import (
     ILSourceLocation,
@@ -198,17 +198,12 @@ def _drop_live_escapes(ssa, candidates, by_index):
     return candidates
 
 
-def cleanup_decode(
-    mlil,
-    root_indices,
-    phase_name,
-    removable_load_roots=None,
-):
-    """NOP dead pure assignments in the decode slice rooted at ``root_indices``."""
+def _cleanup_assignments(mlil, root_indices, removable_load_roots):
+    """Return current non-SSA assignments that phase cleanup may NOP."""
     root_indices = set(root_indices or ())
     removable_load_roots = set(removable_load_roots or ())
     if mlil is None or not root_indices:
-        return 0
+        return {}
 
     ssa = mlil.ssa_form
     candidates, by_index = _candidate_slice(
@@ -218,29 +213,82 @@ def cleanup_decode(
     )
     candidates = _drop_live_escapes(ssa, candidates, by_index)
 
-    applied = 0
-    done = set()
+    assignments = {}
     for idx in sorted(candidates):
         ins = by_index[idx]
         if ins.operation not in _SSA_SET_VAR_OPS:
             continue
         non_ssa = ins.non_ssa_form
-        if non_ssa is None or non_ssa.instr_index in done:
+        if non_ssa is None or non_ssa.instr_index in assignments:
             continue
         if not _assignment_is_pure(
             non_ssa,
             allow_load=non_ssa.instr_index in removable_load_roots,
         ):
             continue
-        done.add(non_ssa.instr_index)
+        assignments[non_ssa.instr_index] = non_ssa
+    return assignments
+
+
+def _apply_cleanup_assignments(mlil, assignments):
+    applied = 0
+    for non_ssa in assignments.values():
         mlil.replace_expr(
             non_ssa.expr_index,
             mlil.nop(ILSourceLocation.from_instruction(non_ssa)),
         )
         applied += 1
-
     if applied:
         mlil.finalize()
         mlil.generate_ssa_form()
+    return applied
+
+
+def cleanup_decode(
+    mlil,
+    root_indices,
+    phase_name,
+    removable_load_roots=None,
+):
+    """NOP dead pure assignments in the decode slice rooted at ``root_indices``."""
+    assignments = _cleanup_assignments(mlil, root_indices, removable_load_roots)
+    applied = _apply_cleanup_assignments(mlil, assignments)
+    if applied:
         log_info(f"[phase-cleanup] {phase_name}: NOP'd {applied} decode instruction(s)")
     return applied
+
+
+def settle_cleanup_decode(
+    mlil,
+    root_indices,
+    phase_name,
+    removable_load_roots=None,
+):
+    """Replan current MLIL until no phase-owned assignment remains.
+
+    The loop is local to one MLIL overlay and never carries instruction indices
+    across reanalysis. A repeated plan, failed replacement, or instruction-count
+    bound stays fail-closed.
+    """
+    total = 0
+    seen_plans = set()
+    try:
+        instruction_count = len(mlil)
+    except TypeError:
+        instruction_count = len(getattr(mlil.ssa_form, "instructions", ()))
+    max_passes = max(1, instruction_count, len(set(root_indices or ())) + 1)
+    for _ in range(max_passes):
+        assignments = _cleanup_assignments(mlil, root_indices, removable_load_roots)
+        if not assignments:
+            if total:
+                log_info(f"[phase-cleanup] {phase_name}: NOP'd {total} decode instruction(s)")
+            return total, True
+        plan = tuple(assignments)
+        if plan in seen_plans:
+            return total, False
+        seen_plans.add(plan)
+        applied = _apply_cleanup_assignments(mlil, assignments)
+        if not applied:
+            return total, False
+        total += applied
+    return total, False

@@ -1,307 +1,269 @@
 # DispatchThis
 
-DispatchThis is a Binary Ninja workflow plugin for recovering readable control flow from an ARM64 ELF obfuscation family.
+DispatchThis 是从一类 ARM64 ELF 混淆中恢复可读控制流的 Binary Ninja 工作流插件。
 
-## Language
+## 术语
 
-**Sample family**:
-A set of obfuscated ARM64 ELF binaries that share enough transformation patterns
-to reuse profile helpers or implementation patterns.
-_Avoid_: generic target
+**样本家族**：
+一组共享足够多变换模式、可复用 profile helper 或实现模式的 ARM64 ELF 混淆二进制。
+_避免使用_：泛化目标
 
-**Decode gadget**:
-A short obfuscation sequence that computes a control-flow or call target from encoded data at runtime.
+**解码 gadget**：
+从编码数据在运行时计算控制流或调用目标的一小段混淆序列。
 
-**Indirect branch resolving**:
-Recovering the concrete target of a computed jump so analysis can discover the next block.
-_Avoid_: deinbr
+**间接跳转解析**：
+恢复计算跳转的具体目标，使分析可发现下一个基本块。
+_避免使用_：deinbr
 
-**Resolver profile**:
-A focused recognizer for one specific binary's obfuscation shapes. Multiple
-binary profiles may share helpers when their sample family behavior overlaps.
-_Avoid_: generic rule engine
+**解析 profile**：
+针对一个具体二进制混淆形态的聚焦识别器。当样本家族行为重叠时，多个二进制 profile
+可共享 helper。
+_避免使用_：通用规则引擎
 
-**Resolver profile contract**:
-The narrow agreement a resolver profile must satisfy: declare its metadata and
-implement only the semantic capabilities it supports for one binary's indirect
-branch, indirect call, global constant, correlated-store, deflatten, and
-string-decrypt shapes, then return standard recovery facts or plans without
-owning workflow mutations. Missing hooks are normalized to an empty result by
-the registry; identical behavior is expressed with a direct function alias. The plan hooks are
-`plan_correlated_store_rewrites`, `plan_deflatten_redirections`, and
-`plan_string_decrypt_calls`.
-_Avoid_: middleware, adapter framework, plugin rewrite layer
+**解析 profile 契约**：
+解析 profile 必须满足的窄约定：声明元数据，仅实现该二进制支持的间接分支、间接调用、
+全局常量、关联存储、去平坦化和字符串解密语义能力；返回标准恢复事实或计划，但不拥有
+工作流修改。注册表将缺失 hook 规范为无结果；相同行为用直接函数别名表示。计划 hook 为
+`plan_correlated_store_rewrites`、`plan_deflatten_redirections` 和
+`plan_string_decrypt_calls`。
+_避免使用_：middleware、adapter framework、plugin rewrite layer
 
-**Binary profile**:
-A resolver profile whose default ownership boundary is one concrete binary or
-BNDB. It may delegate shared behavior to helpers, but profile selection remains
-explicit per BinaryView.
-_Avoid_: per-family profile, automatic detector
+**二进制 profile**：
+默认所有权边界为一个具体二进制或 BNDB 的解析 profile。它可委托共享行为给 helper，但
+profile 选择始终按 BinaryView 显式完成。
+_避免使用_：按家族 profile、自动探测器
 
-**Profile ID**:
-A stable lowercase snake_case identifier for a binary profile. It should be
-traceable to the binary without exposing local paths, usernames, customer names,
-or other sensitive project labels.
-_Avoid_: sample1, current, default2, full local paths
+**Profile ID**：
+二进制 profile 稳定的小写 snake_case 标识符。应能追溯至该二进制，但不得暴露本地路径、
+用户名、客户名或其他敏感项目标签。
+_避免使用_：sample1、current、default2、完整本地路径
 
-**Profile provenance**:
-The resolver profile ID stored with function-scoped workflow evidence. Empty
-state may bind to the active profile; state containing recovery evidence cannot
-be rebound or reused under a different profile.
-_Avoid_: implicit profile migration, unowned legacy receipts
+**Profile 来源**：
+保存于函数作用域工作流证据中的解析 profile ID。空状态可绑定活动 profile；含恢复证据
+的状态不能重新绑定或在其他 profile 下复用。
+_避免使用_：隐式 profile 迁移、无所有者的旧回执
 
-**Profile helper**:
-A reusable BNIL or BinaryView inspection helper used by resolver profiles and
-passes to collect definitions, fold constants, read target data, validate
-addresses, or build recovery facts. Profile helpers reduce per-binary resolver
-code, but they do not own binary-specific recognition or workflow mutations.
-_Avoid_: utils, generic rule engine, backend
+**Profile helper**：
+供解析 profile 和 pass 使用的可复用 BNIL 或 BinaryView 检查 helper，用于收集定义、
+折叠常量、读取目标数据、校验地址或构造恢复事实。它减少按二进制编写的解析代码，但不
+拥有二进制特定识别或工作流修改。
+_避免使用_：utils、通用规则引擎、backend
 
-**MLIL helper primitive**:
-A stable profile helper in `helpers.mlil` that exposes reusable Medium Level IL
-inspection behavior, such as call iteration, expression scalar-value extraction,
-expression operation queries, or variable-definition-aware expression traversal.
-It is not a binary-specific recognizer, pattern DSL, resolver engine, or recovery
-backend mutation point.
-_Avoid_: string decrypt helper, pattern rule, resolver engine
+**MLIL helper primitive**：
+`helpers.mlil` 中稳定的 profile helper，提供可复用的 Medium Level IL 检查，例如调用
+遍历、表达式标量值提取、表达式操作查询或考虑变量定义的表达式遍历。它不是二进制特定
+识别器、模式 DSL、解析引擎或恢复后端修改点。
+_避免使用_：字符串解密 helper、模式规则、解析引擎
 
-**Expression scalar value**:
-A direct MLIL constant or Binary Ninja single-value result recovered from one
-expression without arithmetic folding, memory reads, PHI candidate expansion, or
-target validation.
-_Avoid_: full value engine, constant folder
+**表达式标量值**：
+从一个 MLIL 表达式直接恢复的常量或 Binary Ninja 单值结果，不进行算术折叠、内存读取、
+PHI 候选展开或目标校验。
+_避免使用_：完整值引擎、常量折叠器
 
-**Expression operation query**:
-A helper-level check for whether an MLIL expression tree, optionally including
-followed variable definitions, contains one of a caller-provided set of native
-MLIL operation enums or enum-derived compatibility names.
-_Avoid_: pattern matcher, string decrypt recognizer
+**表达式操作查询**：
+helper 级检查，用于判断 MLIL 表达式树（可选地包括跟随的变量定义）是否含调用者提供的
+原生 MLIL operation enum 或 enum 派生兼容名称之一。
+_避免使用_：模式匹配器、字符串解密识别器
 
-**Active resolver profile**:
-The resolver profile explicitly selected for a BinaryView. It chooses how enabled
-functions interpret that binary's obfuscation shapes; it does not enable the
-workflow for every function in the view.
-_Avoid_: automatic sample detection
+**活动解析 profile**：
+为一个 BinaryView 显式选定的解析 profile。它决定启用函数如何解释该二进制的混淆形态，
+但不会为视图内所有函数启用工作流。
+_避免使用_：自动样本检测
 
-**Default resolver profile**:
-The bundled resolver profile named `default`, representing the current binary
-rules shipped with DispatchThis. The name does not mean generic support for every
-binary or obfuscation family.
-_Avoid_: current_arm64, universal profile
+**默认解析 profile**：
+名为 `default` 的内置兼容解析 profile，保留已有 BinaryView 设置并委托给随附的具名样本
+profile。名称不表示支持所有二进制或混淆家族，也不是新样本规则的归属地。
+_避免使用_：current_arm64、universal profile
 
-**Function workflow enablement**:
-The per-function opt-in setting that decides whether DispatchThis workflow phases
-run for that function. It is separate from the BinaryView's active resolver profile.
-_Avoid_: whole-view workflow application
+**函数工作流启用状态**：
+决定 DispatchThis 工作流阶段是否为该函数运行的按函数 opt-in 设置。它与 BinaryView 的
+活动解析 profile 分离。
+_避免使用_：整视图工作流应用
 
-**Recovery fact**:
-A standard piece of recovered analysis information returned by a resolver profile,
-such as an indirect branch target, indirect call target, or global constant slot.
-Workflow callbacks decide how and when to submit recovery facts to Binary Ninja.
-_Avoid_: profile action, Binary Ninja mutation request
+**恢复事实**：
+解析 profile 返回的一项标准恢复分析信息，如间接分支目标、间接调用目标或全局常量槽位。
+工作流回调决定何时及如何将恢复事实提交给 Binary Ninja。
+_避免使用_：profile action、Binary Ninja mutation request
 
-**Recovered target set**:
-The complete set of concrete control-flow destinations supported by current
-recovery evidence. Consumers preserve every target unless the evidence proves
-that exactly one target is valid.
-_Avoid_: first target, preferred target
+**恢复目标集**：
+当前恢复证据支持的完整具体控制流目的地集合。消费者必须保留每个目标，除非证据证明
+恰好只有一个目标有效。
+_避免使用_：第一个目标、首选目标
 
-**Implicit target pruning**:
-Silently selecting one member of a recovered target set without semantic proof
-that the other members are invalid. It can erase valid CFG edges and is never a
-safe single-target convenience.
-_Avoid_: pick first, best-effort target
+**隐式目标剪枝**：
+未作语义证明便静默选择恢复目标集中的一个成员。它会抹去有效 CFG 边，因此绝不是安全的
+单目标便利操作。
+_避免使用_：pick first、best-effort target
 
-**Verified branch frontier**:
-The branch sources whose complete receipt target tuples exactly match Binary
-Ninja's current non-auto user branch metadata. Only these sources may be omitted
-from an incremental recognition run; receipt-only, automatic, missing, subset,
-superset, or changed mappings remain in the decode frontier.
-_Avoid_: cached branches, assumed-resolved sources
+**已验证分支前沿**：
+其完整回执目标元组与 Binary Ninja 当前非自动用户分支元数据完全一致的分支源。只有这些
+源可从增量识别中省略；仅有回执、自动、缺失、子集、超集或已变更映射的源仍在解码前沿。
+_避免使用_：缓存分支、假定已解析源
 
-**Complete value evidence**:
-Every concrete value supported by every semantic path of one BNIL expression.
-A helper returns the complete set or an explicit unknown result; an unsupported
-arm, bounded-expansion miss, unreadable load, or invalid target never licenses a
-known-subset result.
-_Avoid_: best-effort values, known arms only
+**完整值证据**：
+一个 BNIL 表达式每条语义路径支持的全部具体值。helper 要么返回完整集合，要么显式未知；
+不支持的臂、受限展开遗漏、无法读取的 load 或无效目标均不能许可已知子集结果。
+_避免使用_：best-effort values、仅已知分支
 
-**Current IL witness**:
-The Binary Ninja instruction object retained by a recovery plan and rebound at
-the mutation boundary by exact operation, address, instruction/expression
-indices, relevant operands, and owning IL function. A similar instruction found
-by scanning is not the same witness.
-_Avoid_: nearby match, stale plan object
+**当前 IL 见证**：
+恢复计划保留的 Binary Ninja 指令对象，在修改边界通过精确 operation、地址、
+instruction/expression 索引、相关操作数和所属 IL 函数重新绑定。扫描到的相似指令并非
+同一个见证。
+_避免使用_：附近匹配、过期计划对象
 
-**Mixed-IL operation-name seam**:
-The narrow compatibility boundary where a matcher intentionally handles both
-LLIL and MLIL and therefore compares enum-derived names to avoid equal `IntEnum`
-values crossing levels. Single-IL modules use Binary Ninja operation enums.
-_Avoid_: hand-written MLIL_* string, hand-written LLIL_* string
+**混合 IL operation-name 接缝**：
+匹配器有意同时处理 LLIL 与 MLIL 时使用的窄兼容边界，借由 enum 派生名称避免相等的
+`IntEnum` 值跨层混用。只处理单一 IL 的模块使用 Binary Ninja operation enum。
+_避免使用_：手写 MLIL_* 字符串、手写 LLIL_* 字符串
 
-**Global constant recovery fact**:
-A recovery fact that identifies a global data slot and the const-qualified type it
-should receive. Values, resolved addresses, and use sites that justified recognition
-remain resolver-profile evidence rather than part of the recovery fact.
-_Avoid_: global constant audit record, global constant mutation receipt
+**全局常量恢复事实**：
+标识全局数据槽位及其应采用的 const 限定类型的恢复事实。支撑识别的值、已解析地址和
+使用点仍属于解析 profile 证据，而非恢复事实内容。
+_避免使用_：全局常量审计记录、全局常量修改回执
 
-**Recovery backend**:
-The workflow or pass layer that consumes recovery facts and applies stable
-Binary Ninja analysis effects, such as CFG recovery, call-target application, IL
-translation, global slot typing, or cleanup. Resolver profiles and profile
-helpers feed the backend; they do not replace it.
-_Avoid_: profile helper, generic rule engine
+**恢复后端**：
+消费恢复事实并应用稳定 Binary Ninja 分析效果（CFG 恢复、调用目标应用、IL 翻译、全局
+槽位类型或清理）的工作流或 pass 层。解析 profile 和 profile helper 为其提供输入，但
+不取代它。
+_避免使用_：profile helper、通用规则引擎
 
-**Indirect call resolving**:
-Recovering the concrete callee of a computed call target.
-_Avoid_: deincall
+**间接调用解析**：
+恢复计算调用目标的具体 callee。
+_避免使用_：deincall
 
-**Call-target definition slice**:
-The complete current SSA reaching-definition chain feeding `call.dest`, including every
-PHI input. Only exact whole-variable SSA definitions mapped to current non-SSA assignments
-belong to the slice. Once the destination is replaced, only assignments in this owned
-slice whose SSA values have no other consumers may be cleaned; xrefs do not define
-ownership.
-_Avoid_: preceding instructions, whole-function dead-load scan
+**调用目标定义切片**：
+馈入 `call.dest` 的完整当前 SSA 到达定义链，包含每个 PHI 输入。只有映射到当前非 SSA
+赋值的精确整变量 SSA 定义属于切片。替换目标后，只有该自有切片中其 SSA 值无其他消费者
+的赋值可清理；xref 不定义所有权。
+_避免使用_：前序指令、整函数 dead-load 扫描
 
-**Global constant resolving**:
-Recovering read-only semantics for global data slots that the sample family stores in writable sections but uses as constants.
-_Avoid_: global variable fixing, data constant propagation
+**全局常量解析**：
+恢复样本家族置于可写 section、却作为常量使用的全局数据槽位的只读语义。
+_避免使用_：全局变量修复、全局数据常量传播
 
-**String decrypting**:
-Recovering plaintext strings from the sample family's encoded byte blobs.
-_Avoid_: generic string deobfuscation
+**字符串解密**：
+从样本家族的编码字节 blob 中恢复明文字符串。
+_避免使用_：通用字符串反混淆
 
-**String decrypt function**:
-A sample-family decoder clone that writes one plaintext string to a caller-provided buffer and marks a one-shot done flag.
-_Avoid_: string helper, generic decoder
+**字符串解密函数**：
+样本家族的 decoder clone：向调用者提供的 buffer 写入一个明文字符串，并设置一次性完成
+标志。
+_避免使用_：字符串 helper、通用 decoder
 
-**Decrypted string comment**:
-A Binary Ninja call-site comment containing the plaintext recovered for a string decrypt function invocation.
-_Avoid_: recovered string literal
+**解密字符串注释**：
+包含字符串解密函数调用恢复出的明文的 Binary Ninja 调用点注释。
+_避免使用_：恢复字符串字面量
 
-**String decrypt recovery fact**:
-The standard recovered information for one string decrypt call site: call address,
-source blob address, destination buffer address, and plaintext bytes. Workflow
-code owns turning it into a decrypted string comment.
-_Avoid_: comment plan, profile annotation
+**字符串解密恢复事实**：
+一个字符串解密调用点的标准恢复信息：调用地址、源 blob 地址、目标 buffer 地址和明文字节。
+工作流代码负责将其变为解密字符串注释。
+_避免使用_：注释计划、profile annotation
 
-**Dispatcher**:
-The flattened control-flow router that chooses the next original block from a state value.
+**调度器**：
+由状态值选择下一个原始基本块的平坦化控制流路由器。
 
-**Dispatcher cluster**:
-A connected set of dispatcher comparison blocks that route by comparing state
-tokens. Identify it from variable/constant equality, inequality, or signed or
-unsigned ordering comparisons whose variables have unique row-local direct-copy
-chains ending at the same state input; graph shape validates the cluster but is
-not the primary signal.
+**调度器簇**：
+一组以状态令牌比较进行路由的连通调度器比较块。通过变量/常量相等、不等或有符号/无符号
+有序比较识别，其变量必须有唯一的行内直接复制链并结束于同一状态输入；图形结构验证该簇，
+但不是主要信号。
 
-**Dispatcher comparison chain**:
-The unique sequence of direct, equal-width variable copies earlier in one
-dispatcher row that feeds its comparison and ends at the shared state input.
-An arbitrary definition elsewhere that traces to state is not equivalent because
-the comparison value may be stale on another entry path.
+**调度器比较链**：
+同一调度器行中更早出现的、馈入其比较并结束于共享状态输入的唯一直接等宽变量复制序列。
+其他位置追溯到状态的任意定义并不等价，因为该比较值可能在另一入口路径上过期。
 
-**Exact whole-variable read**:
-An `MLIL_VAR` or `MLIL_VAR_SSA` use of an entire variable. Field, split, and
-aliased forms remain important may-read/may-alias evidence, but they are not
-proof that a dispatcher comparison or pointer copy carries the complete value.
-_Avoid_: treating `VAR_FIELD` as a direct copy
+**精确整变量读取**：
+读取完整变量的 `MLIL_VAR` 或 `MLIL_VAR_SSA` 使用。字段、split 和 aliased 形式仍是重要的
+may-read/may-alias 证据，但不能证明调度器比较或指针复制传递完整值。
+_避免使用_：将 `VAR_FIELD` 视作直接复制
 
-**Variable identity**:
-The equality/identity of Binary Ninja's underlying Variable, SSAVariable, or
-register object after explicit wrapper normalization. A display name is not
-identity because distinct storage objects can render the same `str`/`repr`.
-_Avoid_: string-keyed bindings, same-name fallback
+**变量身份**：
+显式规范化 wrapper 后的 Binary Ninja 底层 Variable、SSAVariable 或 register 对象的
+equality/identity。显示名不是身份，因为不同存储对象可有相同 `str`/`repr`。
+_避免使用_：字符串键绑定、同名回退
 
-**Resolved dispatcher predicate**:
-A predicate-variable IF whose defining comparison is a current instruction
-earlier in the same dispatcher row. Copy-chain ordering is measured at that
-comparison, not at the later IF, so a post-comparison state copy is never replay
-evidence.
+**已解析调度器谓词**：
+以谓词变量作为条件的 IF，其定义比较是同一调度器行中更早的当前指令。复制链顺序在该比较
+处而非后续 IF 处衡量，因此比较后的状态复制绝不是重放证据。
 
-**State address escape**:
-Publishing `ADDRESS_OF` or `ADDRESS_OF_FIELD` of the dispatcher state, directly
-or through variable/holder definitions, into memory or an unknown
-memory-effecting operation. Once stored or retained, a later unknown operation
-or non-exact store can recover and mutate the state even without an explicit
-pointer argument.
+**状态地址逃逸**：
+将调度器状态的 `ADDRESS_OF` 或 `ADDRESS_OF_FIELD` 直接或经变量/holder 定义发布到内存或
+未知内存效果操作。地址一旦被存储或保留，后续未知操作或非精确 store 即使没有显式指针
+参数也可能重新取得并修改状态。
 
-**Concrete dispatcher replay**:
-Routing one recovered `(state_token, width)` through the actual dispatcher CFG by
-evaluating each comparison with its original operand order and bitvector
-signedness. This proves a target for that token without constructing symbolic
-state intervals.
-_Avoid_: symbolic range recovery, assumed comparison arm
+**具体调度器重放**：
+保持原操作数顺序和位向量有符号性，通过实际调度器 CFG 路由一个恢复的
+`(state_token, width)`。它证明该令牌的目标，不构建符号状态区间。
+_避免使用_：符号范围恢复、假定比较臂
 
-**State variable**:
-The value consumed by the dispatcher to select the next original block.
+**状态变量**：
+调度器读取以选择下一个原始基本块的值。
 
-**Dispatcher comparison variable**:
-The row-local/root value read by dispatcher comparisons. It is normally the
-state variable itself. When every dispatcher ingress passes through one proved
-equal-width whole-variable latch, it may be a refreshed copy of the transition
-state variable.
+**调度器比较变量**：
+调度器比较读取的行内根值，通常就是状态变量。若每个调度器入口都经过一个已证明的等宽整
+变量 latch，它可为转移状态变量的刷新副本。
 
-**Shared state latch**:
-The unique dispatcher-ingress copy chain that refreshes the dispatcher
-comparison variable from the variable written by original blocks. It is a
-dispatcher boundary only when at least two independent dispatcher target-head
-regions own distinct writes feeding it; an OBB-local state-selection join is not
-a shared latch.
+**共享状态 latch**：
+由原始基本块写入的变量刷新调度器比较变量的、唯一调度器入口复制链。仅当至少两个独立的
+调度器目标头区域拥有不同写入并馈入它时，才是调度器边界；OBB 局部状态选择合并不是共享
+latch。
 
-**State token**:
-The opaque dispatcher value compared against the state variable. Its bit width is
-part of its identity; do not assume all state tokens are 32-bit.
+**状态令牌**：
+与状态变量比较的不透明调度器值。位宽属于其身份；不得假定所有令牌均为 32 位。
 
-**Original basic block**:
-A block from the original control flow before flattening redirected it through the dispatcher.
-_Avoid_: OBB outside short code comments
+**原始基本块**：
+平坦化将其经调度器重定向前，来自原控制流的基本块。
+_避免使用_：短代码注释以外的 OBB
 
-**Deflattening**:
-Reconnecting original basic blocks directly after dispatcher-controlled successors are recovered.
+**去平坦化**：
+恢复调度器控制后继后，将原始基本块重新直接相连。
 
-**Obsolete state write**:
-A dispatcher-state assignment or store proved unnecessary because its owning
-transition is redirected directly to the recovered successor. A deflatten plan
-identifies it by exact current-MLIL instruction index; matching token values or
-variables elsewhere are not cleanup evidence.
-_Avoid_: state-token scan, function-wide cleanup match
+**去平坦化语义验收**：
+以恢复后高层控制流仍表达原始程序谓词、且不再以不透明调度器状态令牌决定原始分支为准。
+它不以 switch 展示形状、MLIL 形状或工作流阶段回执作为完成证据。
+_避免使用_：显示为 switch、receipt 已关闭
 
-**Atomic deflatten replacement**:
-One MLIL copy-transform containing every selected dispatcher-exit or conditional
-rewrite and every exact obsolete-state-write NOP. If any selected rewrite cannot
-be applied, none of the replacement is installed.
+**共享尾谓词重放**：
+条件两臂保留共享语义尾部时，在其最终调度器出口重建原始条件的方式。仅当该条件是当前、
+直接变量/常量比较，且变量在两臂和共享尾部没有可观察修改或逃逸时可用；否则保留由状态
+令牌路由的出口。
+_避免使用_：默认复制条件、按 token 强制恢复语义
 
-**Unconditional transition**:
-A recovered original-block successor selected by one concrete state token; the
-region may contain multiple state writes only when all of them resolve to that
-same token.
+**过时状态写入**：
+因其所属转移被直接重定向到已恢复后继而证明不再必要的调度器状态赋值或存储。去平坦化
+计划按精确当前 MLIL 指令索引识别它；其他位置匹配的令牌值或变量不是清理证据。
+_避免使用_：状态令牌扫描、整函数清理匹配
 
-**Conditional transition**:
-A recovered original-block successor set selected from multiple state tokens by
-program control flow, such as a branch/state-selection diamond. For the current sample
-family it carries two branch outcomes, each with its own state token and target
-original basic block. Deflattening rewrites conditional transitions when both
-branch outcomes resolve, every path establishes its token, and the rewritten
-region is private. It preserves arm execution when distinct dispatcher exits
-exist. When both arms converge into one private semantic tail, it preserves the
-tail and rewrites only its unique dispatcher exit using the already-written
-state token. Otherwise it shortcuts the condition only with complete
-state-channel bypass proof.
+**原子去平坦化替换**：
+一个包含每个已选调度器出口或条件改写，以及每个精确过时状态写入 NOP 的 MLIL
+copy-transform。任一已选改写无法应用时，不安装任何替换。
 
-**Workflow phase**:
-A named stage of per-function recovery work whose result controls whether later recovery work may run.
+**无条件转移**：
+由一个具体状态令牌选择的已恢复原始块后继；仅当区域中多个状态写入均解析为同一令牌时，
+才允许这些写入。
 
-**Reanalysis-triggering mutation**:
-A Binary Ninja function-state edit that can schedule function analysis again and therefore can re-enter the workflow.
+**条件转移**：
+由程序控制流在多个状态令牌中选择的已恢复原始块后继集合，例如分支/状态选择菱形。当前
+样本家族中，它携带两个分支结果，各有状态令牌和目标原始基本块。两分支目标均解析、每条
+路径均建立其令牌且改写区域私有时，去平坦化会改写条件转移。不同调度器出口存在时它保留
+分支执行；两臂汇合到同一私有语义尾部时它保留尾部，仅以已写状态令牌改写唯一调度器出口；
+其他情况只有完整证明可绕过状态通道时才捷径化条件。
 
-**Phase cleanup**:
-Dead target-decode IL removal for the indirect branch or call phase after its
-owning workflow phase reaches stability. Its receipt is marked done only after
-the current IL has no phase-owned cleanup changes left, so Binary Ninja
-reanalysis can replay erased cleanup overlays. Deflatten state-write NOPs belong
-to the atomic deflatten replacement, not phase cleanup. Branch condition
-translation may contribute the exact contiguous assignment prefix of its proved
-source IF; SSA liveness, rather than prefix membership alone, decides what is
-dead.
+**工作流阶段**：
+按函数恢复工作的具名阶段，其结果决定后续恢复能否运行。
+
+**触发重新分析的修改**：
+可能再次安排函数分析、从而重新进入工作流的 Binary Ninja 函数状态编辑。
+
+**阶段清理**：
+间接分支或调用阶段达到稳定后，在当前 MLIL 上从所属 phase 的精确根反复规划并移除死亡
+目标解码 IL。仅本轮未 NOP 且计划为空时标记回执完成；不得为确认清理主动安排重新分析。
+计划重复或应用失败则保持回执开放并失败关闭。去平坦化状态写入 NOP 属于原子去平坦化
+替换，不属阶段清理。分支条件翻译可提供其已证明源 IF 的精确连续赋值前缀；只有 SSA
+存活性而非前缀归属本身决定其是否死亡。
+
+**当前分支清理固定点**：
+同一份当前 MLIL overlay 中，已按精确 branch receipt 根局部清理且再次计算为空的状态。若
+branch cleanup receipt 仅因本轮 translator 在已安装 overlay 中实际 NOP 且局部收敛而保持开放，
+`cleanup_overlay_ready` 才允许 deflatten 使用这个当前固定点；它不是跨重新分析持久化的
+receipt，也不能替代调用清理证明。
+_避免使用_：旧 instruction index、已关闭 receipt 的同义词

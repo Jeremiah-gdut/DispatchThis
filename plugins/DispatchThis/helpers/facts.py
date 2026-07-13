@@ -33,19 +33,9 @@ def _targets(values):
     return targets
 
 
-def _int_set(name, values):
-    if values is None:
-        return set()
-    try:
-        return {_require_int(name, value) for value in values}
-    except TypeError as exc:
-        raise MalformedRecoveryFact(f"{name} must be an iterable of integers") from exc
-
-
 def branch_fact(
     jump_il,
     targets,
-    cleanup_roots=None,
 ):
     jump_il = _require_object("jump_il", jump_il)
     fact = {
@@ -57,8 +47,6 @@ def branch_fact(
         "targets": _targets(targets),
         "jump_il": jump_il,
     }
-    if cleanup_roots is not None:
-        fact["cleanup_roots"] = _int_set("cleanup_roots", cleanup_roots)
     return fact
 
 
@@ -66,27 +54,17 @@ def call_fact(
     call_il,
     target,
     decode_def=None,
-    cleanup_roots=None,
     call_addr=None,
-    cleanup_load_roots=None,
 ):
     call_il = _require_object("call_il", call_il)
     if call_addr is None:
         call_addr = getattr(call_il, "address", None)
-    roots = _int_set("cleanup_roots", cleanup_roots)
-    load_roots = _int_set("cleanup_load_roots", cleanup_load_roots)
-    if not load_roots <= roots:
-        raise MalformedRecoveryFact("cleanup_load_roots must be a subset of cleanup_roots")
-    fact = {
+    return {
         "call_il": call_il,
         "call_addr": _require_int("call_addr", call_addr),
         "target": _require_int("target", target),
         "decode_def": decode_def,
-        "cleanup_roots": roots,
     }
-    if load_roots:
-        fact["cleanup_load_roots"] = load_roots
-    return fact
 
 
 def global_constant_fact(slot_addr, type_name):

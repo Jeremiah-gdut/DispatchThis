@@ -55,10 +55,16 @@ class FakeSSA:
 
 
 class FakeMLIL:
-    def __init__(self, ssa):
+    def __init__(self, ssa, instruction_count=None):
         self.ssa_form = ssa
+        self.instruction_count = instruction_count
         self.replaced = []
         self.finalized = False
+
+    def __len__(self):
+        if self.instruction_count is None:
+            return len(self.ssa_form.instructions)
+        return self.instruction_count
 
     def replace_expr(self, expr_index, replacement):
         self.replaced.append((expr_index, replacement))
@@ -147,6 +153,54 @@ def test_cleanup_decode_uses_phi_as_connector_but_never_nops_phi():
     assert phase_cleanup.cleanup_decode(mlil, {1, 20}, "call") == 1
     assert mlil.replaced == [(101, ("nop", ("loc", 101)))]
     assert mlil.finalized is True
+
+
+def test_cleanup_settlement_replans_current_mlil_until_no_owned_assignment_remains(monkeypatch):
+    first = NonSSA(1, 101)
+    second = NonSSA(2, 102)
+    assignments = [{1: first}, {2: second}, {}]
+    mlil = FakeMLIL(FakeSSA())
+
+    monkeypatch.setattr(
+        phase_cleanup,
+        "_cleanup_assignments",
+        lambda *_args, **_kwargs: assignments.pop(0),
+    )
+
+    assert phase_cleanup.settle_cleanup_decode(mlil, {1, 2}, "branch") == (2, True)
+    assert [expr_index for expr_index, _replacement in mlil.replaced] == [101, 102]
+
+
+def test_cleanup_settlement_fails_closed_when_the_current_plan_repeats(monkeypatch):
+    assignment = NonSSA(1, 101)
+    assignments = [{1: assignment}, {1: assignment}]
+    mlil = FakeMLIL(FakeSSA())
+
+    monkeypatch.setattr(
+        phase_cleanup,
+        "_cleanup_assignments",
+        lambda *_args, **_kwargs: assignments.pop(0),
+    )
+
+    assert phase_cleanup.settle_cleanup_decode(mlil, {1}, "branch") == (1, False)
+
+
+def test_cleanup_settlement_bounds_nonrepeating_plans(monkeypatch):
+    assignments = [
+        {1: NonSSA(1, 101)},
+        {2: NonSSA(2, 102)},
+        {3: NonSSA(3, 103)},
+    ]
+    mlil = FakeMLIL(FakeSSA(), instruction_count=2)
+
+    monkeypatch.setattr(
+        phase_cleanup,
+        "_cleanup_assignments",
+        lambda *_args, **_kwargs: assignments.pop(0),
+    )
+
+    assert phase_cleanup.settle_cleanup_decode(mlil, {1}, "branch") == (2, False)
+    assert [expr_index for expr_index, _replacement in mlil.replaced] == [101, 102]
 
 
 def test_cleanup_decode_never_nops_faulting_or_unmodeled_assignments():

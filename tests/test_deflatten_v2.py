@@ -1,4 +1,5 @@
 import types
+from copy import copy
 
 import pytest
 from binaryninja import MediumLevelILOperation
@@ -1584,6 +1585,66 @@ def test_compute_redirections_preserves_shared_semantic_tail():
     assert cond["obsolete_state_writes"] == set()
 
 
+def test_compute_redirections_replays_an_unchanged_shared_predicate():
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+
+    redirections = compute_redirections(FakeBv(), func)
+    plan = next(item for item in redirections if item.get("obb") is chooser)
+
+    assert plan["rewrite_mode"] == "shared_exit"
+    assert plan["shared_condition"] is chooser[10]
+    assert plan["shared_condition_witness"] == (
+        MediumLevelILOperation.MLIL_CMP_E,
+        "guard",
+        (1, 8),
+        True,
+    )
+    # The state write is intentionally retained for shared exits even when the
+    # original predicate can be replayed: that region may carry semantic work.
+    assert plan["obsolete_state_writes"] == set()
+
+
+def test_compute_redirections_does_not_replay_a_shared_predicate_after_shared_write():
+    func, chooser, join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    write = join[14]
+    write.dest = "guard"
+    write.src = const(0)
+    write.vars_written = ["guard"]
+    func.mlil._defs["guard"] = [write]
+
+    redirections = compute_redirections(FakeBv(), func)
+    plan = next(item for item in redirections if item.get("obb") is chooser)
+
+    assert plan["rewrite_mode"] == "shared_exit"
+    assert plan["shared_condition"] is None
+
+
+@pytest.mark.parametrize("address_op", ["MLIL_ADDRESS_OF", "MLIL_ADDRESS_OF_FIELD"])
+def test_shared_predicate_replay_rejects_address_taken_before_source_if(address_op):
+    address = set_var("guard_holder", Expr(address_op, src="guard", offset=4), 0)
+    source = if_instr(cmp_e("guard", 1), 1, 2, 1)
+    Block(0, address, source)
+
+    assert deflatten._addresses_variable_before_if(source, "guard")
+
+
+@pytest.mark.parametrize("address_op", ["MLIL_ADDRESS_OF", "MLIL_ADDRESS_OF_FIELD"])
+def test_shared_predicate_replay_rejects_predicate_address_escape(address_op):
+    func, chooser, join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    join[14].dest = "guard_holder"
+    join[14].src = Expr(address_op, src="guard", offset=4)
+    join[14].vars_written = ["guard_holder"]
+
+    redirections = compute_redirections(FakeBv(), func)
+    plan = next(item for item in redirections if item.get("obb") is chooser)
+
+    assert plan["rewrite_mode"] == "shared_exit"
+    assert plan["shared_condition"] is None
+
+
 def test_compute_redirections_preserves_arm_selected_shared_semantics():
     func, chooser, join, obb2, obb3 = build_cond_function_with_arm_selected_shared_semantics()
 
@@ -1984,6 +2045,163 @@ def test_rewrite_conditional_shared_exit_preserves_semantic_tail(monkeypatch):
             loc,
         ),
     }
+
+
+def test_rewrite_conditional_shared_exit_replays_original_predicate(monkeypatch):
+    func, chooser, join, obb2, obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
+    copied = CopiedMlil()
+
+    def fake_copy(ctx_arg, replacements, mlil=None):
+        assert ctx_arg is ctx
+        assert mlil is func.mlil
+        copied.outputs[join[15].instr_index] = replacements[join[15].instr_index](
+            copied,
+            join[15],
+        )
+        return copied, 1
+
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        fake_copy,
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(ctx, func.mlil, [plan])
+
+    loc = ("loc", join[15].expr_index)
+    assert new_mlil is copied
+    assert applied == 1
+    assert copied.outputs == {
+        join[15].instr_index: (
+            "if",
+            ("copy", chooser[10].condition),
+            ("copied-label", obb2.start),
+            ("copied-label", obb3.start),
+            loc,
+        ),
+    }
+
+
+def test_rewrite_shared_exit_rejects_stale_replayed_condition(monkeypatch):
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    other, other_chooser, _other_join, _other_obb2, _other_obb3 = (
+        build_cond_function_with_shared_semantic_tail()
+    )
+    other_chooser[10].condition = cmp_e("guard", 1)
+    plan["shared_condition"] = other_chooser[10]
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("stale condition reached copy backend"),
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [plan],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_shared_exit_accepts_an_equivalent_bn_instruction_wrapper(monkeypatch):
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    # Binary Ninja may materialize a distinct Python wrapper for the same IL
+    # instruction. Exact IL coordinates and operands, not wrapper identity,
+    # bind the replayed predicate to the source IF.
+    plan["shared_condition"] = copy(chooser[10])
+    copied = CopiedMlil()
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: (copied, 1),
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [plan],
+    )
+
+    assert new_mlil is copied
+    assert applied == 1
+
+
+def test_rewrite_shared_exit_rejects_different_current_if_with_same_predicate(monkeypatch):
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    other = Block(400, if_instr(cmp_e("guard", 1), 20, 30, 400))
+    append_block(func.mlil, other)
+    plan["shared_condition"] = other[400]
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("unbound condition reached copy backend"),
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [plan],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_shared_exit_rejects_missing_predicate_witness(monkeypatch):
+    func, chooser, _join, _obb2, _obb3 = build_cond_function_with_shared_semantic_tail()
+    chooser[10].condition = cmp_e("guard", 1)
+    plan = next(
+        item
+        for item in compute_redirections(FakeBv(), func)
+        if item.get("obb") is chooser
+    )
+    plan["shared_condition_witness"] = None
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail("unwitnessed condition reached copy backend"),
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [plan],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
 
 
 def test_rewrite_conditional_shared_exit_rejects_token_outside_width(monkeypatch):

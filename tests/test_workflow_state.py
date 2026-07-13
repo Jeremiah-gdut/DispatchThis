@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from plugins.DispatchThis.workflow_state import (
+    CLEANUP_RECEIPT_VERSION,
     FunctionWorkflowState,
     ProfileStateMismatch,
     ROOT_KEY,
@@ -164,22 +165,42 @@ def test_existing_user_branch_metadata_seeds_branch_receipts():
     assert state.branch_updates_for({0x4000: (0x5000,)}) == {0x4000: (0x5000,)}
 
 
-def test_branch_cleanup_roots_are_tracked_as_instruction_indices():
+def test_branch_cleanup_overlay_exception_is_scoped_to_one_translation_attempt():
     state = FunctionWorkflowState(FakeFunction())
-    state.mark_branch_applied(0x1000, (0x2000, 0x3000))
-    state.mark_branch_cleanup_done()
 
-    assert state.set_branch_cleanup_roots(0x1000, [12, 11, 12]) is True
-    assert state.branch_targets() == {0x1000: (0x2000, 0x3000)}
-    assert state.branch_cleanup_root_indices() == {11, 12}
+    state.mark_branch_cleanup_overlay_ready()
     assert state.branch_cleanup_needed()
+    assert state.branch_cleanup_overlay_ready()
 
+    state.clear_branch_cleanup_overlay_ready()
+    assert not state.branch_cleanup_overlay_ready()
+
+    state.mark_branch_cleanup_overlay_ready()
+    state.invalidate_branch_cleanup()
+    assert state.branch_cleanup_needed()
+    assert not state.branch_cleanup_overlay_ready()
+
+    state.mark_branch_cleanup_overlay_ready()
     state.mark_branch_cleanup_done()
-    assert state.set_branch_cleanup_roots(0x1000, [11, 12]) is False
     assert not state.branch_cleanup_needed()
+    assert not state.branch_cleanup_overlay_ready()
 
-    state.mark_branch_applied(0x1000, (0x4000,))
-    assert state.branch_cleanup_root_indices() == set()
+
+def test_legacy_branch_cleanup_indices_are_discarded():
+    func = FakeFunction()
+    func.session_data[ROOT_KEY] = {
+        "branch": {
+            "stable": True,
+            "receipts": {0x1000: (0x2000,)},
+            "cleanup_roots": {0x1000: {11, 12}},
+            "cleanup_done": True,
+            "cleanup_version": CLEANUP_RECEIPT_VERSION - 1,
+        },
+    }
+
+    state = FunctionWorkflowState(func)
+
+    assert "cleanup_roots" not in state.data["branch"]
     assert state.branch_cleanup_needed()
 
 
@@ -264,11 +285,13 @@ def test_stale_call_receipt_never_hides_a_changed_bn_adjustment():
     state = FunctionWorkflowState(func)
     state.mark_call_adjusted(0x4000, 0x5000)
     state.mark_call_stable()
+    state.mark_call_cleanup_done()
     state.mark_global_stable()
 
     assert state.call_receipts == {0x4000: 0x5000}
     assert state.call_adjustment_needed(0x4000, "new-type")
     assert not state.call_stable()
+    assert state.call_cleanup_needed()
     assert not state.global_stable()
 
 
@@ -279,12 +302,14 @@ def test_old_cleanup_receipts_are_invalidated_once():
             "stable": True,
             "receipts": {},
             "cleanup_done": True,
+            "cleanup_version": CLEANUP_RECEIPT_VERSION - 1,
         },
         "call": {
             "stable": True,
             "receipts": {},
             "targets": {},
             "cleanup_done": True,
+            "cleanup_version": CLEANUP_RECEIPT_VERSION - 1,
         },
     }
 
@@ -320,7 +345,7 @@ if __name__ == "__main__":
     test_global_phase_invalidates_on_new_phase_work()
     test_global_slot_changes_invalidate_phase_cleanup_receipts()
     test_existing_user_branch_metadata_seeds_branch_receipts()
-    test_branch_cleanup_roots_are_tracked_as_instruction_indices()
+    test_legacy_branch_cleanup_indices_are_discarded()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
     test_cleanup_receipts_invalidate_with_phase_targets()
     test_old_cleanup_receipts_are_invalidated_once()

@@ -1,43 +1,43 @@
-# ADR 0012: Call-target slices own dead-load cleanup
+# ADR 0012：call-target slice 持有 dead-load cleanup
 
-## Status
+## 状态
 
-Accepted.
+已接受。
 
-## Context
+## 背景
 
-After an indirect call destination was replaced with a concrete callee, ordinary
-phase cleanup removed the arithmetic decode assignments but deliberately retained
-loads. HLIL therefore showed one unused global read per resolved call. Treating every
-load as pure would make unrelated memory accesses removable. Proving immutability from
-BinaryView xrefs is also unsuitable here because obfuscated or incomplete CFGs can make
-xrefs incomplete.
+间接调用 destination 被替换为具体 callee 后，普通 phase cleanup 会移除算术解码赋值，却有意
+保留 load。因此 HLIL 中每个已解析调用会显示一条未使用的全局读取。若把所有 load 都视为纯，
+则无关内存访问也可能被移除。通过 BinaryView xref 证明不可变性也不合适，因为混淆或不完整
+CFG 会导致 xref 不完整。
 
-## Decision
+## 决策
 
-The indirect-call plan computes the complete current **SSA reaching-definition** slice
-feeding `call.dest`. It follows exact `SSAVariable` versions and every `MLIL_VAR_PHI`
-input. Only whole `MLIL_SET_VAR_SSA` definitions that map back to exact current
-non-SSA `MLIL_SET_VAR` instructions become cleanup roots. Field, split, and aliased
-definitions are proof boundaries. Assignments in the slice whose source contains a load
-are additionally recorded as `cleanup_load_roots`.
+间接调用计划计算输入 `call.dest` 的完整当前 **SSA reaching-definition** slice。它跟随精确的
+`SSAVariable` version 及所有 `MLIL_VAR_PHI` input。只有映射回精确当前非 SSA
+`MLIL_SET_VAR` instruction 的完整 `MLIL_SET_VAR_SSA` definition 才可成为 cleanup root。
+字段、拆分与别名 definition 是证明边界。slice 中 source 含有 load 的 assignment 还会被记录为
+`cleanup_load_roots`。
 
-At the mutation boundary the backend recomputes both root sets from the current call and
-replaces any indices carried by the plan. If an exact SSA slice is unavailable, call
-resolution may still proceed but cleanup receives no roots. After the call destination
-is rewritten, phase cleanup uses current SSA uses to remove a witnessed load assignment
-only when its value has no consumer outside the obsolete target computation. Calls,
-stores, intrinsics, unimplemented IL, partial writes, and unrelated loads remain
-ineligible. A call receipt or the contiguous assignments before its address never
-reconstruct cleanup ownership. No xref participates in this ownership proof.
+在 mutation boundary，backend 从当前 call 重新计算两个 root set；profile fact 不携带这些
+index。
+若没有精确 SSA slice，call resolution 仍可进行，但 cleanup 没有 root。call destination 改写后，
+phase cleanup 仅当一个带 witness 的 load assignment 的 value 在过时 target computation 之外
+没有 consumer 时，才利用当前 SSA use 移除它。call、STORE、intrinsic、unimplemented IL、partial
+write 与无关 load 仍不具备资格。call receipt 或其 address 前连续的 assignment 不能重新构造
+cleanup ownership。该 ownership proof 中不使用 xref。
 
-## Consequences
+## 后果
 
-- Dead global reads left by indirect-call decoding disappear from HLIL.
-- A target-decode value reused as a callback argument or by ordinary program logic stays
-  live and is not removed.
-- Profile-provided root indices cannot authorize cleanup after IL regeneration; current
-  call-site SSA is the sole mutation-time authority.
-- A profile-provided `decode_def` is descriptive evidence only. The rewrite changes the
-  call destination, while the recomputed SSA slice exclusively owns decode cleanup.
-- Call cleanup remains an MLIL overlay and may replay after Binary Ninja reanalysis.
+- 间接调用解码留下的死全局读取从 HLIL 中消失。
+- 被 callback argument 或普通程序逻辑复用的 target-decode value 保持 live，不会被删除。
+- profile 提供的 root index 在 IL 重新生成后不能授权 cleanup；当前 call-site SSA 是
+  mutation-time 的唯一权威。
+- profile 提供的 `decode_def` 只是描述性 evidence。rewrite 改变 call destination，而重新
+  计算的 SSA slice 独占 decode cleanup。
+- Call cleanup 是 MLIL overlay；自然重新分析后从当前调用计划重新证明，绝不以旧 root index
+  重放。
+- 仅将旧回执重新绑定为 direct call 不提供 cleanup ownership；当没有 fresh indirect-call
+  plan 时，cleanup receipt 必须保持开放，不能以空 root 集合关闭。
+- fresh plan 的当前 SSA slice 无法证明时同样不提供 cleanup ownership；后端明确标记该状态，
+  保持 receipt 开放，而不是把未证明误作空 slice。

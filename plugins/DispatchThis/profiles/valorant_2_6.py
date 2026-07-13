@@ -17,7 +17,7 @@ PROFILE_DESCRIPTION = (
 # - indirect call gadget: custom
 # - global constants: custom
 # - correlated stores: custom
-# - deflatten: alias default
+# - deflatten: alias default compatibility profile
 # - string decrypt: custom (rem-loop, index0-loop, unrolled; ignores mlil_stable)
 #
 # Validation:
@@ -503,14 +503,10 @@ def resolve_call_gadget(bv, il):
                 log_warn(f"[valorant_2_6:call] {hex(call_il.address)}: multiple targets")
             continue
         decode_def = _single_decode_def(il, call_il.dest)
-        cleanup_roots = mlil.cleanup_roots_for_expr(il, call_il.dest)
-        if decode_def is not None:
-            cleanup_roots.add(decode_def.instr_index)
         out.append(facts.call_fact(
             call_il,
             targets[0],
             decode_def=decode_def,
-            cleanup_roots=cleanup_roots,
         ))
     return out
 

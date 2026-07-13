@@ -202,9 +202,19 @@ def test_indirect_call_plan_preserves_call_fact_output():
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": decode_def,
-        "cleanup_roots": {0},
-        "cleanup_load_roots": {0},
     }]
+
+
+def test_unresolved_call_target_keeps_the_two_part_result_contract(monkeypatch):
+    bv, mlil, call_il, _decode_def = decoded_call_fixture()
+    monkeypatch.setattr(
+        indirect_calls,
+        "fold_constant_value",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert indirect_calls.resolve_call_target(bv, mlil, call_il) == (None, None)
+    assert indirect_calls.plan_indirect_calls(bv, mlil) == []
 
 
 def test_call_plan_marks_only_loads_in_the_full_target_definition_slice():
@@ -247,14 +257,15 @@ def test_call_plan_marks_only_loads_in_the_full_target_definition_slice():
 
     plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
 
-    assert plan["cleanup_roots"] == {0, 1}
-    assert plan["cleanup_load_roots"] == {0}
+    assert "cleanup_roots" not in plan
+    assert "cleanup_load_roots" not in plan
 
     stale = {**plan, "cleanup_roots": {1, 999}, "cleanup_load_roots": {1, 999}}
     rebound = indirect_calls.validate_current_call_plans(mlil, [stale])
 
     assert rebound[0]["cleanup_roots"] == {0, 1}
     assert rebound[0]["cleanup_load_roots"] == {0}
+    assert rebound[0]["cleanup_proven"] is True
 
 
 def test_call_cleanup_slice_uses_only_the_ssa_definition_reaching_the_call():
@@ -295,7 +306,10 @@ def test_call_cleanup_slice_uses_only_the_ssa_definition_reaching_the_call():
         },
     )
 
-    plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
+    plan = indirect_calls.validate_current_call_plans(
+        mlil,
+        indirect_calls.plan_indirect_calls(bv, mlil),
+    )[0]
 
     assert plan["cleanup_roots"] == {0, 1}
     assert plan["cleanup_load_roots"] == {0}
@@ -342,7 +356,10 @@ def test_call_cleanup_slice_follows_every_exact_phi_input():
         },
     )
 
-    plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
+    plan = indirect_calls.validate_current_call_plans(
+        mlil,
+        indirect_calls.plan_indirect_calls(bv, mlil),
+    )[0]
 
     assert plan["cleanup_roots"] == {0, 1, 2}
     assert plan["cleanup_load_roots"] == {0, 1}
@@ -358,9 +375,13 @@ def test_unprovable_ssa_slice_disables_cleanup_without_losing_resolution():
     call_il.ssa_form.dest = aliased_target
     call_il.ssa_form.children = [aliased_target]
 
-    plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
+    plan = indirect_calls.validate_current_call_plans(
+        mlil,
+        indirect_calls.plan_indirect_calls(bv, mlil),
+    )[0]
 
     assert plan["target"] == 0x5000
+    assert plan["cleanup_proven"] is False
     assert plan["cleanup_roots"] == set()
     assert "cleanup_load_roots" not in plan
 
@@ -380,9 +401,13 @@ def test_missing_function_ssa_does_not_block_call_target_resolution():
     )
     mlil = FakeMlil([decode_def, call_il], {"target": [decode_def]})
 
-    plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
+    plan = indirect_calls.validate_current_call_plans(
+        mlil,
+        indirect_calls.plan_indirect_calls(bv, mlil),
+    )[0]
 
     assert plan["target"] == 0x5000
+    assert plan["cleanup_proven"] is False
     assert plan["cleanup_roots"] == set()
     assert "cleanup_load_roots" not in plan
 
@@ -458,7 +483,10 @@ def test_current_call_plan_collapses_exact_duplicates_and_rejects_target_conflic
     bv, mlil, _call_il, _decode_def = decoded_call_fixture()
     plan = indirect_calls.plan_indirect_calls(bv, mlil)[0]
 
-    assert indirect_calls.validate_current_call_plans(mlil, [plan, dict(plan)]) == [plan]
+    rebound = indirect_calls.validate_current_call_plans(mlil, [plan, dict(plan)])
+    assert len(rebound) == 1
+    assert rebound[0]["call_il"] is plan["call_il"]
+    assert rebound[0]["cleanup_roots"] == {0}
     assert indirect_calls.validate_current_call_plans(
         mlil,
         [plan, {**plan, "target": 0x6000}],
@@ -474,7 +502,6 @@ def test_call_target_receipt_rebinds_only_an_exact_current_direct_call():
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": None,
-        "cleanup_roots": set(),
     }]
     assert indirect_calls.current_call_receipt_plans(mlil, {0x4000: 0x6000}) is None
 

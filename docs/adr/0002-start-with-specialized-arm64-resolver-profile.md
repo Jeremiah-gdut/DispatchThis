@@ -1,3 +1,5 @@
-# Start with a specialized ARM64 resolver profile
+# 从专用 ARM64 resolver profile 开始
 
-The first implementation phase will build a specialized indirect-branch resolver profile for the current ARM64 ELF sample family instead of a generic rule engine. This keeps the plugin reusable across similar daily-analysis samples while avoiding premature abstractions before multiple concrete variants prove which decode-gadget parameters actually vary.
+第一阶段为当前 ARM64 ELF 样本族构建专用的间接分支 resolver profile，而不是通用规则引擎。
+这样既能让插件复用于相似的日常分析样本，又能在多个具体变体证明实际变化的解码 gadget
+参数前，避免过早抽象。

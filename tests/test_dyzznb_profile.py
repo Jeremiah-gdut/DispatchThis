@@ -23,12 +23,6 @@ from test_string_decrypt import (
 )
 
 
-def test_branch_profile_reuses_default_planner():
-    dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
-
-    assert dyzznb.resolve_branch_gadget is dyzznb.default.resolve_branch_gadget
-
-
 def test_call_profile_returns_call_facts():
     dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
     bv, il, call_il, decode_def = decoded_call_fixture()
@@ -38,8 +32,6 @@ def test_call_profile_returns_call_facts():
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": decode_def,
-        "cleanup_roots": {0},
-        "cleanup_load_roots": {0},
     }]
 
 

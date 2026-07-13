@@ -1,122 +1,93 @@
-# Add profile helper primitives before a resolver framework
+# 先增加 profile helper 基元，再考虑 resolver framework
 
-DispatchThis will reduce per-binary resolver profile development cost by adding
-small profile helper modules for repeated BNIL and BinaryView inspection work:
-LLIL definition walking, MLIL definition walking, constant folding, memory reads,
-target validation, cleanup-root collection, and recovery-fact construction.
+DispatchThis 通过增加小型 profile helper 模块，降低每个 binary 的 resolver profile 开发成本。
+这些模块处理重复的 BNIL 和 BinaryView 检查：LLIL 定义追溯、MLIL 定义追溯、常量折叠、
+内存读取、目标校验、cleanup-root 收集和 recovery-fact 构建。
 
-The helpers are shared building blocks for resolver profiles and passes. Resolver
-profiles still own binary-specific recognition and target formulas, and workflow
-callbacks still own Binary Ninja mutations, phase receipts, IL translation, and
-cleanup application.
+Helper 是 resolver profile 与 pass 的共享构件。resolver profile 仍负责 binary 特定的识别和
+目标公式；workflow callback 仍负责 Binary Ninja mutation、phase receipt、IL translation 和
+cleanup application。
 
-Profile helper APIs should be clear and documented because they may support
-future profile plugins outside the bundled profile package. They do not need
-compatibility shims before that external plugin surface exists; breaking helper
-changes can be handled by updating the helper documentation and bundled profiles.
-These APIs may expose Binary Ninja IL objects directly; do not introduce wrapper
-types just to hide the Binary Ninja API.
+Profile helper API 应清晰且有文档，因为未来可能支持 bundled profile 包之外的 profile
+plugin。在该外部插件 surface 出现前，不需要兼容 shim；helper 发生破坏性变更时，更新
+helper 文档和 bundled profile 即可。这些 API 可以直接暴露 Binary Ninja IL object；不要为了
+隐藏 Binary Ninja API 而引入 wrapper type。
 
-The stable import surface is the helper package modules:
-`DispatchThis.helpers.llil`, `DispatchThis.helpers.mlil`,
-`DispatchThis.helpers.memory`, and `DispatchThis.helpers.facts`. Profiles should
-prefer module imports such as `from DispatchThis.helpers import llil, facts` over
-importing private helper implementation details.
-The first helper pass should target this surface:
+稳定的 import surface 是 helper package module：
+`DispatchThis.helpers.llil`、`DispatchThis.helpers.mlil`、
+`DispatchThis.helpers.memory` 和 `DispatchThis.helpers.facts`。profile 应优先使用
+`from DispatchThis.helpers import llil, facts` 这类 module import，而非导入私有 helper
+实现细节。首批 helper pass 面向以下 surface：
 
-- `helpers.llil`: indirect-jump iteration, register definition peeling,
-  `const_values`, PHI-aware constant candidates, and branch fact support.
-- `helpers.mlil`: indirect-call iteration, variable definition peeling,
-  single-value constant folding, expression walking, const-address extraction,
-  and cleanup-root discovery.
-- `helpers.memory`: explicit-width reads, target/address validation, section
-  checks, and qword slot reads.
-- `helpers.facts`: branch, call, global constant, and string decrypt recovery
-  fact builders.
+- `helpers.llil`：间接跳转迭代、寄存器定义剥离、`const_values`、支持 PHI 的常量
+  candidate 和 branch fact 支持。
+- `helpers.mlil`：间接调用迭代、变量定义剥离、单值常量折叠、expression walk、
+  const-address extraction 与 cleanup-root discovery。
+- `helpers.memory`：显式宽度读取、target/address validation、section 检查与 qword slot
+  读取。
+- `helpers.facts`：branch、call、global constant 与 string decrypt recovery-fact builder。
 
-Build the first helper modules by moving reusable primitives out of existing
-passes rather than wrapping the old pass-local functions. Helper functions should
-own common edge-case handling such as missing IL, SSA/non-SSA mapping, unresolved
-definitions, constants behind variables, invalid addresses, and cleanup roots
-with live uses. Callers should not need to repeat those defensive checks.
-PHI handling is part of that helper contract: LLIL constant helpers must account
-for loop-carried PHI candidate values where possible, and MLIL cleanup-root
-helpers must treat PHI nodes as slice/liveness connectors without turning the
-PHI itself into a NOP target. CFG path or live-edge disambiguation belongs in a
-profile or pass until a concrete shared scope proves otherwise.
-For LLIL constant folding, prefer a multi-value API such as `const_values(...)`
-that returns every concrete candidate as a set. Callers that require a single
-key, base, or slot can check that the returned set has exactly one value instead
-of using a separate single-value helper.
-For MLIL call-target helpers, start with single-value constant folding because
-the current call-target backend expects one concrete callee per call fact. Do
-not design extra PHI or multi-candidate call-target behavior until a concrete
-sample requires it.
-Helpers may follow SSA definitions across basic blocks, including through
-supported PHI handling, but they should not perform arbitrary CFG backward walks
-or path enumeration in the first implementation. Prefer Binary Ninja's SSA
-def-use information over rebuilding a second control-flow analysis.
-Migrate existing passes to use the helpers, while keeping the `default` resolver
-profile as a thin delegate to those passes. This keeps the current workflow
-surface stable and ensures the helper API is exercised by production code rather
-than documented as unused scaffolding.
+首批 helper module 应从现有 pass 中迁移可复用基元，而不是包装旧的 pass-local function。
+Helper function 应持有共同边界条件：IL 缺失、SSA/non-SSA 映射、未解析定义、变量后的常量、
+无效地址和带 live use 的 cleanup root。调用方不应重复这些防御性检查。PHI 处理是该 helper
+contract 的一部分：LLIL 常量 helper 应在可能时处理 loop-carried PHI candidate value；MLIL
+cleanup-root helper 应把 PHI node 视为 slice/liveness connector，但不能把 PHI 本身当作 NOP
+target。在具体共享范围证明之前，CFG path 或 live-edge 消歧仍属于 profile 或 pass。
 
-Helper functions should treat failed recognition as data, not exceptions: shape
-mismatches, unresolved constants, invalid targets, or absent candidate
-instructions should return `None` or an empty collection. Reserve exceptions for
-incorrect API use such as invalid argument types or malformed recovery facts.
+LLIL 常量折叠应优先使用类似 `const_values(...)` 的多值 API，返回所有具体 candidate 的
+set。调用方若需要单一 key、base 或 slot，可检查该集合恰有一个值，而不是使用单值 helper。
 
-Low-level helpers should not log normal recognition misses. Resolver profiles and
-passes decide when a skipped site is meaningful enough to log. Helpers may raise
-or return failure values, but they should not make broad candidate scans noisy.
+MLIL call-target helper 起步时只做单值常量折叠，因为现有 call-target backend 期望每个
+call fact 只有一个具体 callee。在具体样本提出需求前，不设计额外的 PHI 或多 candidate
+call-target 行为。
 
-Keep LLIL and MLIL helpers independent. `helpers.llil` must not depend on
-`helpers.mlil`, and `helpers.mlil` must not depend on `helpers.llil`; shared
-BinaryView or recovery-fact helpers belong in `helpers.memory` or
-`helpers.facts`.
+Helper 可以跨 basic block 跟随 SSA definition，包括已支持的 PHI；但第一版不得进行任意 CFG
+backward walk 或 path enumeration。优先使用 Binary Ninja 的 SSA def-use 信息，不要重建第二套
+控制流分析。
 
-The first helper surface focuses on target recovery and cleanup-root collection,
-not IL translation or generic IL rewriting. Branch translation, call target
-application, deflattening rewrites, and cleanup application remain workflow/pass
-backend responsibilities because those mutation sites are relatively stable once
-profiles provide concrete targets and decode-garbage roots.
-Branch condition translation belongs to the recovery backend: it rewrites stable
-MLIL shapes after branch targets are known, and profile authors should not need
-to customize that rewrite for each binary.
+迁移现有 pass 使用 helper，同时保持 `default` resolver profile 作为具名样本 profile 的兼容
+delegate。这保持已有 BinaryView 设置的 workflow surface 稳定，并让样本规则归属明确，避免
+只写文档却留下未使用的 scaffolding。
 
-Global constant recovery may use profile helpers more directly. Common MLIL
-walking, constant-address extraction, memory reads, store checks, and global
-constant fact construction can move into helpers so profiles can express a
-binary's slot rules without rewriting the underlying inspection code.
-Do not move a high-level automatic global-constant planner into helpers yet.
-Profiles and passes still decide which expressions are slot uses, which offset or
-section rules apply, and which slots should become const facts.
+Helper function 将识别失败作为数据而非异常：shape mismatch、未解析常量、无效 target 或候选
+instruction 缺失时返回 `None` 或空 collection。异常只用于错误 API usage，例如无效参数
+类型或 malformed recovery fact。
 
-Concrete targets and decode-garbage roots are both first-class recovery fact
-information. Call facts already carry cleanup roots; branch facts should move in
-the same direction so profiles can identify the instructions that computed a
-target while workflow/pass backends decide when and how to clean them up.
-Cleanup roots should be instruction-index sets. Binary Ninja distinguishes
-instruction indices from expression indices: instruction indices identify
-top-level IL instructions, while expression indices identify tree expressions and
-are used for `replace_expr`. Profiles and helpers should return instruction
-indices for cleanup roots; backend code can map SSA/non-SSA forms and use
-expression indices only at the final replacement site.
+低层 helper 不得记录正常的识别 miss。resolver profile 和 pass 决定何时一个跳过 site 值得
+记录。Helper 可以 raise 或返回失败值，但不能让宽泛 candidate scan 产生大量日志。
 
-Do not introduce a backward-slice class or dataclass in the first helper pass.
-Return simple tuples, dicts, sets, and Binary Ninja IL objects until multiple
-profiles prove that a dedicated slice object would remove real complexity.
+保持 LLIL 与 MLIL helper 独立：`helpers.llil` 不得依赖 `helpers.mlil`，
+`helpers.mlil` 不得依赖 `helpers.llil`；共享的 BinaryView 或 recovery-fact helper
+放入 `helpers.memory` 或 `helpers.facts`。
 
-Memory helpers should prefer explicit width and endianness. Provide helpers such
-as `read_u8`, `read_u16le`, `read_u32le`, and `read_u64le`; any pointer helper
-must take an explicit width or architecture/endian argument rather than hiding a
-sample-specific pointer model.
+首个 helper surface 聚焦目标恢复和 cleanup-root 收集，不涉及 IL translation 或通用 IL
+改写。branch translation、call target application、deflatten rewrite 和 cleanup application
+仍属 workflow/pass backend，因为 profile 给出具体 target 和 decode-garbage root 后，这些
+mutation site 相对稳定。分支条件翻译属于 recovery backend：它在 branch target 已知后改写
+稳定的 MLIL shape，profile author 不应为每个 binary 定制该改写。
 
-Recovery-fact builders are recommended helpers, not a new contract layer. They
-may reduce dict-field mistakes for common branch, call, global constant, and
-string decrypt facts, but profile hooks may still return plain dict facts when a
-special case is clearer.
+Global constant recovery 可以更直接地使用 profile helper。通用 MLIL walk、const-address
+extraction、内存读取、STORE 检查与 global-constant fact 构建可移入 helper，使 profile 能
+表达 binary 的 slot rule，而不用重写底层检查代码。但暂时不把高层自动 global-constant planner
+移入 helper；profile 和 pass 仍决定哪些 expression 是 slot use、哪些 offset/section rule
+适用，以及哪些 slot 应成为 const fact。
 
-Do not introduce a generic resolver engine, pattern DSL, or high-level
-`resolve_all_*` framework yet. Those abstractions can wait until multiple binary
-profiles prove the same higher-level resolver shape.
+具体 target 是 recovery-fact 信息；decode-garbage root 不是。profile 只给出当前 IL 的 target
+与描述性见证，workflow/pass backend 在 mutation boundary 从当前 SSA 或同一 callback 的翻译计划
+推导 cleanup root。Binary Ninja 区分 instruction index 与 expression index：前者只在当前 IL
+generation 标识顶层 instruction，后者用于 `replace_expr`。两者都不得跨重新分析放入 profile
+fact 或 session state。
+
+首批 helper pass 不引入 backward-slice class 或 dataclass。在多个 profile 证明专用 slice
+object 能减少真实复杂度之前，返回简单的 tuple、dict、set 和 Binary Ninja IL object。
+
+Memory helper 应优先采用显式宽度与字节序。提供 `read_u8`、`read_u16le`、`read_u32le`
+和 `read_u64le` 等 helper；任何 pointer helper 都必须接受显式宽度或 architecture/endian
+参数，不能隐藏样本特定的指针模型。
+
+Recovery-fact builder 是推荐 helper，而不是新的 contract layer。它们可以减少常见 branch、
+call、global constant 和 string decrypt fact 的 dict-field 错误，但 profile hook 在特殊场景
+更清晰时仍可返回普通 dict fact。
+
+暂不引入通用 resolver engine、pattern DSL 或高层 `resolve_all_*` framework。只有多个
+binary profile 证明相同的高层 resolver shape 后，才考虑这些抽象。

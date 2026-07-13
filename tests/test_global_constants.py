@@ -5,7 +5,7 @@ from binaryninja import MediumLevelILOperation, TypeClass
 from conftest import load_plugin_module
 
 
-global_constants = load_plugin_module("plugins.DispatchThis.passes.medium.global_constants")
+global_constants = load_plugin_module("plugins.DispatchThis.profiles.dyzznb")
 
 CONST_SLOT_TYPE = global_constants.CONST_SLOT_TYPE
 plan_global_constant_slots = global_constants.plan_global_constant_slots

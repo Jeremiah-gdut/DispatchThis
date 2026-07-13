@@ -1,104 +1,80 @@
-# Conditional deflattening
+# 条件去平坦化
 
-Most flattened transitions are unconditional: an original basic block writes one
-dispatcher state token and jumps back to the dispatcher. DispatchThis rewrites that
-terminator into a direct `goto` to the target block for that token.
+多数平坦化转移是无条件的：原始基本块写入一个调度器状态令牌，再跳回调度器。
+DispatchThis 会将该终结器改写为直接前往该令牌目标块的 `goto`。
 
-Some transitions are conditional. The current pass handles the narrow shape where an
-original basic block contains an `MLIL_IF` and all state writes in each arm resolve to one
-known dispatcher state token before returning to the dispatcher. Rewrites that skip arm
-work require pure state-selection code. A private shared-exit rewrite may instead
-preserve modeled semantic work throughout both arms and the merge because it changes only
-their common final dispatcher `GOTO`.
+也存在条件转移。当前 pass 只处理一种严格形态：原始基本块含有 `MLIL_IF`，且每个
+分支内的所有状态写入都能在回到调度器前解析为一个已知调度器状态令牌。会跳过分支
+工作的改写要求纯状态选择代码；私有共享出口改写则只改变两臂及合并处共同的最终调度器
+`GOTO`，因此可以保留其中已建模的语义工作。
 
-The original transition condition and the dispatcher predicates are separate. The
-original `MLIL_IF` may use any condition because the rewriter copies it unchanged. The
-dispatcher may route with variable/constant equality, inequality, or signed/unsigned
-`LT`, `LE`, `GT`, and `GE` comparisons.
+原始转移条件与调度器谓词相互独立。改写原 IF 的条件捷径可以复制已证明的原条件；共享
+出口只有在更严格的直接变量/常量条件不变证明成立时才复制原条件，否则以 state token
+路由。调度器可以用变量/常量相等、不等，或有符号/无符号 `LT`、`LE`、`GT`、`GE`
+比较路由。
 
-## What The Analysis Recovers
+## 分析恢复的内容
 
-`compute_redirections` first identifies the dominant dispatcher comparison cluster. For
-each concrete `(state_token, width)` recovered from an original region, it evaluates each
-dispatcher predicate in CFG order, preserving comparison operand order and signedness,
-until the route reaches one target block. This supports compare trees built from ordering
-predicates without constructing symbolic token intervals.
+`compute_redirections` 先识别主导调度器比较簇。对从原始区域恢复出的每个具体
+`(state_token, width)`，它按照 CFG 顺序计算每个调度器谓词，保留原比较的操作数顺序
+和有符号性，直到路径到达一个目标块。因此可处理由有序谓词构成的比较树，无需构造
+符号化令牌区间。
 
-For a candidate original basic block, the conditional planner:
+对于候选原始基本块，条件规划器会：
 
-- finds an `MLIL_IF` inside the original basic block region;
-- walks the true and false regions until the dispatcher boundary;
-- for rewrites that bypass work, rejects assignments outside the state-selection
-  dependency chain or whose assigned variables remain live outside the arm scope;
-- requires each dispatcher comparison alias to be defined by a unique,
-  equal-width whole-variable direct-copy chain earlier in that comparison row,
-  ending at the shared state input;
-- when the IF consumes a predicate variable, requires its resolved comparison
-  definition to map from SSA to the exact current non-SSA instruction in the
-  same row and proves the state copies occur before that comparison rather than
-  merely before the IF;
-- requires every state write in an arm to resolve and agree on one concrete token;
-- proves every path establishes that token before reaching the dispatcher;
-- requires every CFG path in each arm to terminate at a dispatcher entry, then
-  replays the token through every such entry and requires one target original block;
-- rejects the original region rather than choosing by block order when more
-  than one conditional candidate is valid;
-- requires the complete rewritten arm to have no foreign entry and requires
-  pointer-based state definitions to dominate their STORE uses;
-- records only exact current-MLIL state-write instruction indices proved obsolete by the
-  recovered transition.
+- 在原始基本块区域内寻找 `MLIL_IF`；
+- 遍历真、假区域直到调度器边界；
+- 对会绕过工作的改写，拒绝状态选择依赖链以外的赋值，或拒绝其被赋变量在分支作用域
+  外仍存活的情况；
+- 要求每个调度器比较别名均由该比较行中更早处唯一、等宽、整变量直接复制链定义，并
+  以共享状态输入结束；
+- 当 IF 使用谓词变量时，要求其已解析的比较定义能从 SSA 映射到同一行中精确的当前
+  非 SSA 指令，并证明状态复制发生在该比较之前，而不是仅在 IF 之前；
+- 要求一个分支内的每个状态写入均可解析，且一致地得到一个具体令牌；
+- 证明每条路径在到达调度器前都建立该令牌；
+- 要求每个分支中每条 CFG 路径都终止于一个调度器入口，随后通过每个入口重放令牌，且
+  必须得到同一个目标原始基本块；
+- 当多个条件候选都有效时拒绝原始区域，而不是按块顺序选择；
+- 要求完整改写分支没有外部入口，并要求基于指针的状态定义支配其 STORE 使用；
+- 只记录被恢复转移证明过时的、精确的当前 MLIL 状态写入指令索引。
 
-If both arms resolve to different known targets, `rewrite_redirections_mlil` chooses one
-of three proved rewrites. It may copy the candidate `MLIL_IF` condition when the skipped
-state channel is dispatcher-only and privately owned. When each arm has a distinct GOTO
-directly into a dispatcher comparison row, it rewrites those arm exits and leaves the
-original condition and state writes on the execution path. When both arms converge into
-one private merge tail, it preserves the original IF, both arms, and the complete shared
-tail, then replaces only the shared final GOTO with an IF on the
-already-written state token. This `shared_exit` mode never marks state writes obsolete.
-All modes use copied source-block labels. Their edge rewrites and the plan's exact
-state-write NOPs are one atomic copy-transform; the whole replacement is discarded if
-any selected rewrite cannot be emitted.
+若两臂解析到不同的已知目标，`rewrite_redirections_mlil` 会从三种已证明的改写中选择
+一种。若被跳过的状态通道只属于调度器且为私有，可复制候选 `MLIL_IF` 的条件。若每臂
+都有一个直接进入调度器比较行的不同 GOTO，则改写这些臂出口，并保留原始条件和状态
+写入的执行路径。若两臂汇合到一个私有合并尾部，则保留原始 IF、两臂及完整共享尾部，
+默认用已写入的状态令牌上的 IF 替换共享最终 GOTO。若原 IF 是直接变量/常量比较，且比较
+变量在两个 arm 和共享尾中没有写入、`ADDRESS_OF(_FIELD)`、STORE、未知内存效果或
+未建模语义，且源 IF 之前未取得该变量地址，则复制原 IF 条件，以免把高层语义重新表示成大
+token 比较。该条件必须仍是计划
+原 IF 的同一条当前指令，并携带匹配的表达式见证；无法完整证明时回退 token IF。
+此 `shared_exit` 模式永不将状态写入标为过时。所有模式都使用复制的源块标签。边改写和
+计划中精确状态写入的 NOP 在同一个原子 copy-transform 中完成；任何已选改写无法生成时，
+整次替换都会被丢弃。
 
-Cleanup proof is deliberately weaker than target proof. If both targets are proved but no
-state-write instruction can be proved obsolete, the plan keeps an empty
-`obsolete_state_writes` set and still reconstructs the conditional CFG.
-Non-empty cleanup also carries exact current-MLIL write witnesses; stale owner or
-operand evidence rejects the whole copy instead of NOPing an instruction that merely
-reused the index.
-This applies only when the selected rewrite preserves execution of those writes.
-If distinct arm-exit rewrites are unavailable, cleanup or ownership uncertainty
-rejects the IF shortcut because an empty set cannot make bypassed writes execute.
-An external entry rejects every mode because rewriting an arm or shared exit would also
-redirect the foreign path without target proof for that entry.
+清理证明刻意弱于目标证明。即使两个目标都已证明，若没有状态写入指令可证明过时，
+计划仍保留空的 `obsolete_state_writes` 集合并重建条件 CFG。非空清理还携带精确的当前
+MLIL 写入见证；过期的 owner 或操作数证据会拒绝整次 copy，而不会 NOP 仅复用了索引的
+指令。这只适用于所选改写仍会执行这些写入的情形。若没有不同的臂出口改写，清理或
+所有权不确定性会拒绝 IF 捷径，因为空集合不能让被绕过的写入仍然执行。任何外部入口
+都会拒绝全部模式，因为改写某个臂或共享出口也会在没有该入口目标证明的情况下重定向
+外部路径。
 
-## Limits
+## 限制
 
-This is intentionally narrower than a symbolic predicate rebuild. It does not try to
-solve state ranges, variable/variable comparisons, or arbitrary multi-step state-selection
-chains. Modeled semantic work is accepted only for shared-exit mode, when the entire
-arm-and-merge region is private, every path establishes a concrete token, and both routes
-use one final GOTO. Possible state mutations, a token-width mismatch, or an ambiguous route reject the
-transition. Unsupported shapes are left intact for Binary Ninja to display normally.
-Implicit dispatcher pass-through expansion is limited to `NOP* + GOTO` routing.
-Direct copies are accepted only inside an explicitly proved comparison row or
-the unique shared state latch; unrelated assignments or externally observed
-dispatcher temporaries are not bypassed. The latch must be an equal-width
-whole-variable chain shared by at least two independent target-head regions, so
-an OBB-local conditional state-selection join remains part of its OBB.
-Field, split, aliased, and unresolved struct/pointer writes that may modify the
-state channel are not ignored: the affected transition is left flattened.
-Taking either the whole state address or a field address also counts as an
-observer/escape unless the profile proves the narrow owned-store exception.
-Passing such an address, including through a followed pointer expression, to a
-call, syscall, or intrinsic invalidates the concrete transition token.
-Field/split/aliased reads and `vars_read` metadata also count as observers, but
-never as exact whole-state copies. Once an address is stored into memory, a later
-unknown call invalidates the token even if the call has no explicit pointer
-argument.
-An unknown operation receiving `&holder` also counts when the holder contains
-`&state`; after escape, traps, breakpoints, and non-exact stores are unknown
-mutations. Unimplemented MLIL rejects a transition outright. Variables are
-matched by Binary Ninja identity/equality rather than display name, and an
-auxiliary comparison block is excluded from observer checks only after its full
-routing prefix is proved pure.
+这刻意比符号谓词重建更窄。它不求解状态区间、变量/变量比较或任意多步状态选择链。
+只有在整个臂与合并区域私有、每条路径均建立具体令牌、两条路径共用最终 GOTO 时，
+`shared_exit` 模式才接受其中的已建模语义工作。可能的状态修改、令牌宽度不匹配或
+路径歧义都会拒绝转移；不支持的形态保持原样交给 Binary Ninja 显示。
+
+隐式调度器直通仅限 `NOP* + GOTO` 路由。直接复制只允许出现在被明确证明的比较行或
+唯一共享状态 latch 内；不会绕过无关赋值或被外部观察的调度器临时变量。latch 必须是
+至少两个独立目标头区域共享的等宽整变量链，因此 OBB 局部条件状态选择合并仍属于其
+OBB。可能修改状态通道的字段、split、aliased 以及未解析的 struct/指针写入不会被忽略：
+受影响转移仍保持平坦化。取得整个状态地址或字段地址也视为观察/逃逸，除非 profile
+证明狭窄的自有存储例外。将这类地址（包括经跟随指针表达式）传给 call、syscall 或
+intrinsic 会使具体转移令牌失效。字段/split/aliased 读取和 `vars_read` 元数据同样算作
+观察者，但绝不是精确整状态复制。地址一旦存入内存，即使后续未知调用没有显式指针
+参数，也会使令牌失效。若 holder 含有 `&state`，将 `&holder` 传入未知操作同样算作逃逸；
+逃逸后，trap、breakpoint 和非精确 store 都是未知修改。未实现的 MLIL 会直接拒绝转移。
+变量按 Binary Ninja 的 identity/equality 匹配，而非显示名称；辅助比较块只有在其完整
+路由前缀被证明纯净后，才能从观察者检查中排除。

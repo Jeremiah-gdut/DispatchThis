@@ -123,30 +123,12 @@ def test_fact_builders_return_existing_recovery_fact_shapes():
         "targets": (0x2000, 0x3000),
         "jump_il": jump_il,
     }
-    assert facts.branch_fact(
-        jump_il,
-        [0x2000],
-        cleanup_roots=[12, 11, 12],
-    ) == {
-        "source": 0x1000,
-        "dest_expr_index": 7,
-        "targets": (0x2000,),
-        "jump_il": jump_il,
-        "cleanup_roots": {11, 12},
-    }
-    assert facts.call_fact(call_il, 0x5000, decode_def=decode_def, cleanup_roots=[2, 1, 2]) == {
+    assert facts.call_fact(call_il, 0x5000, decode_def=decode_def) == {
         "call_il": call_il,
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": decode_def,
-        "cleanup_roots": {1, 2},
     }
-    assert facts.call_fact(
-        call_il,
-        0x5000,
-        cleanup_roots=[2, 1],
-        cleanup_load_roots=[1],
-    )["cleanup_load_roots"] == {1}
     assert facts.global_constant_fact(0xA43D70, "uint8_t const* const") == {
         "slot_addr": 0xA43D70,
         "type": "uint8_t const* const",
@@ -165,8 +147,6 @@ def test_fact_builders_reject_malformed_required_fields():
 
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
         facts.branch_fact(jump_il, [])
-    with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
-        facts.branch_fact(jump_il, [0x2000], cleanup_roots=1)
     with pytest.raises(facts.MalformedRecoveryFact, match="jump_il"):
         facts.branch_fact(None, [0x2000])
     with pytest.raises(facts.MalformedRecoveryFact, match="call_il"):
@@ -183,12 +163,3 @@ def test_fact_builders_reject_malformed_required_fields():
         facts.branch_fact(JumpIl(dest_expr_index=-1), [0x2000])
     with pytest.raises(facts.MalformedRecoveryFact, match="targets"):
         facts.branch_fact(jump_il, [-1])
-    with pytest.raises(facts.MalformedRecoveryFact, match="cleanup_roots"):
-        facts.call_fact(CallIl(), 0x5000, cleanup_roots=[-1])
-    with pytest.raises(facts.MalformedRecoveryFact, match="subset"):
-        facts.call_fact(
-            CallIl(),
-            0x5000,
-            cleanup_roots=[1],
-            cleanup_load_roots=[2],
-        )

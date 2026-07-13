@@ -1,5 +1,11 @@
-# Resolve global constants before deflattening
+# 在 deflatten 前解析全局常量
 
-DispatchThis will add global constant resolving as an MLIL workflow activity immediately before deflattening. The pass recognizes narrow global constant slots used as pointer bases, while the workflow callback owns the BinaryView-level data-variable type mutation, treats the current data-variable type as authoritative view state, and records per-function phase receipts. No separate view-level receipt is retained.
+DispatchThis 会在 deflatten 之前立刻加入一个 MLIL global-constant resolving workflow
+activity。活动 profile 识别被当作指针基址使用的窄全局常量 slot；workflow callback 独占
+BinaryView 级 data-variable type mutation，将当前 data-variable type 作为权威 view state，
+并记录每函数 phase receipt。不保留单独的 view-level receipt。
 
-This keeps indirect branch and indirect call resolving stable, while giving the deflattener and later HLIL generation a chance to benefit from Binary Ninja dataflow after the slot is marked as constant. The first scope deliberately skips struct recovery, broad memory-constant inference, and whole-program write proof; it only mutates slots whose known direct-reference functions do not store back to that slot.
+这样能保持间接分支与间接调用解析稳定，同时让 deflattener 和后续 HLIL generation 受益于
+Binary Ninja 在将 slot 标为常量后的数据流。第一版有意不做 struct recovery、宽泛的
+memory-constant inference 或全程序 write proof；只修改那些已知 direct-reference function
+不会回写该 slot 的 slot。

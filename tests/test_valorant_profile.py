@@ -466,7 +466,6 @@ def test_call_profile_accepts_text_target_without_existing_function():
         "call_addr": 0x4000,
         "target": 0x5000,
         "decode_def": decode_def,
-        "cleanup_roots": {7},
     }]
 
 
@@ -489,7 +488,6 @@ def test_call_profile_follows_ssa_call_destination():
         "call_addr": 0x4100,
         "target": 0x6000,
         "decode_def": None,
-        "cleanup_roots": set(),
     }]
 
 

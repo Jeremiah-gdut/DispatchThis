@@ -86,12 +86,12 @@ def validate_current_call_plans(mlil, plans):
             "call_il": current_call,
             "decode_def": current_decode,
         }
-        # Cleanup indices are an ephemeral property of the *current* MLIL.  Do
-        # not trust indices carried by a profile or an earlier analysis run:
-        # regenerate the exact SSA reaching-definition slice at the mutation
-        # boundary.  Failure to prove a slice disables cleanup without
+        # Cleanup indices are an ephemeral property of the *current* MLIL.
+        # Regenerate the exact SSA reaching-definition slice at the mutation
+        # boundary. Failure to prove a slice disables cleanup without
         # invalidating the independently witnessed call rewrite.
         cleanup_slice = _call_target_definition_slice(mlil, current_call)
+        current_plan["cleanup_proven"] = cleanup_slice is not None
         cleanup_roots, cleanup_load_roots = cleanup_slice or (set(), set())
         current_plan["cleanup_roots"] = cleanup_roots
         if cleanup_load_roots:
@@ -306,16 +306,16 @@ def current_call_receipt_plans(mlil, receipts):
 
 def resolve_call_target(bv, mlil, call_il):
     """Resolve the concrete target of one indirect call by folding its decode add.
-    Returns target, decode definition, cleanup roots, and proved load roots."""
+    Returns the target and its descriptive definition witness."""
     dest = call_il.dest
 
     # Already a direct call (const, or a var that folds to a const pointer).
     if dest.operation in CONST_OPERATIONS:
-        return None, None, set(), set()
+        return None, None
     trail = []
     resolved = peel_var_definitions(mlil, dest, trail)
     if resolved.operation in CONST_OPERATIONS:
-        return None, None, set(), set()
+        return None, None
     # A variant calls *through* the decoded slot (`call([rax + KEY])`). BN wraps
     # the decode add in an outer load, but the decoded pointer (the load's address
     # operand) is the real target -- not a dereference of it. Unwrap the load and
@@ -325,11 +325,11 @@ def resolve_call_target(bv, mlil, call_il):
     if loaded_target is not None:
         decode_expr = peel_var_definitions(mlil, loaded_target.src)
         if decode_expr.operation in CONST_OPERATIONS:
-            return None, None, set(), set()
+            return None, None
     if decode_expr.operation != M.MLIL_ADD:
         log_debug(f"[icall] {hex(call_il.address)}: dest def is "
                   f"{decode_expr.operation.name}, not a decode add; skipping")
-        return None, None, set(), set()
+        return None, None
     # The SET_VAR whose source is the decode add (last def walked), if any.
     decode_def = trail[-1] if trail else None
 
@@ -348,14 +348,11 @@ def resolve_call_target(bv, mlil, call_il):
     key = fold_constant_value(bv, mlil, key_expr, load_address_mask=U48)
     if key is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold decode key")
-        return None, None, set(), set()
+        return None, None
     encoded = fold_constant_value(bv, mlil, enc_expr, load_address_mask=U48)
     if encoded is None:
         log_debug(f"[icall] {hex(call_il.address)}: could not fold encoded target")
-        return None, None, set(), set()
-
-    cleanup_slice = _call_target_definition_slice(mlil, call_il)
-    cleanup_roots, cleanup_load_roots = cleanup_slice or (set(), set())
+        return None, None
 
     if loaded_target is not None:
         target = fold_constant_value(
@@ -371,11 +368,11 @@ def resolve_call_target(bv, mlil, call_il):
     # that exact slot and yields one width-preserving callee value; neither path
     # permits selecting a valid-looking masked alias.
     if target is not None and is_known_callee(bv, target):
-        return target, decode_def, cleanup_roots, cleanup_load_roots
+        return target, decode_def
 
     decoded = None if target is None else hex(target)
     log_warn(f"[icall] {hex(call_il.address)}: exact decoded target {decoded} is not a callee")
-    return None, None, set(), set()
+    return None, None
 
 
 # --------------------------------------------------------------------------- #
@@ -388,7 +385,7 @@ def plan_indirect_calls(bv, mlil):
     plans = []
     for call_il in iter_indirect_calls(mlil):
         try:
-            target, decode_def, cleanup_roots, cleanup_load_roots = resolve_call_target(
+            target, decode_def = resolve_call_target(
                 bv,
                 mlil,
                 call_il,
@@ -406,8 +403,6 @@ def plan_indirect_calls(bv, mlil):
             call_il,
             target,
             decode_def=decode_def,
-            cleanup_roots=cleanup_roots,
-            cleanup_load_roots=cleanup_load_roots,
         ))
 
     if not plans:
