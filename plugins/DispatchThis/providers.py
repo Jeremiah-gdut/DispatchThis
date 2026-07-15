@@ -14,6 +14,7 @@ from .semantics import (
     BranchTargetFact,
     BranchTargetQuery,
     CompleteBatch,
+    CorrelatedStorePlan,
     Inconclusive,
     ProviderContractError,
     SampleSemantics,
@@ -35,6 +36,8 @@ class _LegacyProfile(Protocol):
     description: str
 
     def resolve_branch_gadget(self, bv, llil, known_targets): ...
+
+    correlated_stores: object
 
 
 class ProviderBindingError(RuntimeError):
@@ -218,14 +221,37 @@ def _legacy_branch_targets(profile: _LegacyProfile, query: BranchTargetQuery) ->
     return CompleteBatch(tuple(facts))
 
 
+def _legacy_correlated_stores(profile: _LegacyProfile, query):
+    """Expose an already-typed legacy sample slot without accepting dict plans."""
+    try:
+        result = profile.correlated_stores(query)
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — legacy plugin boundary; never let it mutate core state.
+        return Inconclusive(f"legacy correlated STORE provider failed: {error}")
+    if type(result) is Inconclusive:
+        return result
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(plan) is not CorrelatedStorePlan for plan in result.facts)
+    ):
+        return Inconclusive("legacy correlated STORE provider returned an invalid batch")
+    return result
+
+
 def _register_legacy_profile(profile: _LegacyProfile) -> bool:
     """Install one bundled profile behind the private migration adapter."""
 
+    correlated_stores = getattr(profile, "correlated_stores", None)
     provider = SampleSemantics(
         provider_id=profile.id,
         name=profile.name,
         api_version=CORE_API_VERSION,
         branch_targets=lambda query: _legacy_branch_targets(profile, query),
+        correlated_stores=(
+            (lambda query: _legacy_correlated_stores(profile, query))
+            if correlated_stores is not None
+            else None
+        ),
     )
     if not register_provider(provider):
         return False

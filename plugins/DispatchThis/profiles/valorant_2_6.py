@@ -1,7 +1,9 @@
 from binaryninja import LowLevelILOperation as L, MediumLevelILOperation as M
 
 from . import default
+from ..helpers._values_identity import entity_key, same_entity
 from ..helpers import facts, llil, memory, mlil
+from ..semantics import CompleteBatch, CorrelatedStoreArm, CorrelatedStorePlan
 from ..utils.log import log_debug, log_warn
 
 
@@ -525,67 +527,78 @@ def plan_global_constant_slots(bv, il):
     return [plans[addr] for addr in sorted(plans)]
 
 
-def plan_correlated_store_rewrites(bv, func, il):
-    """Plan arm-local stores when a main-function join loses PHI correlation."""
+def correlated_stores(query):
+    """Return complete, edge-paired STORE recovery plans for the known main shape."""
+    bv = query.view
+    func = query.function
+    il = query.mlil
     if il is None or getattr(func, "start", None) != MAIN_START:
-        return []
+        return CompleteBatch(())
     ssa = getattr(il, "ssa_form", None)
     if ssa is None:
-        return []
+        return CompleteBatch(())
 
     plans = []
     for store in getattr(ssa, "instructions", ()) or ():
         plan = _plan_correlated_store(bv, il, ssa, store)
         if plan is not None:
             plans.append(plan)
-    return sorted(plans, key=lambda plan: getattr(plan["store"], "instr_index", 0))
+    return CompleteBatch(tuple(sorted(plans, key=lambda plan: plan.store_il.instr_index)))
 
 
 def _plan_correlated_store(bv, il, ssa, store):
     if _op(store) != M.MLIL_STORE_SSA.name or getattr(store, "size", None) != 4:
         return None
-    join = getattr(store, "il_basic_block", None)
-    edges = list(getattr(join, "incoming_edges", ()) or ())
+    ssa_join = getattr(store, "il_basic_block", None)
+    edges = tuple(getattr(ssa_join, "incoming_edges", ()) or ())
     if len(edges) != 2:
-        return None
-    predecessors = [getattr(edge, "source", None) for edge in edges]
-    if any(predecessor is None for predecessor in predecessors):
-        return None
-    if any(len(getattr(predecessor, "outgoing_edges", ()) or ()) != 1 for predecessor in predecessors):
-        return None
-
-    phi_defs = _store_phi_defs(ssa, store)
-    if len(phi_defs) < 2:
-        return None
-    predecessor_starts = tuple(getattr(predecessor, "start", None) for predecessor in predecessors)
-    if any(
-        len(getattr(definition, "src", ()) or ()) != 2
-        or tuple(_definition_block_start(ssa, value) for value in definition.src) != predecessor_starts
-        for definition in phi_defs.values()
-    ):
         return None
 
     source_load = _peel_ssa_value(ssa, getattr(store, "src", None))
     if _op(source_load) != M.MLIL_LOAD_SSA.name or getattr(source_load, "size", None) != store.size:
         return None
+    dest_phi = _direct_phi(ssa, getattr(store, "dest", None))
+    src_phi = _direct_phi(ssa, getattr(source_load, "src", None))
+    if dest_phi is None or src_phi is None:
+        return None
+    dest_var, dest_phi_def = dest_phi
+    src_var, src_phi_def = src_phi
+    if not (
+        same_entity(getattr(dest_phi_def, "il_basic_block", None), ssa_join)
+        and same_entity(getattr(src_phi_def, "il_basic_block", None), ssa_join)
+    ):
+        return None
+    dest_inputs = _phi_inputs_by_edge(ssa, dest_phi_def, edges)
+    src_inputs = _phi_inputs_by_edge(ssa, src_phi_def, edges)
+    if dest_inputs is None or src_inputs is None:
+        return None
 
     non_ssa_store = getattr(store, "non_ssa_form", None)
-    ssa_gotos = [_block_terminal(ssa, predecessor) for predecessor in predecessors]
-    if any(_op(goto) != M.MLIL_GOTO.name for goto in ssa_gotos):
+    join = getattr(non_ssa_store, "il_basic_block", None)
+    if _op(non_ssa_store) != M.MLIL_STORE.name or join is None:
         return None
-    non_ssa_gotos = [getattr(goto, "non_ssa_form", None) for goto in ssa_gotos]
-    if _op(non_ssa_store) != M.MLIL_STORE.name or any(
-        _op(goto) != M.MLIL_GOTO.name for goto in non_ssa_gotos
-    ):
+    arm_witnesses = _non_ssa_arms(ssa, edges, join)
+    if arm_witnesses is None:
         return None
     if not _pure_join_prefix(il, non_ssa_store):
         return None
 
     def memory_read_allowed(address, size):
         return _read_only_global_load(bv, address, size)
+
     arms = []
-    for arm_index, goto in enumerate(non_ssa_gotos):
-        bindings = _phi_bindings(bv, ssa, phi_defs, arm_index, memory_read_allowed)
+    for edge in edges:
+        edge_key = entity_key(edge)
+        arm = arm_witnesses.get(edge_key)
+        if arm is None:
+            return None
+        bindings = _phi_bindings_for_edge(
+            bv,
+            ssa,
+            ((dest_var, dest_inputs), (src_var, src_inputs)),
+            edge,
+            memory_read_allowed,
+        )
         if bindings is None:
             return None
         destinations = _values(
@@ -610,37 +623,139 @@ def _plan_correlated_store(bv, il, ssa, store):
             return None
         if not _mutable_scalar(bv, source, store.size):
             return None
-        arms.append({"goto": goto, "dest": destination, "src": source})
+        dest_expr = _current_address_witness(
+            ssa,
+            dest_inputs[edge_key],
+            il,
+            arm["predecessor"],
+            destination,
+        )
+        src_expr = _current_address_witness(
+            ssa,
+            src_inputs[edge_key],
+            il,
+            arm["predecessor"],
+            source,
+        )
+        if dest_expr is None or src_expr is None:
+            return None
+        arms.append(
+            CorrelatedStoreArm(
+                predecessor=arm["predecessor"],
+                incoming_edge=arm["incoming_edge"],
+                goto_il=arm["goto_il"],
+                dest_expr=dest_expr,
+                dest_addr=destination,
+                src_expr=src_expr,
+                src_addr=source,
+            )
+        )
 
+    if len({entity_key(arm.goto_il) for arm in arms}) != 2:
+        return None
+    return CorrelatedStorePlan(
+        store_il=non_ssa_store,
+        join_block=join,
+        size=store.size,
+        arms=tuple(arms),
+    )
+
+
+def _direct_phi(ssa, expression):
+    if _op(expression) != M.MLIL_VAR_SSA.name:
+        return None
+    variable = getattr(expression, "src", None)
+    definition = _ssa_var_definition(ssa, variable)
+    return (variable, definition) if _op(definition) == M.MLIL_VAR_PHI.name else None
+
+
+def _phi_inputs_by_edge(ssa, phi, edges):
+    operands = tuple(getattr(phi, "src", ()) or ())
+    if len(operands) != len(edges):
+        return None
+    by_edge = {}
+    for operand in operands:
+        definition = _ssa_var_definition(ssa, operand)
+        predecessor = getattr(definition, "il_basic_block", None)
+        matches = [edge for edge in edges if same_entity(getattr(edge, "source", None), predecessor)]
+        if len(matches) != 1:
+            return None
+        edge_key = entity_key(matches[0])
+        if edge_key in by_edge:
+            return None
+        by_edge[edge_key] = operand
+    return by_edge if len(by_edge) == len(edges) else None
+
+
+def _non_ssa_arms(ssa, edges, join):
+    arms = {}
+    join_edges = tuple(getattr(join, "incoming_edges", ()) or ())
+    join_start = getattr(join, "start", None)
+    if len(join_edges) != 2 or type(join_start) is not int:
+        return None
+    for edge in edges:
+        ssa_goto = _block_terminal(ssa, getattr(edge, "source", None))
+        goto = getattr(ssa_goto, "non_ssa_form", None)
+        predecessor = getattr(goto, "il_basic_block", None)
+        outgoing = tuple(getattr(predecessor, "outgoing_edges", ()) or ())
+        matching = [candidate for candidate in outgoing if same_entity(getattr(candidate, "target", None), join)]
+        if (
+            _op(goto) != M.MLIL_GOTO.name
+            or len(outgoing) != 1
+            or len(matching) != 1
+            or sum(same_entity(candidate, matching[0]) for candidate in join_edges) != 1
+            or getattr(goto, "dest", None) != join_start
+        ):
+            return None
+        edge_key = entity_key(edge)
+        if edge_key in arms:
+            return None
+        arms[edge_key] = {
+            "predecessor": predecessor,
+            "incoming_edge": matching[0],
+            "goto_il": goto,
+        }
+    return arms if len(arms) == len(edges) else None
+
+
+def _phi_bindings_for_edge(bv, ssa, phi_inputs, edge, memory_read_allowed):
+    bindings = {}
+    edge_key = entity_key(edge)
+    for variable, inputs in phi_inputs:
+        operand = inputs.get(edge_key)
+        if operand is None:
+            return None
+        values = _values_for_phi_operand(
+            bv,
+            ssa,
+            operand,
+            0,
+            64,
+            set(),
+            None,
+            memory_read_allowed,
+        )
+        if values is None or len(values) != 1:
+            return None
+        bindings[variable] = next(iter(values))
+    return bindings
+
+
+def _current_address_witness(ssa, operand, il, predecessor, address):
+    definition = _ssa_var_definition(ssa, operand)
+    non_ssa_definition = getattr(definition, "non_ssa_form", None)
+    expression = getattr(non_ssa_definition, "src", None)
     if (
-        len({getattr(arm["goto"], "instr_index", id(arm["goto"])) for arm in arms}) != 2
-        or arms[0]["dest"] != arms[1]["src"]
-        or arms[0]["src"] != arms[1]["dest"]
+        getattr(non_ssa_definition, "function", None) is not il
+        or getattr(expression, "function", None) is not il
+        or not same_entity(getattr(non_ssa_definition, "il_basic_block", None), predecessor)
+        or not same_entity(getattr(expression, "il_basic_block", None), predecessor)
+        or _op(expression) not in (M.MLIL_CONST.name, M.MLIL_CONST_PTR.name)
+        or type(getattr(expression, "constant", None)) is not int
+        or getattr(expression, "constant") != address
     ):
         return None
-    return {"store": non_ssa_store, "size": store.size, "arms": tuple(arms)}
-
-
-def _store_phi_defs(ssa, store):
-    out = {}
-    seen = set()
-    queue = list(getattr(store, "vars_read", ()) or ())
-    while queue:
-        variable = queue.pop()
-        if variable in seen:
-            continue
-        seen.add(variable)
-        definition = _ssa_var_definition(ssa, variable)
-        if _op(definition) == M.MLIL_VAR_PHI.name:
-            out[variable] = definition
-        elif definition is not None:
-            queue.extend(getattr(definition, "vars_read", ()) or ())
-    return out
-
-
-def _definition_block_start(ssa, var):
-    definition = _ssa_var_definition(ssa, var)
-    return getattr(getattr(definition, "il_basic_block", None), "start", None)
+    return expression
 
 
 def _peel_ssa_value(ssa, expr):
@@ -682,26 +797,6 @@ def _pure_join_prefix(il, store):
         ):
             return False
     return False
-
-
-def _phi_bindings(bv, ssa, phi_defs, arm_index, memory_read_allowed=None):
-    bindings = {}
-    for var, definition in phi_defs.items():
-        values = _values_for_phi_operand(
-            bv,
-            ssa,
-            definition.src[arm_index],
-            0,
-            64,
-            set(),
-            None,
-            memory_read_allowed,
-        )
-        if values is None or len(values) != 1:
-            return None
-        value = next(iter(values))
-        bindings[var] = value
-    return bindings
 
 
 def _read_only_global_load(bv, address, width):

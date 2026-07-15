@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from binaryninja import (
+        BasicBlock,
+        BasicBlockEdge,
         BinaryView,
         Function,
         LowLevelILFunction,
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
     )
 
 
-CORE_API_VERSION = 1
+CORE_API_VERSION = 2
 
 T = TypeVar("T")
 
@@ -179,33 +181,52 @@ class GlobalDataFact:
 
 @dataclass(frozen=True, slots=True)
 class CorrelatedStoreArm:
-    """One predecessor arm for a correlated STORE plan."""
+    """One query-MLIL predecessor store and its exact CFG/value evidence."""
 
+    predecessor: BasicBlock
+    incoming_edge: BasicBlockEdge
     goto_il: MediumLevelILInstruction
+    dest_expr: MediumLevelILInstruction
     dest_addr: int
+    src_expr: MediumLevelILInstruction
     src_addr: int
 
     def __post_init__(self) -> None:
+        if self.predecessor is None:
+            raise ProviderContractError("predecessor is required")
+        if self.incoming_edge is None:
+            raise ProviderContractError("incoming_edge is required")
         if self.goto_il is None:
             raise ProviderContractError("goto_il is required")
+        if self.dest_expr is None:
+            raise ProviderContractError("dest_expr is required")
         _require_address("dest_addr", self.dest_addr)
+        if self.src_expr is None:
+            raise ProviderContractError("src_expr is required")
         _require_address("src_addr", self.src_addr)
 
 
 @dataclass(frozen=True, slots=True)
 class CorrelatedStorePlan:
-    """A declarative relocation of one merged STORE into its predecessor arms."""
+    """A current non-SSA MLIL join STORE and its two owned predecessor arms."""
 
     store_il: MediumLevelILInstruction
+    join_block: BasicBlock
     size: int
     arms: tuple[CorrelatedStoreArm, ...]
 
     def __post_init__(self) -> None:
         if self.store_il is None:
             raise ProviderContractError("store_il is required")
+        if self.join_block is None:
+            raise ProviderContractError("join_block is required")
         if type(self.size) is not int or self.size <= 0:
             raise ProviderContractError("size must be a positive integer")
-        if type(self.arms) is not tuple or len(self.arms) != 2:
+        if (
+            type(self.arms) is not tuple
+            or len(self.arms) != 2
+            or any(type(arm) is not CorrelatedStoreArm for arm in self.arms)
+        ):
             raise ProviderContractError("correlated store plans require two arms")
 
 

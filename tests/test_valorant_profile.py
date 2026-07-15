@@ -152,6 +152,9 @@ class CorrelatedIl:
         self.instructions = list(instructions)
         self._by_index = {instruction.instr_index: instruction for instruction in self.instructions}
         self.ssa_defs = ssa_defs or {}
+        for instruction in self.instructions:
+            for expression in instruction.traverse(lambda expression: expression):
+                expression.function = self
 
     def __getitem__(self, index):
         return self._by_index[index]
@@ -254,6 +257,8 @@ def correlated_store_fixture(
     reverse=True,
     mutable_pointer=False,
     impure_join_load=False,
+    duplicate_values=False,
+    malformed_pair=False,
 ):
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
@@ -286,17 +291,21 @@ def correlated_store_fixture(
     src_phi = Var("src", 3)
     src_value = Var("value", 1)
 
-    dest_true_source = const("MLIL", 0x5200)
+    dest_true_addr = 0x5200
+    dest_false_addr = 0x5100
+    src_true_addr = 0x5100
+    src_false_addr = 0x5200 if reverse else 0x5300
+    if duplicate_values:
+        dest_false_addr = dest_true_addr
+        src_false_addr = src_true_addr
+
+    dest_true_source = const("MLIL", dest_true_addr)
     if mutable_pointer:
         dest_true_source = load("MLIL", const("MLIL", 0x6100), size=8, address=0x4010)
     dest_true_def = set_var_ssa(dest_true_source, instr_index=1, address=0x4010)
-    dest_false_def = set_var_ssa(const("MLIL", 0x5100), instr_index=2, address=0x4020)
-    src_true_def = set_var_ssa(const("MLIL", 0x5100), instr_index=3, address=0x4010)
-    src_false_def = set_var_ssa(
-        const("MLIL", 0x5200 if reverse else 0x5300),
-        instr_index=4,
-        address=0x4020,
-    )
+    dest_false_def = set_var_ssa(const("MLIL", dest_false_addr), instr_index=2, address=0x4020)
+    src_true_def = set_var_ssa(const("MLIL", src_true_addr), instr_index=3, address=0x4010)
+    src_false_def = set_var_ssa(const("MLIL", src_false_addr), instr_index=4, address=0x4020)
     for definition, block in (
         (dest_true_def, ssa_true),
         (dest_false_def, ssa_false),
@@ -306,7 +315,14 @@ def correlated_store_fixture(
         definition.il_basic_block = block
 
     dest_phi_def = Expr("MLIL_VAR_PHI", src=[dest_true, dest_false], instr_index=5, address=0x5000)
-    src_phi_def = Expr("MLIL_VAR_PHI", src=[src_true, src_false], instr_index=6, address=0x5000)
+    src_phi_def = Expr(
+        "MLIL_VAR_PHI",
+        src=[src_true, src_true] if malformed_pair else [src_false, src_true],
+        instr_index=6,
+        address=0x5000,
+    )
+    dest_phi_def.il_basic_block = ssa_join
+    src_phi_def.il_basic_block = ssa_join
     dest_expr = Expr("MLIL_VAR_SSA", src=dest_phi)
     src_addr_expr = Expr("MLIL_VAR_SSA", src=src_phi)
     source_load = Expr(
@@ -344,19 +360,69 @@ def correlated_store_fixture(
         },
     )
 
-    non_ssa_join = CorrelatedBlock(40, 42)
+    non_ssa_true = CorrelatedBlock(40, 43)
+    non_ssa_false = CorrelatedBlock(50, 53)
+    non_ssa_join = CorrelatedBlock(60, 62)
+    true_edge = CorrelatedEdge(non_ssa_true, non_ssa_join)
+    false_edge = CorrelatedEdge(non_ssa_false, non_ssa_join)
+    non_ssa_true.outgoing_edges = [true_edge]
+    non_ssa_false.outgoing_edges = [false_edge]
+    non_ssa_join.incoming_edges = [true_edge, false_edge]
+    true_dest_source = (
+        load("MLIL", const("MLIL", 0x6100), size=8, address=0x4010)
+        if mutable_pointer
+        else const("MLIL", dest_true_addr)
+    )
+    false_dest_source = const("MLIL", dest_false_addr)
+    true_src_source = const("MLIL", src_true_addr)
+    false_src_source = const("MLIL", src_false_addr)
+    true_dest_def = set_var("dest", true_dest_source, instr_index=40, address=0x4010)
+    true_src_def = set_var("src", true_src_source, instr_index=41, address=0x4010)
+    false_dest_def = set_var("dest", false_dest_source, instr_index=50, address=0x4020)
+    false_src_def = set_var("src", false_src_source, instr_index=51, address=0x4020)
+    true_goto = Expr("MLIL_GOTO", instr_index=42, address=0x4014, dest=non_ssa_join.start)
+    false_goto = Expr("MLIL_GOTO", instr_index=52, address=0x4024, dest=non_ssa_join.start)
+    for instruction, block in (
+        (true_dest_def, non_ssa_true),
+        (true_src_def, non_ssa_true),
+        (true_goto, non_ssa_true),
+        (false_dest_def, non_ssa_false),
+        (false_src_def, non_ssa_false),
+        (false_goto, non_ssa_false),
+    ):
+        instruction.il_basic_block = block
+    for expression, block, instruction in (
+        (true_dest_source, non_ssa_true, true_dest_def),
+        (true_src_source, non_ssa_true, true_src_def),
+        (false_dest_source, non_ssa_false, false_dest_def),
+        (false_src_source, non_ssa_false, false_src_def),
+    ):
+        expression.il_basic_block = block
+        expression.instr_index = instruction.instr_index
+        expression.address = instruction.address
+    dest_true_def.non_ssa_form = true_dest_def
+    dest_false_def.non_ssa_form = false_dest_def
+    src_true_def.non_ssa_form = true_src_def
+    src_false_def.non_ssa_form = false_src_def
     pure_source = (
         load("MLIL", const("MLIL", 0x5100), size=4)
         if impure_join_load
         else const("MLIL", 0)
     )
-    pure = set_var("tmp", pure_source, instr_index=40, address=0x5000)
+    pure = set_var("tmp", pure_source, instr_index=60, address=0x5000)
     pure.il_basic_block = non_ssa_join
-    store = Expr("MLIL_STORE", dest=var("dest"), src=var("src"), size=4, instr_index=41, address=0x6000)
+    store = Expr("MLIL_STORE", dest=var("dest"), src=var("src"), size=4, instr_index=61, address=0x6000)
     store.il_basic_block = non_ssa_join
-    true_goto = Expr("MLIL_GOTO", instr_index=50, address=0x5014)
-    false_goto = Expr("MLIL_GOTO", instr_index=51, address=0x5024)
-    il = CorrelatedIl([pure, store, true_goto, false_goto])
+    il = CorrelatedIl([
+        true_dest_def,
+        true_src_def,
+        true_goto,
+        false_dest_def,
+        false_src_def,
+        false_goto,
+        pure,
+        store,
+    ])
     il.ssa_form = ssa
     store_ssa.non_ssa_form = store
     ssa_true_goto.non_ssa_form = true_goto
@@ -699,37 +765,63 @@ def test_global_constant_profile_plans_verified_path_pointer_slot_only():
     }]
 
 
-def test_correlated_store_profile_plans_arm_local_writes():
+def _correlated_store_batch(valorant, bv, func, il):
+    semantics = import_module("plugins.DispatchThis.semantics")
+    return valorant.correlated_stores(semantics.CorrelatedStoreQuery(bv, func, il))
+
+
+def test_correlated_store_provider_pairs_swapped_phi_operands_by_cfg_edge():
     valorant, bv, func, il, store_il, true_goto, false_goto = correlated_store_fixture()
 
-    assert valorant.plan_correlated_store_rewrites(bv, func, il) == [{
-        "store": store_il,
-        "size": 4,
-        "arms": (
-            {"goto": true_goto, "dest": 0x5200, "src": 0x5100},
-            {"goto": false_goto, "dest": 0x5100, "src": 0x5200},
-        ),
-    }]
+    result = _correlated_store_batch(valorant, bv, func, il)
+
+    assert len(result.facts) == 1
+    plan = result.facts[0]
+    assert plan.store_il is store_il
+    assert plan.join_block is store_il.il_basic_block
+    assert [
+        (arm.goto_il, arm.dest_addr, arm.src_addr)
+        for arm in plan.arms
+    ] == [
+        (true_goto, 0x5200, 0x5100),
+        (false_goto, 0x5100, 0x5200),
+    ]
 
 
-def test_correlated_store_profile_rejects_non_swapping_phi_arms():
-    valorant, bv, func, il, _store_il, _true_goto, _false_goto = correlated_store_fixture(reverse=False)
+def test_correlated_store_provider_keeps_duplicate_value_arms_distinct():
+    valorant, bv, func, il, _store_il, true_goto, false_goto = correlated_store_fixture(
+        duplicate_values=True
+    )
 
-    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
+    result = _correlated_store_batch(valorant, bv, func, il)
+
+    assert [(arm.dest_addr, arm.src_addr) for arm in result.facts[0].arms] == [
+        (0x5200, 0x5100),
+        (0x5200, 0x5100),
+    ]
+    assert {id(arm.goto_il) for arm in result.facts[0].arms} == {id(true_goto), id(false_goto)}
 
 
-def test_correlated_store_profile_rejects_writable_pointer_load():
+def test_correlated_store_provider_rejects_incomplete_phi_edge_pairing():
+    valorant, bv, func, il, _store_il, _true_goto, _false_goto = correlated_store_fixture(
+        malformed_pair=True
+    )
+
+    assert _correlated_store_batch(valorant, bv, func, il).facts == ()
+
+
+def test_correlated_store_provider_rejects_writable_pointer_load():
     valorant, bv, func, il, _store_il, _true_goto, _false_goto = correlated_store_fixture(
         mutable_pointer=True
     )
 
-    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
+    assert _correlated_store_batch(valorant, bv, func, il).facts == ()
 
 
-def test_correlated_store_profile_rejects_join_prefix_load():
+def test_correlated_store_provider_rejects_join_prefix_load():
     valorant, bv, func, il, *_rest = correlated_store_fixture(impure_join_load=True)
 
-    assert valorant.plan_correlated_store_rewrites(bv, func, il) == []
+    assert _correlated_store_batch(valorant, bv, func, il).facts == ()
 
 
 def test_global_constant_profile_skips_out_of_range_loads():
@@ -915,9 +1007,11 @@ if __name__ == "__main__":
     test_global_constant_profile_plans_verified_path_pointer_slot_only()
     test_global_constant_profile_plans_scalar_constant_blob_data_vars()
     test_global_constant_profile_plans_pre_blob_dword_constants()
-    test_correlated_store_profile_plans_arm_local_writes()
-    test_correlated_store_profile_rejects_non_swapping_phi_arms()
-    test_correlated_store_profile_rejects_writable_pointer_load()
+    test_correlated_store_provider_pairs_swapped_phi_operands_by_cfg_edge()
+    test_correlated_store_provider_keeps_duplicate_value_arms_distinct()
+    test_correlated_store_provider_rejects_incomplete_phi_edge_pairing()
+    test_correlated_store_provider_rejects_writable_pointer_load()
+    test_correlated_store_provider_rejects_join_prefix_load()
     test_global_constant_profile_skips_out_of_range_loads()
     test_llil_value_folding_uses_stack_spill_before_memory_read()
     test_value_folding_requires_every_phi_arm_and_honors_struct_offset()

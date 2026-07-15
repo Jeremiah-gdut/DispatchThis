@@ -256,8 +256,8 @@ def resolve_call_gadget(bv, mlil):
 def plan_global_constant_slots(bv, mlil):
     return []
 
-def plan_correlated_store_rewrites(bv, func, mlil):
-    return []
+def correlated_stores(query):
+    return CompleteBatch(())
 
 def plan_deflatten_redirections(bv, func, mlil):
     return []
@@ -326,21 +326,31 @@ return facts.branch_fact(jump_il, targets)
 与二进制形态相关的证据（观察值、已解析地址或使用点等）保留在 profile 私有范围内。工作流
 拥有 `BinaryView.define_user_data_var` 和函数全局阶段回执。
 
-`plan_correlated_store_rewrites(bv, func, mlil)` 返回将 join-block store 移回拥有其关联值的
-前驱臂的计划：
+`correlated_stores(query)` 返回将 join-block store 移回拥有其关联值的前驱臂的
+`CompleteBatch[CorrelatedStorePlan]`：
 
 ```python
-{
-    "store": store_il,
-    "size": 4,
-    "arms": (
-        {"goto": true_goto, "dest": 0xA000, "src": 0xB000},
-        {"goto": false_goto, "dest": 0xB000, "src": 0xA000},
+CorrelatedStorePlan(
+    store_il=store_il,
+    join_block=join_block,
+    size=4,
+    arms=(
+        CorrelatedStoreArm(
+            predecessor=true_block,
+            incoming_edge=true_edge,
+            goto_il=true_goto,
+            dest_expr=true_dest_expr,
+            dest_addr=0xA000,
+            src_expr=true_src_expr,
+            src_addr=0xB000,
+        ),
+        ...,
     ),
-}
+)
 ```
 
-profile 证明 PHI-臂关联和具体地址；后端拥有原子 MLIL copy-transform。
+provider 必须按精确 CFG incoming edge 配对 target/source PHI，不能依据 operand 位置；
+core 在当前 MLIL 上重新验证所有 witness，并拥有原子 copy-transform。
 
 `plan_deflatten_redirections(bv, func, mlil)` 返回去平坦化重定向计划：
 

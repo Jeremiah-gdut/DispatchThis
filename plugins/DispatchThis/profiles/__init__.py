@@ -13,14 +13,13 @@ PROFILE_HOOKS = (
     "resolve_branch_gadget",
     "resolve_call_gadget",
     "plan_global_constant_slots",
-    "plan_correlated_store_rewrites",
     "plan_deflatten_redirections",
     "plan_string_decrypt_calls",
 )
 
 ResolverProfile = namedtuple(
     "ResolverProfile",
-    ("id", "name", "description", *PROFILE_HOOKS),
+    ("id", "name", "description", *PROFILE_HOOKS, "correlated_stores"),
 )
 
 
@@ -45,6 +44,9 @@ def resolver_profile_from_module(module):
         elif not callable(hook):
             invalid.append(name)
         hooks.append(hook)
+    correlated_stores = getattr(module, "correlated_stores", None)
+    if correlated_stores is not None and not callable(correlated_stores):
+        invalid.append("correlated_stores")
     if invalid:
         raise InvalidResolverProfile(
             f"resolver profile {getattr(module, 'PROFILE_ID', '<unknown>')} "
@@ -55,6 +57,7 @@ def resolver_profile_from_module(module):
         module.PROFILE_NAME,
         module.PROFILE_DESCRIPTION,
         *hooks,
+        correlated_stores,
     )
 
 

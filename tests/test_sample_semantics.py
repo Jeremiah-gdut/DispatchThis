@@ -85,6 +85,55 @@ def test_degenerate_conditional_branch_fact_must_be_an_unconditional_single_targ
         )
 
 
+def test_correlated_store_plan_requires_explicit_path_and_value_witnesses():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    arm = semantics.CorrelatedStoreArm(
+        predecessor=object(),
+        incoming_edge=object(),
+        goto_il=object(),
+        dest_expr=object(),
+        dest_addr=0x1000,
+        src_expr=object(),
+        src_addr=0x2000,
+    )
+    plan = semantics.CorrelatedStorePlan(
+        store_il=object(),
+        join_block=object(),
+        size=4,
+        arms=(arm, arm),
+    )
+
+    assert plan.arms == (arm, arm)
+    with pytest.raises(ValueError, match="two arms"):
+        semantics.CorrelatedStorePlan(
+            store_il=object(),
+            join_block=object(),
+            size=4,
+            arms=(arm, object()),
+        )
+
+
+def test_legacy_profile_adapter_exposes_only_typed_correlated_store_batches():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    providers = load_plugin_module("plugins.DispatchThis.providers")
+    profile = type(
+        "Profile",
+        (),
+        {
+            "id": "legacy-correlated-typed",
+            "name": "Legacy correlated typed",
+            "resolve_branch_gadget": staticmethod(lambda *_args: []),
+            "correlated_stores": staticmethod(lambda _query: semantics.CompleteBatch(())),
+        },
+    )()
+
+    assert providers._register_legacy_profile(profile)
+    provider = providers.get_provider(profile.id)
+
+    assert provider.correlated_stores is not None
+    assert provider.correlated_stores(object()) == semantics.CompleteBatch(())
+
+
 def test_active_provider_never_falls_back_to_a_registered_provider():
     semantics = load_plugin_module("plugins.DispatchThis.semantics")
     providers = load_plugin_module("plugins.DispatchThis.providers")

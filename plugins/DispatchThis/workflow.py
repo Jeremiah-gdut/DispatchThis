@@ -41,6 +41,8 @@ from .semantics import (
     CallTargetFact,
     CallTargetQuery,
     CompleteBatch,
+    CorrelatedStorePlan,
+    CorrelatedStoreQuery,
     GlobalDataFact,
     GlobalDataQuery,
     Inconclusive,
@@ -399,6 +401,30 @@ def _provider_global_plans(bv, func, mlil, provider):
     if plans is None:
         log_warn(f"[workflow] {func.name}: rejected conflicting or malformed global batch")
     return plans
+
+
+def _provider_correlated_store_plans(bv, func, mlil, provider):
+    """Validate one complete external correlated-STORE scan before mutation."""
+    slot = getattr(provider, "correlated_stores", None)
+    if slot is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement correlated STORE recovery")
+        return []
+    try:
+        result = slot(CorrelatedStoreQuery(bv, func, mlil))
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must fail closed.
+        log_warn(f"[workflow] {func.name}: correlated STORE provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: correlated STORE provider was inconclusive: {result.reason}")
+        return None
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(plan) is not CorrelatedStorePlan for plan in result.facts)
+    ):
+        log_warn(f"[workflow] {func.name}: correlated STORE provider returned an invalid batch")
+        return None
+    return result.facts
 
 
 def _provider_branch_plan(bv, func, llil, provider):
@@ -1009,10 +1035,8 @@ def recover_phi_stores_mlil(ctx: AnalysisContext):
     if bv.arch.name != "aarch64":
         return
 
-    _provider, profile, state = _active_provider_state(bv, func)
-    if state is None:
-        return
-    if profile is None:
+    provider, _profile, state = _active_provider_state(bv, func)
+    if provider is None or state is None:
         return
     if not _ensure_analysis_settings(func):
         return
@@ -1022,7 +1046,9 @@ def recover_phi_stores_mlil(ctx: AnalysisContext):
     mlil = ctx.mlil
     if mlil is None:
         return
-    plans = profile.plan_correlated_store_rewrites(bv, func, mlil)
+    plans = _provider_correlated_store_plans(bv, func, mlil, provider)
+    if plans is None:
+        return
     new_mlil, applied = apply_correlated_stores_mlil(ctx, mlil, plans)
     if applied and new_mlil is not None and _commit_mlil(ctx, new_mlil):
         log_info(f"[workflow] {func.name}: recovered {applied} correlated store(s)")

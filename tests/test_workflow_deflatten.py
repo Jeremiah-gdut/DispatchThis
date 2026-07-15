@@ -130,9 +130,9 @@ def fake_validate_current_call_plans(_mlil, plans):
     ]
 
 
-def fake_plan_correlated_store_rewrites(bv, func, mlil):
-    correlated_plan_calls.append((bv, func, mlil))
-    return list(correlated_plan_results)
+def fake_correlated_stores(query):
+    correlated_plan_calls.append((query.view, query.function, query.mlil))
+    return semantics.CompleteBatch(tuple(correlated_plan_results))
 
 
 def fake_apply_correlated_stores_mlil(ctx, mlil, plans):
@@ -186,7 +186,6 @@ def fake_active_profile(bv):
         resolve_branch_gadget=fake_resolve_llil_jump_plan,
         resolve_call_gadget=fake_resolve_call_gadget,
         plan_global_constant_slots=fake_plan_global_constant_slots,
-        plan_correlated_store_rewrites=fake_plan_correlated_store_rewrites,
         plan_deflatten_redirections=fake_plan_deflatten_redirections,
         plan_string_decrypt_calls=fake_plan_string_decrypt_calls,
     )
@@ -205,6 +204,7 @@ def fake_active_provider(bv):
     return types.SimpleNamespace(
         provider_id="test",
         call_targets=fake_call_targets,
+        correlated_stores=fake_correlated_stores,
     )
 
 
@@ -2156,13 +2156,37 @@ def test_global_resolver_does_not_stabilize_when_receipts_no_longer_verify():
     FakeWorkflowState.global_receipts = {}
 
 
-def test_recover_phi_stores_uses_profile_plan_after_global_stability():
+def test_recover_phi_stores_uses_external_plan_after_global_stability():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
     active_profile_calls.clear()
     correlated_plan_calls.clear()
-    correlated_plan_results[:] = [{"store": object(), "size": 4, "arms": ()}]
+    correlated_plan_results[:] = [semantics.CorrelatedStorePlan(
+        store_il=object(),
+        join_block=object(),
+        size=4,
+        arms=(
+            semantics.CorrelatedStoreArm(
+                predecessor=object(),
+                incoming_edge=object(),
+                goto_il=object(),
+                dest_expr=object(),
+                dest_addr=0x1000,
+                src_expr=object(),
+                src_addr=0x2000,
+            ),
+            semantics.CorrelatedStoreArm(
+                predecessor=object(),
+                incoming_edge=object(),
+                goto_il=object(),
+                dest_expr=object(),
+                dest_addr=0x1004,
+                src_expr=object(),
+                src_addr=0x2004,
+            ),
+        ),
+    )]
     correlated_rewrite_calls.clear()
     rewritten_mlil = object()
     correlated_rewrite_results[:] = [(rewritten_mlil, 1)]
@@ -2172,7 +2196,7 @@ def test_recover_phi_stores_uses_profile_plan_after_global_stability():
 
     assert active_profile_calls == [ctx.view]
     assert correlated_plan_calls == [(ctx.view, ctx.function, ctx.mlil)]
-    assert correlated_rewrite_calls == [(ctx, ctx.mlil, correlated_plan_results)]
+    assert correlated_rewrite_calls == [(ctx, ctx.mlil, tuple(correlated_plan_results))]
     assert ctx.installed_mlil is rewritten_mlil
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
