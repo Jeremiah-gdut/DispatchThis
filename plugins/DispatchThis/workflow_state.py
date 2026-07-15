@@ -18,6 +18,7 @@ def _fresh_state():
             "stable": False,
             "receipts": {},
             "targets": {},
+            "adjustments": {},
             "cleanup_done": False,
             "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
@@ -70,6 +71,18 @@ def _normalize_state(data):
     call.setdefault("stable", False)
     call.setdefault("receipts", {})
     call.setdefault("targets", {})
+    adjustments = call.setdefault("adjustments", {})
+    if (
+        type(adjustments) is not dict
+        or any(
+            type(call_addr) is not int
+            or call_addr < 0
+            or adjustment is None
+            or type(adjustment) is str
+            for call_addr, adjustment in adjustments.items()
+        )
+    ):
+        call["adjustments"] = {}
     call.setdefault("cleanup_done", False)
     if call.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
         call["cleanup_done"] = False
@@ -77,7 +90,18 @@ def _normalize_state(data):
     global_ = data.setdefault("global", {})
     global_.setdefault("stable", False)
     receipts = global_.setdefault("receipts", {})
-    global_["receipts"] = {slot: str(type_name) for slot, type_name in receipts.items()}
+    if (
+        type(receipts) is not dict
+        or any(
+            type(slot) is not int
+            or slot < 0
+            or data_type is None
+            or type(data_type) is str
+            for slot, data_type in receipts.items()
+        )
+    ):
+        global_["receipts"] = {}
+        global_["stable"] = False
     return data
 
 
@@ -198,6 +222,10 @@ class FunctionWorkflowState:
     def call_target_receipts(self):
         return self.data["call"]["targets"]
 
+    @property
+    def call_adjustment_receipts(self):
+        return self.data["call"]["adjustments"]
+
     def call_adjustment_needed(self, call_addr, adjust_type):
         """Compare the desired override with Binary Ninja's current fact."""
         try:
@@ -221,6 +249,7 @@ class FunctionWorkflowState:
         )
         if stale_adjustment:
             self.call_receipts.pop(call_addr)
+            self.call_adjustment_receipts.pop(call_addr, None)
         if previous == target and not stale_adjustment:
             return False
         self.call_target_receipts[call_addr] = target
@@ -233,11 +262,31 @@ class FunctionWorkflowState:
         previous = self.call_receipts.get(call_addr)
         if previous == target:
             return False
+        self.call_adjustment_receipts.pop(call_addr, None)
         self.call_receipts[call_addr] = target
         self.data["call"]["stable"] = False
         self.data["call"]["cleanup_done"] = False
         self.invalidate_globals()
         return previous is not None
+
+    def mark_call_adjustment(self, call_addr, adjust_type):
+        self.call_adjustment_receipts[call_addr] = adjust_type
+
+    def discard_call_site(self, call_addr):
+        """Drop a singleton receipt when current evidence says it is unsupported."""
+        adjustment = self.call_adjustment_receipts.pop(call_addr, None)
+        had_receipt = (
+            call_addr in self.call_receipts
+            or call_addr in self.call_target_receipts
+            or adjustment is not None
+        )
+        self.call_receipts.pop(call_addr, None)
+        self.call_target_receipts.pop(call_addr, None)
+        if had_receipt:
+            self.data["call"]["stable"] = False
+            self.data["call"]["cleanup_done"] = False
+            self.invalidate_globals()
+        return adjustment
 
     def mark_call_stable(self):
         self.data["call"]["stable"] = True
@@ -259,12 +308,15 @@ class FunctionWorkflowState:
     def global_receipts(self):
         return self.data["global"]["receipts"]
 
-    def mark_global_slot(self, slot_addr, type_name):
-        type_name = str(type_name)
+    def mark_global_slot(self, slot_addr, data_type):
         previous = self.global_receipts.get(slot_addr)
-        if previous == type_name:
+        try:
+            unchanged = previous == data_type
+        except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja type comparison boundary.
+            unchanged = False
+        if unchanged:
             return False
-        self.global_receipts[slot_addr] = type_name
+        self.global_receipts[slot_addr] = data_type
         self.data["global"]["stable"] = False
         self.invalidate_cleanup()
         return True
@@ -276,7 +328,10 @@ class FunctionWorkflowState:
         return self.data["global"]["stable"]
 
     def global_receipts_verified(self, verifier):
-        return all(verifier(slot_addr, type_name) for slot_addr, type_name in self.global_receipts.items())
+        return all(
+            verifier(slot_addr, data_type)
+            for slot_addr, data_type in self.global_receipts.items()
+        )
 
     def invalidate_globals(self):
         self.data["global"]["stable"] = False
@@ -290,4 +345,5 @@ class FunctionWorkflowState:
         self.data["call"]["cleanup_done"] = False
         self.call_receipts.clear()
         self.call_target_receipts.clear()
+        self.call_adjustment_receipts.clear()
         self.invalidate_globals()

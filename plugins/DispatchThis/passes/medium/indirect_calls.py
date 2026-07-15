@@ -37,7 +37,7 @@ def validate_current_call_plans(mlil, plans):
         if not isinstance(plan, dict):
             return None
         recorded_call = plan.get("call_il")
-        current_call = current_non_ssa_instruction(mlil, recorded_call)
+        current_call = _current_indirect_call(mlil, recorded_call)
         call_addr = plan.get("call_addr")
         target = plan.get("target")
         recorded_owner = getattr(recorded_call, "function", None)
@@ -50,15 +50,8 @@ def validate_current_call_plans(mlil, plans):
             or call_addr < 0
             or type(target) is not int
             or target < 0
-            or recorded_call.operation != current_call.operation
-            or current_call.operation not in CALL_OPERATIONS
-            or getattr(recorded_call, "expr_index", None)
-            != getattr(current_call, "expr_index", None)
             or getattr(recorded_call, "address", None) != call_addr
             or getattr(current_call, "address", None) != call_addr
-            or _expression_witness(getattr(recorded_call, "dest", None))
-            != _expression_witness(getattr(current_call, "dest", None))
-            or _parameter_witness(recorded_call) != _parameter_witness(current_call)
         ):
             log_warn(f"[icall] rejected stale call plan @ {call_addr!r}")
             return None
@@ -114,6 +107,59 @@ def validate_current_call_plans(mlil, plans):
             log_warn(f"[icall] rejected conflicting rewrite for expression {expr_index}")
             return None
     return accepted
+
+
+def validate_current_call_facts(mlil, facts):
+    """Bind complete provider target sets to exact current indirect calls."""
+    accepted = []
+    for recorded_call, targets in facts:
+        current_call = _current_indirect_call(mlil, recorded_call)
+        call_addr = getattr(recorded_call, "address", None)
+        if (
+            current_call is None
+            or type(call_addr) is not int
+            or call_addr < 0
+            or type(targets) is not tuple
+            or not targets
+            or any(type(target) is not int or target < 0 for target in targets)
+            or tuple(sorted(set(targets))) != targets
+        ):
+            log_warn(f"[icall] rejected stale call fact @ {call_addr!r}")
+            return None
+        same_site = next(
+            (item for item in accepted if item[0].address == call_addr),
+            None,
+        )
+        if same_site is not None:
+            if same_site[0] is not current_call or same_site[1] != targets:
+                log_warn(f"[icall] rejected conflicting facts @ {call_addr:#x}")
+                return None
+            continue
+        accepted.append((current_call, targets))
+    return accepted
+
+
+def _current_indirect_call(mlil, recorded_call):
+    current_call = current_non_ssa_instruction(mlil, recorded_call)
+    recorded_owner = getattr(recorded_call, "function", None)
+    current_owner = getattr(current_call, "function", None)
+    if (
+        current_call is None
+        or recorded_owner is not mlil
+        or current_owner is not mlil
+        or getattr(recorded_call, "operation", None) != current_call.operation
+        or current_call.operation not in CALL_OPERATIONS
+        or getattr(getattr(current_call, "dest", None), "operation", None) in CONST_OPERATIONS
+        or getattr(recorded_call, "expr_index", None)
+        != getattr(current_call, "expr_index", None)
+        or getattr(recorded_call, "address", None)
+        != getattr(current_call, "address", None)
+        or _expression_witness(getattr(recorded_call, "dest", None))
+        != _expression_witness(getattr(current_call, "dest", None))
+        or _parameter_witness(recorded_call) != _parameter_witness(current_call)
+    ):
+        return None
+    return current_call
 
 
 def _expression_witness(expr):
@@ -178,7 +224,7 @@ def _ssa_reads(expression):
     return reads
 
 
-def _call_target_definition_slice(mlil, call_il, max_depth=64):
+def _call_target_definition_slice(mlil, call_il):
     """Return the exact current SSA definitions feeding one call destination.
 
     PHIs are connectors only.  Cleanup ownership is granted exclusively to
@@ -214,12 +260,10 @@ def _call_target_definition_slice(mlil, call_il, max_depth=64):
         return None
 
     definitions = {}
-    pending = [(variable, 0) for variable in initial_reads]
+    pending = list(initial_reads)
     seen_variables = []
     while pending:
-        variable, depth = pending.pop()
-        if depth > max_depth:
-            return None
+        variable = pending.pop()
         if any(variable == seen for seen in seen_variables):
             continue
         seen_variables.append(variable)
@@ -242,7 +286,7 @@ def _call_target_definition_slice(mlil, call_il, max_depth=64):
                 for source in sources
             ):
                 return None
-            pending.extend((source, depth + 1) for source in sources)
+            pending.extend(sources)
             continue
         if definition.operation != M.MLIL_SET_VAR_SSA:
             return None
@@ -258,7 +302,7 @@ def _call_target_definition_slice(mlil, call_il, max_depth=64):
         source_reads = _ssa_reads(getattr(definition, "src", None))
         if source_reads is None:
             return None
-        pending.extend((source, depth + 1) for source in source_reads)
+        pending.extend(source_reads)
 
     roots = set(definitions)
     load_roots = {

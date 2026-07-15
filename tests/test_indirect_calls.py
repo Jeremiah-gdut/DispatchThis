@@ -365,6 +365,29 @@ def test_call_cleanup_slice_follows_every_exact_phi_input():
     assert plan["cleanup_load_roots"] == {0, 1}
 
 
+def test_call_cleanup_slice_has_no_fixed_definition_depth_limit():
+    definitions = {}
+    instructions = []
+    previous = SsaVar("value0", 0)
+    for index in range(1, 67):
+        current = SsaVar(f"value{index}", 1)
+        assignment = set_var(f"value{index}", var(f"value{index - 1}"), instr_index=index - 1)
+        instructions.append(assignment)
+        definitions[current] = set_var_ssa(current, var_ssa(previous), assignment)
+        previous = current
+    call_il = call(var("value66"), instr_index=66)
+    mlil = FakeMlil([*instructions, call_il])
+    attach_call_ssa(mlil, call_il, var_ssa(previous), definitions)
+
+    plans = indirect_calls.validate_current_call_plans(
+        mlil,
+        [{"call_il": call_il, "call_addr": 0x4000, "target": 0x5000}],
+    )
+
+    assert plans[0]["cleanup_proven"] is True
+    assert plans[0]["cleanup_roots"] == set(range(66))
+
+
 def test_unprovable_ssa_slice_disables_cleanup_without_losing_resolution():
     bv, mlil, call_il, _decode_def = decoded_call_fixture()
     aliased_target = Expr(
@@ -458,6 +481,22 @@ def test_current_call_plan_rejects_a_witness_from_regenerated_mlil():
         types.SimpleNamespace(view=bv), mlil, [plan]
     ) == (mlil, 0)
     assert mlil.replaced == []
+
+
+def test_current_call_facts_require_an_exact_indirect_call_witness():
+    _bv, mlil, call_il, _decode_def = decoded_call_fixture()
+
+    assert indirect_calls.validate_current_call_facts(
+        mlil,
+        [(call_il, (0x5000, 0x6000))],
+    ) == [(call_il, (0x5000, 0x6000))]
+
+    call_il.function = object()
+
+    assert indirect_calls.validate_current_call_facts(
+        mlil,
+        [(call_il, (0x5000, 0x6000))],
+    ) is None
 
 
 def test_current_call_plan_rejects_mismatched_call_address():

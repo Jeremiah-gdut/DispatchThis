@@ -1,20 +1,19 @@
 """Workflow activity callbacks for DispatchThis."""  # noqa: F401  # noqa: SIZE_OK — AGENTS.md reserves reanalysis mutation orchestration for this module.
 
-from collections.abc import Mapping
-
-from binaryninja import AnalysisContext, FunctionType, Settings, SettingsScope
+from binaryninja import AnalysisContext, FunctionType, Settings, SettingsScope, Type
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
 from .passes.medium.correlated_stores import apply_correlated_stores_mlil
 from .passes.medium.indirect_calls import (
     apply_indirect_call_rewrites,
     current_call_receipt_plans,
+    validate_current_call_facts,
     validate_current_call_plans,
 )
 from .passes.medium.branch_conditions import translate_indirect_branch_conditions
 from .passes.medium.phase_cleanup import settle_cleanup_decode
 from .passes.medium.string_decrypt import apply_decrypted_string_comments
-from .helpers.mlil import set_roots_before
+from .helpers.mlil import iter_indirect_calls, set_roots_before
 from .passes.low.gadget_llil import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
@@ -28,7 +27,16 @@ from .providers import (
     _set_pending_reproof_functions,
     active_provider,
 )
-from .semantics import BranchTargetFact, BranchTargetQuery, CompleteBatch, Inconclusive
+from .semantics import (
+    BranchTargetFact,
+    BranchTargetQuery,
+    CallTargetFact,
+    CallTargetQuery,
+    CompleteBatch,
+    GlobalDataFact,
+    GlobalDataQuery,
+    Inconclusive,
+)
 from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
 
@@ -153,39 +161,78 @@ def _schedule_tag_cleanup(bv, func_start):
     bv.add_analysis_completion_event(clear_after_analysis)
 
 
-def _global_slot_type(bv, type_name):
-    parsed, _ = bv.parse_type_string(f"{type_name} dispatchthis_global_constant_slot")
-    return parsed
-
-
-def _global_type_applied(bv, slot_addr, type_name):
-    data_var = bv.get_data_var_at(slot_addr)
-    if data_var is None:
-        return False
+def _same_type(left, right):
     try:
-        return data_var.type == _global_slot_type(bv, type_name)
+        return left == right
     except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja type comparison boundary.
         return False
 
 
-def _global_plan_consensus(plans):
-    """Validate one atomic profile result and collapse exact duplicates."""
-    by_slot = {}
-    for plan in plans or ():
-        if not isinstance(plan, Mapping):
+def _global_type_applied(bv, slot_addr, data_type):
+    try:
+        data_var = bv.get_data_var_at(slot_addr)
+        if data_var is None:
+            return False
+        return _same_type(data_var.type, data_type)
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja data-variable readback boundary.
+        return False
+
+
+def _mapped_type_range(bv, slot_addr, width):
+    end = slot_addr + width
+    if end <= slot_addr:
+        return False
+    current = slot_addr
+    while current < end:
+        try:
+            segment = bv.get_segment_at(current)
+        except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja segment lookup boundary.
+            return False
+        start = getattr(segment, "start", None)
+        segment_end = getattr(segment, "end", None)
+        if (
+            segment is None
+            or type(start) is not int
+            or type(segment_end) is not int
+            or start > current
+            or segment_end <= current
+        ):
+            return False
+        current = min(end, segment_end)
+    return True
+
+
+def _global_fact_consensus(bv, facts):
+    """Validate an atomic native-type batch and collapse exact duplicates."""
+    plans = []
+    for fact in facts:
+        slot_addr = fact.slot_addr
+        data_type = fact.data_type
+        width = getattr(data_type, "width", None)
+        if (
+            type(slot_addr) is not int
+            or slot_addr < 0
+            or not isinstance(data_type, Type)
+            or type(width) is not int
+            or width <= 0
+            or not _mapped_type_range(bv, slot_addr, width)
+        ):
             return None
-        slot_addr = plan.get("slot_addr")
-        type_name = plan.get("type")
-        if type(slot_addr) is not int or slot_addr < 0 or not isinstance(type_name, str) or not type_name:
+        previous = next((plan for plan in plans if plan[0] == slot_addr), None)
+        if previous is not None:
+            if not _same_type(previous[1], data_type):
+                return None
+            continue
+        plans.append((slot_addr, data_type, width))
+    plans.sort(key=lambda plan: plan[0])
+    for previous, current in zip(plans, plans[1:]):
+        if current[0] < previous[0] + previous[2]:
             return None
-        previous = by_slot.setdefault(slot_addr, type_name)
-        if previous != type_name:
-            return None
-    return [{"slot_addr": addr, "type": by_slot[addr]} for addr in sorted(by_slot)]
+    return [(slot_addr, data_type) for slot_addr, data_type, _width in plans]
 
 
 def _global_receipts_verified(bv, state):
-    return state.global_receipts_verified(lambda slot_addr, type_name: _global_type_applied(bv, slot_addr, type_name))
+    return state.global_receipts_verified(lambda slot_addr, data_type: _global_type_applied(bv, slot_addr, data_type))
 
 
 def _type_is_noreturn(type_):
@@ -229,6 +276,119 @@ def _call_adjustment_type(mlil, call_il, callee):
     except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja type construction boundary.
         return False, None
     return True, adjusted
+
+
+def _provider_call_plans(bv, func, mlil, provider):
+    """Validate one complete external call-target scan before mutation."""
+    slot = getattr(provider, "call_targets", None)
+    if slot is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement call target recovery")
+        return [], frozenset(), frozenset()
+    try:
+        result = slot(CallTargetQuery(bv, func, mlil))
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must fail closed.
+        log_warn(f"[workflow] {func.name}: call provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: call provider was inconclusive: {result.reason}")
+        return None
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(fact) is not CallTargetFact for fact in result.facts)
+    ):
+        log_warn(f"[workflow] {func.name}: call provider returned an invalid batch")
+        return None
+    try:
+        facts = validate_current_call_facts(
+            mlil,
+            [(fact.call_il, fact.targets) for fact in result.facts],
+        )
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — current-IL validation must fail closed at the provider boundary.
+        log_warn(f"[workflow] {func.name}: call batch validation failed: {error}")
+        return None
+    if facts is None:
+        return None
+    plans = [
+        {
+            "call_il": call_il,
+            "call_addr": call_il.address,
+            "target": targets[0],
+            "decode_def": None,
+        }
+        for call_il, targets in facts
+        if len(targets) == 1
+    ]
+    try:
+        plans = validate_current_call_plans(mlil, plans)
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — current-IL validation must fail closed at the provider boundary.
+        log_warn(f"[workflow] {func.name}: singleton call planning failed: {error}")
+        return None
+    if plans is None:
+        return None
+    return plans, frozenset(
+        call_il.address
+        for call_il, targets in facts
+        if len(targets) > 1
+    ), frozenset(call_il.address for call_il, _targets in facts)
+
+
+def _clear_unsupported_call_adjustments(func, state, call_addresses):
+    """Remove core-owned singleton overrides displaced by unsupported call facts."""
+    mutated = False
+    for call_addr in call_addresses:
+        adjust_type = state.discard_call_site(call_addr)
+        if adjust_type is None:
+            continue
+        try:
+            if not _same_type(func.get_call_type_adjustment(call_addr), adjust_type):
+                continue
+            func.set_call_type_adjustment(call_addr, None)
+            if func.get_call_type_adjustment(call_addr) is not None:
+                log_warn(
+                    f"[workflow] {func.name}: failed to clear type adjustment "
+                    f"at {hex(call_addr)}"
+                )
+                return None
+            mutated = True
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja call-adjustment mutation boundary.
+            log_warn(
+                f"[workflow] {func.name}: failed to clear type adjustment "
+                f"at {hex(call_addr)}: {error}"
+            )
+            return None
+    return mutated
+
+
+def _provider_global_plans(bv, func, mlil, provider):
+    """Validate one complete external global-data scan before mutation."""
+    slot = getattr(provider, "global_data", None)
+    if slot is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement global data recovery")
+        return []
+    try:
+        result = slot(GlobalDataQuery(bv, func, mlil))
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must fail closed.
+        log_warn(f"[workflow] {func.name}: global provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: global provider was inconclusive: {result.reason}")
+        return None
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(fact) is not GlobalDataFact for fact in result.facts)
+    ):
+        log_warn(f"[workflow] {func.name}: global provider returned an invalid batch")
+        return None
+    try:
+        plans = _global_fact_consensus(bv, result.facts)
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — native Type boundaries must fail closed.
+        log_warn(f"[workflow] {func.name}: global batch validation failed: {error}")
+        return None
+    if plans is None:
+        log_warn(f"[workflow] {func.name}: rejected conflicting or malformed global batch")
+    return plans
 
 
 def _provider_branch_plan(bv, func, llil, provider):
@@ -459,14 +619,11 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 def resolve_calls_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
-    _provider, profile, state = _active_provider_state(bv, func)
+    provider, _legacy, state = _active_provider_state(bv, func)
     if state is None:
         return
 
     if not state.branch_stable(func):
-        return
-
-    if profile is None:
         return
 
     if not _ensure_analysis_settings(func):
@@ -476,12 +633,30 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    plans = validate_current_call_plans(
-        mlil,
-        profile.resolve_call_gadget(bv, mlil),
-    )
-    if plans is None:
+    provider_plans = _provider_call_plans(bv, func, mlil, provider)
+    if provider_plans is None:
         state.invalidate_call_stable()
+        return
+    plans, multi_call_addresses, reported_call_addresses = provider_plans
+    try:
+        omitted_call_addresses = {
+            call_il.address
+            for call_il in iter_indirect_calls(mlil)
+            if call_il.address not in reported_call_addresses
+        }
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — current-MLIL scan must fail closed.
+        log_warn(f"[workflow] {func.name}: could not enumerate indirect calls: {error}")
+        state.invalidate_call_stable()
+        return
+    cleared_adjustment = _clear_unsupported_call_adjustments(
+        func,
+        state,
+        multi_call_addresses | omitted_call_addresses,
+    )
+    if cleared_adjustment is None:
+        state.invalidate_call_stable()
+        return
+    if cleared_adjustment:
         return
 
     rewritten_mlil, rewrites = apply_indirect_call_rewrites(ctx, mlil, plans)
@@ -516,6 +691,7 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     calls = [*plans, *receipt_plans]
 
     adjustments = 0
+    adjusted_types = {}
     adjustment_failed = False
     for plan in calls:
         call_addr = plan["call_addr"]
@@ -540,6 +716,7 @@ def resolve_calls_mlil(ctx: AnalysisContext):
                 adjustment_failed = True
                 continue
             adjustments += 1
+            adjusted_types[call_addr] = adjust_type
         except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — the only core-owned call-adjustment mutation boundary.
             log_warn(f"[workflow] {func.name}: type-adjust @ {hex(call_addr)} failed: {e}")
             adjustment_failed = True
@@ -554,6 +731,11 @@ def resolve_calls_mlil(ctx: AnalysisContext):
         for plan in calls:
             state.mark_call_target(plan["call_addr"], plan["target"])
             state.mark_call_adjusted(plan["call_addr"], plan["target"])
+            if plan["call_addr"] in adjusted_types:
+                state.mark_call_adjustment(
+                    plan["call_addr"],
+                    adjusted_types[plan["call_addr"]],
+                )
         return
 
     cleanup_proven = all(plan.get("cleanup_proven", False) for plan in plans)
@@ -661,10 +843,8 @@ def resolve_globals_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return
-    _provider, profile, state = _active_provider_state(bv, func)
+    provider, _legacy, state = _active_provider_state(bv, func)
     if state is None:
-        return
-    if profile is None:
         return
     if not _ensure_analysis_settings(func):
         return
@@ -677,10 +857,9 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    plans = _global_plan_consensus(profile.plan_global_constant_slots(bv, mlil))
+    plans = _provider_global_plans(bv, func, mlil, provider)
     if plans is None:
         state.invalidate_globals()
-        log_warn(f"[workflow] {func.name}: rejected conflicting or malformed global plan")
         return
     if not plans:
         if _global_receipts_verified(bv, state):
@@ -693,35 +872,29 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     # verified.  Never carry a previous stable receipt across a failed attempt.
     state.invalidate_globals()
 
-    slot_types = {}
     applied = 0
     changed = False
     failed = False
-    for plan in plans:
-        slot_addr = plan["slot_addr"]
-        type_name = plan["type"]
+    for slot_addr, data_type in plans:
         if (
-            state.global_receipts.get(slot_addr) == type_name
-            and _global_type_applied(bv, slot_addr, type_name)
+            _same_type(state.global_receipts.get(slot_addr), data_type)
+            and _global_type_applied(bv, slot_addr, data_type)
         ):
             continue
-        if _global_type_applied(bv, slot_addr, type_name):
-            changed = state.mark_global_slot(slot_addr, type_name) or changed
+        if _global_type_applied(bv, slot_addr, data_type):
+            changed = state.mark_global_slot(slot_addr, data_type) or changed
             continue
         try:
-            if type_name not in slot_types:
-                slot_types[type_name] = _global_slot_type(bv, type_name)
-            slot_type = slot_types[type_name]
-            bv.define_user_data_var(slot_addr, slot_type)
-            if not _global_type_applied(bv, slot_addr, type_name):
-                log_warn(f"[workflow] {func.name}: failed to verify global const slot @ {hex(slot_addr)}")
+            bv.define_user_data_var(slot_addr, data_type)
+            if not _global_type_applied(bv, slot_addr, data_type):
+                log_warn(f"[workflow] {func.name}: failed to verify global data slot @ {hex(slot_addr)}")
                 failed = True
                 continue
-            state.mark_global_slot(slot_addr, type_name)
+            state.mark_global_slot(slot_addr, data_type)
             applied += 1
         except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja global-data mutation boundary.
             failed = True
-            log_warn(f"[workflow] {func.name}: global const slot @ {hex(slot_addr)} failed: {e}")
+            log_warn(f"[workflow] {func.name}: global data slot @ {hex(slot_addr)} failed: {e}")
 
     if _global_receipts_verified(bv, state):
         if not changed and not applied and not failed:
@@ -729,7 +902,7 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     else:
         state.invalidate_globals()
     if applied:
-        log_info(f"[workflow] {func.name}: typed {applied} global constant slot(s)")
+        log_info(f"[workflow] {func.name}: typed {applied} global data slot(s)")
 
 
 def recover_phi_stores_mlil(ctx: AnalysisContext):

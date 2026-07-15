@@ -17,6 +17,14 @@ class FakeBranch:
         self.auto_defined = auto_defined
 
 
+class NativeType:
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return isinstance(other, NativeType) and self.name == other.name
+
+
 class FakeFunction:
     def __init__(self):
         self.session_data = {}
@@ -100,16 +108,19 @@ def test_call_target_receipts_feed_cleanup_without_gating_type_adjustments():
 
 def test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint():
     state = FunctionWorkflowState(FakeFunction())
+    data_type = NativeType("uint64")
 
     assert not state.global_stable()
     assert state.global_receipts == {}
     assert state.global_receipts_verified(lambda *_args: False)
 
-    assert state.mark_global_slot(0xA43D70, "uint64_t") is True
-    assert state.global_receipts == {0xA43D70: "uint64_t"}
+    assert state.mark_global_slot(0xA43D70, data_type) is True
+    assert state.global_receipts == {0xA43D70: data_type}
     assert not state.global_stable()
-    assert state.mark_global_slot(0xA43D70, "uint64_t") is False
-    assert state.global_receipts_verified(lambda addr, type_name: (addr, type_name) == (0xA43D70, "uint64_t"))
+    assert state.mark_global_slot(0xA43D70, data_type) is False
+    assert state.global_receipts_verified(
+        lambda addr, actual_type: (addr, actual_type) == (0xA43D70, data_type)
+    )
 
     state.mark_global_stable()
     assert state.global_stable()
@@ -117,7 +128,7 @@ def test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint():
 
 def test_global_phase_invalidates_on_new_phase_work():
     state = FunctionWorkflowState(FakeFunction())
-    state.mark_global_slot(0xA43D70, "uint64_t")
+    state.mark_global_slot(0xA43D70, NativeType("uint64"))
     state.mark_global_stable()
 
     state.mark_call_target(0x4000, 0x5000)
@@ -130,21 +141,37 @@ def test_global_phase_invalidates_on_new_phase_work():
 
 def test_global_slot_changes_invalidate_phase_cleanup_receipts():
     state = FunctionWorkflowState(FakeFunction())
+    data_type = NativeType("uint64")
 
     state.mark_branch_cleanup_done()
     state.mark_call_cleanup_done()
     assert not state.branch_cleanup_needed()
     assert not state.call_cleanup_needed()
 
-    assert state.mark_global_slot(0xA43D70, "uint64_t") is True
+    assert state.mark_global_slot(0xA43D70, data_type) is True
     assert state.branch_cleanup_needed()
     assert state.call_cleanup_needed()
 
     state.mark_branch_cleanup_done()
     state.mark_call_cleanup_done()
-    assert state.mark_global_slot(0xA43D70, "uint64_t") is False
+    assert state.mark_global_slot(0xA43D70, data_type) is False
     assert not state.branch_cleanup_needed()
     assert not state.call_cleanup_needed()
+
+
+def test_legacy_string_global_receipts_are_discarded():
+    func = FakeFunction()
+    func.session_data[ROOT_KEY] = {
+        "global": {
+            "stable": True,
+            "receipts": {0xA43D70: "uint64_t"},
+        },
+    }
+
+    state = FunctionWorkflowState(func)
+
+    assert state.global_receipts == {}
+    assert not state.global_stable()
 
 
 def test_existing_user_branch_metadata_is_not_promoted_to_a_receipt():

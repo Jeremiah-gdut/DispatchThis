@@ -5,6 +5,8 @@ from binaryninja import FunctionType, Type
 from conftest import load_plugin_module, temporary_modules
 
 
+semantics = load_plugin_module("plugins.DispatchThis.semantics")
+
 calls = []
 branch_plan_calls = []
 branch_plan_results = {}
@@ -50,6 +52,14 @@ def fake_resolve_call_gadget(bv, mlil):
     return list(call_plan_results)
 
 
+def fake_call_targets(query):
+    call_plan_calls.append((query.view, query.mlil))
+    return semantics.CompleteBatch(tuple(
+        semantics.CallTargetFact(plan["call_il"], (plan["target"],))
+        for plan in call_plan_results
+    ))
+
+
 def fake_apply_indirect_call_rewrites(ctx, mlil, plans):
     call_rewrite_calls.append((ctx, mlil, plans))
     return mlil, len(plans)
@@ -85,6 +95,38 @@ def fake_current_call_receipt_plans(_mlil, receipts):
 def fake_plan_global_constant_slots(bv, mlil):
     global_plan_calls.append((bv, mlil))
     return list(global_plan_results)
+
+
+def fake_global_plans(bv, _func, mlil, _provider):
+    plans = fake_plan_global_constant_slots(bv, mlil)
+    by_slot = {}
+    for plan in plans:
+        previous = by_slot.setdefault(plan["slot_addr"], plan["type"])
+        if previous != plan["type"]:
+            return None
+    return [(slot_addr, by_slot[slot_addr]) for slot_addr in sorted(by_slot)]
+
+
+def fake_validate_current_call_plans(_mlil, plans):
+    extras = {
+        plan["call_addr"]: plan
+        for plan in call_plan_results
+    }
+    return [
+        {
+            **plan,
+            **{
+                key: value
+                for key, value in extras.get(plan["call_addr"], {}).items()
+                if key.startswith("cleanup_")
+            },
+            "cleanup_proven": extras.get(plan["call_addr"], {}).get(
+                "cleanup_proven",
+                True,
+            ),
+        }
+        for plan in plans
+    ]
 
 
 def fake_plan_correlated_store_rewrites(bv, func, mlil):
@@ -140,7 +182,10 @@ class FakeProviderBindingError(RuntimeError):
 def fake_active_provider(bv):
     global _legacy_provider_view
     _legacy_provider_view = bv
-    return types.SimpleNamespace(provider_id="test")
+    return types.SimpleNamespace(
+        provider_id="test",
+        call_targets=fake_call_targets,
+    )
 
 
 def fake_legacy_profile(_provider_id):
@@ -253,6 +298,9 @@ class FakeWorkflowState:
         FakeWorkflowState.call_receipts[call_addr] = target
         return previous is not None and previous != target
 
+    def mark_call_adjustment(self, _call_addr, _adjust_type):
+        pass
+
     def mark_call_stable(self):
         FakeWorkflowState.call_stable_marked = True
 
@@ -300,11 +348,11 @@ class FakeWorkflowState:
 
 
 def forbidden_plan_indirect_calls(*_args, **_kwargs):
-    raise AssertionError("workflow call planning must go through the active profile")
+    raise AssertionError("workflow call planning must go through the active provider")
 
 
 def forbidden_plan_global_constant_slots(*_args, **_kwargs):
-    raise AssertionError("workflow global planning must go through the active profile")
+    raise AssertionError("workflow global planning must go through the active provider")
 
 
 _FAKE_MODULES = {
@@ -319,10 +367,8 @@ _FAKE_MODULES = {
         apply_indirect_call_rewrites=fake_apply_indirect_call_rewrites,
         current_call_receipt_plans=fake_current_call_receipt_plans,
         plan_indirect_calls=forbidden_plan_indirect_calls,
-        validate_current_call_plans=lambda _mlil, plans: [
-            {**plan, "cleanup_proven": plan.get("cleanup_proven", True)}
-            for plan in plans
-        ],
+        validate_current_call_facts=lambda _mlil, facts: list(facts),
+        validate_current_call_plans=fake_validate_current_call_plans,
     ),
     "plugins.DispatchThis.passes.medium.branch_conditions": types.SimpleNamespace(
         translate_indirect_branch_conditions=lambda _bv, _ctx, mlil: (mlil, 0, set()),
@@ -331,6 +377,7 @@ _FAKE_MODULES = {
         settle_cleanup_decode=fake_settle_cleanup_decode,
     ),
     "plugins.DispatchThis.helpers.mlil": types.SimpleNamespace(
+        iter_indirect_calls=lambda _mlil: iter(()),
         set_roots_before=lambda *args, **kwargs: (
             set_roots_before_calls.append((args, kwargs)),
             set_roots_before_results.pop(0) if set_roots_before_results else set(),
@@ -369,6 +416,8 @@ _FAKE_MODULES = {
 
 with temporary_modules(_FAKE_MODULES, clear=("plugins.DispatchThis.workflow",)):
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
+
+workflow._provider_global_plans = fake_global_plans
 
 
 class FakeContext:
@@ -1066,7 +1115,7 @@ def test_call_phase_leaves_an_unstable_branch_phase_untouched():
     branch_iter_items.clear()
 
 
-def test_call_resolver_uses_active_profile_without_workflow_state():
+def test_call_resolver_uses_active_provider_without_workflow_state():
     FakeWorkflowState.stable = True
     FakeWorkflowState.call_targets = []
     FakeWorkflowState.call_adjustment_checks = []
@@ -1099,7 +1148,7 @@ def test_call_resolver_uses_active_profile_without_workflow_state():
     assert call_rewrite_calls == [(
         ctx,
         ctx.mlil,
-        [{**plan, "cleanup_proven": True}],
+        [{**plan, "decode_def": None, "cleanup_proven": True}],
     )]
     assert FakeWorkflowState.call_targets == [(0x4000, 0x5000)]
     assert len(FakeWorkflowState.call_adjustment_checks) == 1
@@ -1241,7 +1290,7 @@ def test_call_phase_rejects_unbound_old_receipts(monkeypatch):
     FakeWorkflowState.stable = False
 
 
-def test_call_profile_hook_miss_does_not_fallback_to_default_resolver():
+def test_call_provider_empty_batch_does_not_fallback_to_legacy_resolver():
     FakeWorkflowState.stable = True
     FakeWorkflowState.call_receipts = {}
     FakeWorkflowState.call_target_receipts = {}
@@ -1740,7 +1789,7 @@ def test_branch_translation_defers_deflatten_to_downstream_activity():
     set_roots_before_results.clear()
 
 
-def test_global_resolver_uses_active_profile_without_view_receipt():
+def test_global_resolver_uses_active_provider_without_view_receipt():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.global_receipts = {}
@@ -1832,7 +1881,7 @@ def test_global_resolver_rejects_conflicting_types_for_one_slot_atomically():
     global_plan_results.clear()
 
 
-def test_global_profile_hook_miss_does_not_fallback_to_default_resolver():
+def test_global_provider_empty_batch_does_not_fallback_to_legacy_resolver():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.global_receipts = {}
