@@ -4,6 +4,12 @@ DispatchThis 是用于 ARM64 ELF 反混淆的 Binary Ninja 工作流插件。它
 层恢复间接跳转目标、间接调用目标、部分全局常量、解密字符串注释和控制流
 平坦化调度器边；不会修改二进制字节。
 
+> [!IMPORTANT]
+> 当前源码仍处于从 bundled resolver profile 向外部样本 provider 迁移的阶段。目标架构由
+> [`CONTEXT.md`](CONTEXT.md) 与 ADR-0014 至 ADR-0039 定义：DispatchThis 核心只拥有工作流、
+> 时序和通用功能型 API；每个具体样本由一个独立外部插件实现，不再新增内置 profile 或
+> 样本家族抽象。现有 profile 相关页面只描述尚未迁移的实现，不代表后续扩展方向。
+
 ![license: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Binary Ninja 5.3+](https://img.shields.io/badge/Binary%20Ninja-5.3%2B-black)
 

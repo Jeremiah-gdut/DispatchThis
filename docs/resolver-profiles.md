@@ -1,5 +1,11 @@
 # 解析配置（profile）
 
+> [!WARNING]
+> 本页是当前 bundled profile 实现的迁移参考，不再定义项目方向。ADR-0015 至 ADR-0020 已
+> 取代内置 profile 架构：每个具体样本应成为独立外部插件，通过唯一的 `SampleSemantics`
+> provider 接口注册；不得新增内置 profile、默认别名、样本家族或自动识别逻辑。本页中的
+> 现有算法和证据要求可用于拆分样本插件，但不能作为继续扩展旧 registry 的依据。
+
 解析 profile 让 DispatchThis 适配一个二进制，同时不把工作流所有权移入 profile 特定代码。
 
 通过 `analysis.plugins.dispatchThis.resolverProfile` 按 BinaryView 选择 profile。函数工作流

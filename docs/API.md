@@ -1,5 +1,11 @@
 # 辅助 API
 
+> [!WARNING]
+> 本页记录当前尚未迁移的 profile-helper API，便于核对现有代码；它不是新的外部 provider
+> 契约。目标 API 由 ADR-0019、ADR-0022 至 ADR-0027、ADR-0036 和 `CONTEXT.md` 定义。
+> 实施迁移前不要继续扩展本页的裸字典事实、类型字符串或内置样本公式；迁移完成时应以新的
+> Query、冻结结果类型、完整证明 API 和精确整数 API 版本重写本页。
+
 本文说明解析 profile 与 pass 使用的公开 helper 模块：
 
 ```python

@@ -19,9 +19,14 @@ pass。
 - 每次 workflow 运行都可重建的纯解析计划；
 - 决定是否提交 Binary Ninja 函数状态编辑的 decision/receipt 层。
 
-间接调用解析依赖间接分支解析稳定。分支条件翻译等待分支、调用和全局常量解析稳定；其
+间接调用解析依赖间接分支解析稳定。分支条件翻译等待分支、调用和全局数据语义恢复稳定；其
 workflow activity 位于全局解析之后，因此 data-var 编辑及其重新分析会先收敛，再安装昂贵
-的 CFG overlay。翻译是当前 MLIL 上的展示性改写，不持有 mutation receipt。
+的 CFG overlay。翻译是当前 MLIL 上的展示性改写，不持有跨 overlay 的完成 receipt；
+deinbr 交付的条件事实仍按 ADR-0031 和 ADR-0032 保存函数会话级条件回执。
+
+调用稳定表示 provider 扫描可信、受支持的单目标 destination 改写与类型调整均已读回，且本轮
+不再有调用修改会触发重新分析；它不表示所有间接调用都已解析。未支持的多目标或其他保留调用
+没有 receipt 或 cleanup 义务，不阻止后续 phase；下游若依赖它们，必须按当前 IL 局部失败关闭。
 
 Phase cleanup 只在所属 phase 稳定后运行。间接分支解析的 cleanup 在分支条件翻译之后运行，
 以便 translator 仍能读取已解析的 `MLIL_JUMP_TO` 形状和它所需的目标解码赋值。间接调用
@@ -78,9 +83,9 @@ DispatchThis 便安排 analysis completion callback，从已由 user branch meta
 view-level state 仅对 BinaryView 级时序有效，例如与
 `BinaryView.add_analysis_completion_event()` 绑定的 tag cleanup pending state。
 
-函数 phase state 与活动 resolver profile ID 绑定。空状态可以重新绑定；已经包含 recovery
-evidence 的 legacy 或不匹配状态必须 fail closed；一个 binary profile 的 receipt 不能作为另一个
-profile 的证据。
+函数 phase state 记录产生当前证据的 provider ID。BinaryView 的显式 provider 绑定改变时，
+核心使该函数全部 recovery evidence、receipt 和稳定性失效；一个 provider 的证明绝不能作为
+另一个 provider 的证明。provider 选择本身仍只持久化在 BinaryView 的 SettingsResourceScope。
 
 Receipt 用于协调提交，不替代 Binary Ninja 当前事实。分支稳定性会读回 user branch metadata，
 具体调用类型 override 通过 `get_call_type_adjustment` 验证，全局稳定性读取当前

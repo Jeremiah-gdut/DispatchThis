@@ -1,5 +1,11 @@
 # 源码布局
 
+> [!NOTE]
+> 本页描述当前尚未迁移的源码树，因此仍列出 `profiles/`、旧 fact builder 和旧 activity 名称。
+> 目标边界以 `CONTEXT.md` 和 ADR-0014 至 ADR-0039 为准：核心保留 workflow、状态、验证与
+> 修改后端；具体样本代码迁入各自的外部插件。实现新架构时应同步重写本页，而不是把这里的
+> legacy 布局当作新增样本的模板。
+
 ```
 DispatchThis/
 ├── __init__.py                 插件入口：注册工作流和 activities、profile 设置及

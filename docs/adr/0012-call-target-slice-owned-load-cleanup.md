@@ -11,6 +11,10 @@
 则无关内存访问也可能被移除。通过 BinaryView xref 证明不可变性也不合适，因为混淆或不完整
 CFG 会导致 xref 不完整。
 
+只有完整目标集合恰有一个 callee、且后端实际把 destination 改写为该常量时，调用目标切片才
+能取得 cleanup 所有权。完整多目标事实保持原间接调用及其活目标解码，不产生调用回执、清理
+根或未完成 cleanup 义务，也不阻止其他已应用单目标调用的 cleanup 收敛。
+
 ## 决策
 
 间接调用计划计算输入 `call.dest` 的完整当前 **SSA reaching-definition** slice。它跟随精确的

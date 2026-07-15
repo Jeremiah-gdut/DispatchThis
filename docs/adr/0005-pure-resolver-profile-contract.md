@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0016
+---
+
 # 保持 resolver profile 纯净
 
 Resolver profile 为间接分支、间接调用、全局常量 slot 与字符串解密调用返回标准 recovery

@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0015
+---
+
 # 先使用 bundled resolver profile
 
 DispatchThis 从一个小型内置 `profiles` 包加载 resolver profile，而不是从外部插件或

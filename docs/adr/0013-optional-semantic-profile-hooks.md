@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0017
+---
+
 # ADR 0013：保持语义 profile hook 为可选
 
 ## 状态

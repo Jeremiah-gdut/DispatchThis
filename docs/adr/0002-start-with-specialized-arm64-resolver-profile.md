@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0015
+---
+
 # 从专用 ARM64 resolver profile 开始
 
 第一阶段为当前 ARM64 ELF 样本族构建专用的间接分支 resolver profile，而不是通用规则引擎。
