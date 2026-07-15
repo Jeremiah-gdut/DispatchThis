@@ -58,7 +58,7 @@ class CapturedPluginCommand:
         cls.registered.append((name, description, action, is_valid))
 
 
-def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monkeypatch):
+def test_plugin_entrypoint_registers_each_pass_with_its_own_setting(monkeypatch):
     monkeypatch.setattr(binaryninja, "Activity", CapturedActivity)
     monkeypatch.setattr(binaryninja, "Workflow", CapturedWorkflow)
     CapturedSettings.writes = []
@@ -66,7 +66,7 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     CapturedPluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", CapturedPluginCommand, raising=False)
 
-    plugin = load_plugin_module("plugins.DispatchThis.__init__")
+    load_plugin_module("plugins.DispatchThis.__init__")
 
     configs = {
         json.loads(activity.config)["name"]: json.loads(activity.config)
@@ -75,47 +75,49 @@ def test_plugin_entrypoint_uses_glossary_terms_in_user_facing_activity_text(monk
     descriptions = [config["description"] for config in configs.values()]
 
     assert all("OBB" not in description for description in descriptions)
-    assert configs[plugin.STRING_DECRYPT_SETTING]["title"] == "String Decrypt"
-    assert configs[plugin.STRING_DECRYPT_SETTING]["eligibility"] == {"auto": {"default": False}}
     assert "extension.DispatchThis.Cleanup" not in configs
 
-    resolver_ids = [
-        "extension.DispatchThis.IndirectPatcher",
-        "extension.DispatchThis.IndirectCallPatcher",
-        "extension.DispatchThis.GlobalConstantResolver",
-        "extension.DispatchThis.CorrelatedStoreRecovery",
-    ]
-    for activity_id in resolver_ids:
-        identifiers = {
-            predicate["identifier"]
-            for predicate in configs[activity_id]["eligibility"]["predicates"]
-        }
-        assert plugin.STRING_DECRYPT_SETTING in identifiers
-    branch_translation_identifiers = {
-        predicate["identifier"]
-        for predicate in configs["extension.DispatchThis.BranchConditionTranslator"]["eligibility"]["predicates"]
+    settings = __import__("plugins.DispatchThis.settings", fromlist=["PASS_SETTING_IDS"])
+    for setting in settings.PASS_SETTING_IDS:
+        assert configs[setting]["eligibility"] == {"auto": {"default": False}}
+
+    activity_settings = {
+        "extension.DispatchThis.IndirectPatcher": settings.BRANCH_TARGETS_SETTING,
+        "extension.DispatchThis.IndirectCallPatcher": settings.CALL_TARGETS_SETTING,
+        "extension.DispatchThis.GlobalConstantResolver": settings.GLOBAL_DATA_SETTING,
+        "extension.DispatchThis.BranchConditionTranslator": settings.BRANCH_CONDITIONS_SETTING,
+        "extension.DispatchThis.CorrelatedStoreRecovery": settings.CORRELATED_STORES_SETTING,
+        "extension.DispatchThis.StringRecovery": settings.STRING_RECOVERY_SETTING,
+        "extension.DispatchThis.Deflatten": settings.DEFLATTEN_SETTING,
     }
-    assert plugin.STRING_DECRYPT_SETTING not in branch_translation_identifiers
+    for activity_id, setting in activity_settings.items():
+        assert configs[activity_id]["eligibility"] == {
+            "predicates": [{"type": "setting", "identifier": setting, "value": True}],
+            "logicalOperator": "and",
+        }
 
     high_level = next(
         args[1]
         for args, _kwargs in CapturedWorkflow.last.insertions
         if args[0] == "core.function.generateHighLevelIL"
     )
-    assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
-        "extension.DispatchThis.BranchConditionTranslator"
-    )
-    assert high_level.index("extension.DispatchThis.GlobalConstantResolver") < high_level.index(
-        "extension.DispatchThis.CorrelatedStoreRecovery"
-    )
-    assert high_level.index("extension.DispatchThis.CorrelatedStoreRecovery") < high_level.index(
-        plugin.STRING_DECRYPT_SETTING
-    )
-    assert high_level.index(plugin.STRING_DECRYPT_SETTING) < high_level.index(
-        plugin.DEFLATTEN_SETTING
-    )
+    assert high_level == [
+        settings.CALL_TARGETS_SETTING,
+        "extension.DispatchThis.IndirectCallPatcher",
+        settings.GLOBAL_DATA_SETTING,
+        "extension.DispatchThis.GlobalConstantResolver",
+        settings.BRANCH_CONDITIONS_SETTING,
+        "extension.DispatchThis.BranchConditionTranslator",
+        settings.CORRELATED_STORES_SETTING,
+        "extension.DispatchThis.CorrelatedStoreRecovery",
+        settings.STRING_RECOVERY_SETTING,
+        "extension.DispatchThis.StringRecovery",
+        settings.DEFLATTEN_SETTING,
+        "extension.DispatchThis.Deflatten",
+    ]
     assert "extension.DispatchThis.Cleanup" not in high_level
     assert CapturedSettings.writes == []
     names = [item[0] for item in CapturedPluginCommand.registered]
-    assert "DispatchThis\\Toggle Resolver" in names
+    assert names[0] == "DispatchThis\\Select Provider…"
+    assert len([name for name in names if name.startswith("DispatchThis\\Toggle ")]) == 7
     assert "DispatchThis\\Disable All" in names

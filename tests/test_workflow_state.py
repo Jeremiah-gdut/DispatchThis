@@ -1,14 +1,11 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from plugins.DispatchThis.workflow_state import (
     CLEANUP_RECEIPT_VERSION,
     FunctionWorkflowState,
-    ProfileStateMismatch,
     ROOT_KEY,
 )
 
@@ -150,7 +147,7 @@ def test_global_slot_changes_invalidate_phase_cleanup_receipts():
     assert not state.call_cleanup_needed()
 
 
-def test_existing_user_branch_metadata_seeds_branch_receipts():
+def test_existing_user_branch_metadata_is_not_promoted_to_a_receipt():
     func = FakeFunction()
     func.indirect_branches = [
         FakeBranch(0x1000, 0x2000),
@@ -160,8 +157,8 @@ def test_existing_user_branch_metadata_seeds_branch_receipts():
 
     state = FunctionWorkflowState(func)
 
-    assert state.branch_targets() == {0x1000: (0x2000, 0x3000)}
-    assert state.branch_updates_for({0x1000: (0x2000, 0x3000)}) == {}
+    assert state.branch_targets() == {}
+    assert state.branch_updates_for({0x1000: (0x2000, 0x3000)}) == {0x1000: (0x2000, 0x3000)}
     assert state.branch_updates_for({0x4000: (0x5000,)}) == {0x4000: (0x5000,)}
 
 
@@ -255,6 +252,20 @@ def test_verified_branch_targets_require_exact_current_user_metadata():
     }
 
 
+def test_branch_stable_rejects_a_current_user_source_without_a_receipt():
+    func = FakeFunction()
+    state = FunctionWorkflowState(func)
+    state.mark_branch_applied(0x1000, (0x2000,))
+    func.indirect_branches = [FakeBranch(0x1000, 0x2000)]
+    state.mark_branch_stable()
+
+    assert state.branch_stable(func)
+
+    func.indirect_branches.append(FakeBranch(0x3000, 0x4000))
+
+    assert not state.branch_stable(func)
+
+
 def test_cleanup_receipts_invalidate_with_phase_targets():
     state = FunctionWorkflowState(FakeFunction())
 
@@ -321,20 +332,16 @@ def test_old_cleanup_receipts_are_invalidated_once():
     assert not state.global_stable()
 
 
-def test_profile_provenance_rejects_mismatch_and_legacy_receipts():
+def test_legacy_profile_provenance_is_removed_from_function_state():
     func = FakeFunction()
-    state = FunctionWorkflowState(func, "dyzznb")
+    state = FunctionWorkflowState(func)
     state.mark_branch_applied(0x1000, (0x2000,))
+    func.session_data[ROOT_KEY]["profile_id"] = "dyzznb"
 
-    with pytest.raises(ProfileStateMismatch, match="dyzznb"):
-        FunctionWorkflowState(func, "valorant_2_6")
+    refreshed = FunctionWorkflowState(func)
 
-    legacy = FakeFunction()
-    legacy.session_data[ROOT_KEY] = {
-        "branch": {"receipts": {0x1000: (0x2000,)}},
-    }
-    with pytest.raises(ProfileStateMismatch, match="legacy"):
-        FunctionWorkflowState(legacy, "dyzznb")
+    assert "profile_id" not in refreshed.data
+    assert refreshed.branch_targets() == {0x1000: (0x2000,)}
 
 
 if __name__ == "__main__":
@@ -344,8 +351,9 @@ if __name__ == "__main__":
     test_global_phase_defaults_to_unstable_and_marks_verified_fixpoint()
     test_global_phase_invalidates_on_new_phase_work()
     test_global_slot_changes_invalidate_phase_cleanup_receipts()
-    test_existing_user_branch_metadata_seeds_branch_receipts()
+    test_existing_user_branch_metadata_is_not_promoted_to_a_receipt()
     test_legacy_branch_cleanup_indices_are_discarded()
     test_stale_branch_receipts_reapply_when_bn_metadata_is_missing()
+    test_branch_stable_rejects_a_current_user_source_without_a_receipt()
     test_cleanup_receipts_invalidate_with_phase_targets()
     test_old_cleanup_receipts_are_invalidated_once()

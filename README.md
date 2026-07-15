@@ -38,19 +38,24 @@ Ninja。
 
 测试单个函数最快的方法是函数右键菜单。打开目标函数后，在函数内右键并选择：
 
-- **DispatchThis ▸ Profile ▸ Use default** 或 **Use dyzznb**：为当前
-  BinaryView 选择解析 profile。`default` 为历史设置保留的 dyzznb 兼容入口；新适配请选用
-  具名 profile。
-- **DispatchThis ▸ Toggle Resolver**：仅切换当前函数的间接跳转/调用解析。
-- **DispatchThis ▸ Toggle Deflatten**：仅切换当前函数的去平坦化。
-- **DispatchThis ▸ Toggle String Decrypt**：仅切换当前函数的字符串解密。
+- **DispatchThis ▸ Select Provider…**：为当前 BinaryView 选择已注册的样本语义 provider。
+  菜单显示 provider 名称，但保存稳定的 provider ID；核心不会自动选择样本。
+- **DispatchThis ▸ Toggle Indirect Branch Targets**、**Indirect Call Targets**、
+  **Global Data Semantics**、**Branch Conditions**、**Correlated STOREs**、
+  **String Recovery** 或 **Deflatten**：独立切换当前函数的相应阶段。启用一个阶段会自动启用
+  它的前置阶段；关闭前置阶段会同时关闭依赖它的阶段。
 - **DispatchThis ▸ Disable All**：关闭当前函数的全部 DispatchThis 开关。
 
-默认快捷键：Resolver 为 `Alt+Q`，Deflatten 为 `Alt+W`，String Decrypt 为
-`Alt+E`，Disable All 为 `Alt+R`。
+默认快捷键：Indirect Branch Targets 为 `Alt+Q`，Deflatten 为 `Alt+W`，String
+Recovery 为 `Alt+E`，Disable All 为 `Alt+R`。其余 pass 可从函数菜单切换。
 
 相同开关也在 **Function Settings** 右键菜单中。若改设置后 Binary Ninja 没有
 自动重新分析，执行 *Analysis ▸ Reanalyze All Functions*。
+
+> [!WARNING]
+> 切换 provider 前请等待当前分析完成，并在切换后重新分析目标函数。provider 选择不会取消已在
+> 运行的 Binary Ninja workflow callback；在分析进行中切换可能让该轮输出仍反映先前选择。遇到
+> 此情况时，等待分析空闲后重新分析即可。
 
 **去平坦化依赖间接跳转解析。** Deflatten 设置也会启用间接跳转和间接调用解析，
 以便在重建调度器边前获得完整 CFG。已严格证明过时的状态写入会与边改写在同一次
@@ -58,23 +63,22 @@ Ninja。
 
 ## 流水线概览
 
-每个函数插入八个工作流 activity。其中 `Indirect Jumps/Calls` 是无操作的设置
-activity，其余七个为恢复阶段：
+每个恢复阶段都有独立的 Function ResourceScope 开关和 workflow callback；callback 按以下
+顺序运行：
 
-1. **Indirect Jumps/Calls 开关**（LLIL 插入点）：暴露按函数生效的解析器设置。
-2. **间接跳转解析器**（LLIL）：将每个解码 gadget `jump(reg)` 改写为当前 IL 中的
+1. **间接跳转解析器**（LLIL）：将每个解码 gadget `jump(reg)` 改写为当前 IL 中的
    `jump(const)`。工作流回调负责用户跳转元数据和分析完成后的标签清理调度；随着
    函数扩展会反复运行直至不再变化。
-3. **间接调用解析器**（MLIL）：折叠每个导入调用的解码，并将调用目标改写为常量
+2. **间接调用解析器**（MLIL）：折叠每个导入调用的解码，并将调用目标改写为常量
    指针。工作流回调负责调用类型调整和调用目标阶段清理。
+3. **全局常量解析器**（MLIL）：将只读全局指针槽位标注为常量。
 4. **分支条件翻译器**（MLIL）：将已解析的双目标间接跳转 switch 还原为 `if`
    表达式，然后执行分支目标阶段清理。
-5. **全局常量解析器**（MLIL）：将只读全局指针槽位标注为常量。
-6. **关联存储恢复**（MLIL）：当合并丢失同级 PHI 值之间的对应关系时，恢复按路径
+5. **关联存储恢复**（MLIL）：当合并丢失同级 PHI 值之间的对应关系时，恢复按路径
    区分的全局存储。
-7. **字符串解密**（MLIL，*可选*）：等待当前函数的分支、调用和全局阶段稳定后，
+6. **字符串解密**（MLIL，*可选*）：等待当前函数的分支、调用和全局阶段稳定后，
    为已识别的直接解密调用添加注释。
-8. **去平坦化器**（MLIL，*可选*）：恢复调度器比较簇，并构造原子替换 MLIL，
+7. **去平坦化器**（MLIL，*可选*）：恢复调度器比较簇，并构造原子替换 MLIL，
    将每个原始基本块的调度器跳转改为真实后继的直接 `goto`。条件转移会改写私有臂
    出口、私有共享语义尾部出口，或只在被跳过的状态通道已证明私有时捷径化原始条件。
    相等、不等及有符号/无符号有序调度器均通过重放具体状态令牌路由。所有私有调度器
@@ -91,8 +95,8 @@ activity，其余七个为恢复阶段：
 
 ## 范围
 
-DispatchThis 面向由显式解析 profile 处理的 ARM64 ELF 样本。旧版非 ARM64 样本不在
-范围内；应为新二进制添加具名解析 profile，而不是扩大 `default` 兼容入口的适用范围。
+DispatchThis 面向由显式样本语义 provider 处理的 ARM64 ELF 样本。旧版非 ARM64 样本不在
+范围内；应为新二进制提供独立 provider，而不是扩大 legacy adapter 的适用范围。
 
 ## 兼容性
 

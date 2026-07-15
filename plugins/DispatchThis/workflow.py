@@ -1,4 +1,4 @@
-"""Workflow activity callbacks for DispatchThis."""
+"""Workflow activity callbacks for DispatchThis."""  # noqa: F401  # noqa: SIZE_OK — AGENTS.md reserves reanalysis mutation orchestration for this module.
 
 from collections.abc import Mapping
 
@@ -21,7 +21,14 @@ from .passes.low.gadget_llil import (
     iter_llil_indirect_jumps,
     validate_current_branch_plans,
 )
-from .profiles import active_profile
+from .providers import (
+    ProviderBindingError,
+    _legacy_profile,
+    _pending_reproof_functions,
+    _set_pending_reproof_functions,
+    active_provider,
+)
+from .semantics import BranchTargetFact, BranchTargetQuery, CompleteBatch, Inconclusive
 from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
 
@@ -52,7 +59,7 @@ def _ensure_analysis_settings(func):
             if getter(key, func) != value:
                 log_warn(f"[workflow] {func.name}: failed to verify {key}")
                 return False
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja settings boundary.
         log_warn(f"[workflow] {func.name}: failed to configure analysis settings: {e}")
         return False
     return True
@@ -62,7 +69,7 @@ def _commit_mlil(ctx, mlil):
     try:
         ctx.set_mlil_function(mlil)
         return True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja workflow boundary.
         func = ctx.function
         log_warn(f"[workflow] {func.name}: failed to commit MLIL changes: {e}")
         return False
@@ -71,7 +78,7 @@ def _commit_mlil(ctx, mlil):
 def _deflatten_enabled(func):
     try:
         return Settings().get_bool(_DEFLATTEN_SETTING, func)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja settings boundary.
         log_warn(f"[workflow] {func.name}: failed to read deflatten setting: {e}")
         return False
 
@@ -106,14 +113,25 @@ def _apply_deflatten(ctx, bv, func, profile, mlil):
     return True
 
 
-def _active_profile_state(bv, func):
-    """Bind one callback run to one profile and its function-scoped state."""
+def _active_provider_state(bv, func):
+    """Bind one callback run to the explicit view provider and function state."""
     try:
-        profile = active_profile(bv)
-        return profile, FunctionWorkflowState(func, profile.id)
-    except Exception as e:  # noqa: BLE001
-        log_warn(f"[workflow] {func.name}: resolver profile state unavailable: {e}")
-        return None, None
+        provider = active_provider(bv)
+    except ProviderBindingError as error:
+        log_warn(f"[workflow] {func.name}: provider binding unavailable: {error}")
+        return None, None, None
+    legacy = _legacy_profile(provider.provider_id)
+    pending_reproof = _pending_reproof_functions(bv)
+    return (
+        provider,
+        legacy,
+        FunctionWorkflowState(
+            func,
+            seed_legacy_branch_receipts=(
+                legacy is not None and pending_reproof is not None and func.start not in pending_reproof
+            ),
+        ),
+    )
 
 
 def _schedule_tag_cleanup(bv, func_start):
@@ -127,7 +145,7 @@ def _schedule_tag_cleanup(bv, func_start):
             func = bv.get_function_at(func_start)
             if func is not None:
                 clear_resolved_indirect_branch_tags(func)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — deferred Binary Ninja callback boundary.
             log_error(f"[workflow] tag cleanup @ {hex(func_start)}: {e}")
         finally:
             pending.discard(func_start)
@@ -146,7 +164,7 @@ def _global_type_applied(bv, slot_addr, type_name):
         return False
     try:
         return data_var.type == _global_slot_type(bv, type_name)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja type comparison boundary.
         return False
 
 
@@ -208,71 +226,189 @@ def _call_adjustment_type(mlil, call_il, callee):
             can_return=can_return,
             pure=type_.pure,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja type construction boundary.
         return False, None
     return True, adjusted
 
 
+def _provider_branch_plan(bv, func, llil, provider):
+    """Validate one external branch batch before the workflow mutates BN state."""
+    resolver = provider.branch_targets
+    if resolver is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement branch target recovery")
+        return None
+    if llil is None:
+        return None
+    try:
+        result = resolver(BranchTargetQuery(bv, func, llil))
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must reject every failure without receipts.
+        log_warn(f"[workflow] {func.name}: branch provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: branch provider was inconclusive: {result.reason}")
+        return None
+    if type(result) is not CompleteBatch:
+        log_warn(f"[workflow] {func.name}: branch provider returned an invalid batch")
+        return None
+
+    if type(result.facts) is not tuple:
+        log_warn(f"[workflow] {func.name}: branch provider returned malformed facts")
+        return None
+
+    plans = []
+    sources = set()
+    for fact in result.facts:
+        if (
+            type(fact) is not BranchTargetFact
+            or fact.condition is not None
+            or fact.true_target is not None
+            or fact.false_target is not None
+        ):
+            log_warn(f"[workflow] {func.name}: branch provider returned an unsupported fact")
+            return None
+        jump_il = fact.jump_il
+        targets = fact.targets
+        source = getattr(jump_il, "address", None)
+        dest_expr_index = getattr(getattr(jump_il, "dest", None), "expr_index", None)
+        if (
+            type(targets) is not tuple
+            or not targets
+            or any(type(target) is not int or target < 0 for target in targets)
+            or tuple(sorted(set(targets))) != targets
+            or type(source) is not int
+            or source < 0
+            or type(dest_expr_index) is not int
+            or dest_expr_index < 0
+            or source in sources
+        ):
+            log_warn(f"[workflow] {func.name}: branch provider returned a malformed fact")
+            return None
+        sources.add(source)
+        plans.append(
+            {
+                "source": source,
+                "dest_expr_index": dest_expr_index,
+                "targets": targets,
+                "jump_il": jump_il,
+            }
+        )
+
+    try:
+        validated = validate_current_branch_plans(bv, llil, plans)
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — current-IL validation must reject every batch failure atomically.
+        log_warn(f"[workflow] {func.name}: branch batch validation failed: {error}")
+        return None
+    if (
+        type(validated) is not list
+        or len(validated) != len(plans)
+        or {id(plan) for plan in validated} != {id(plan) for plan in plans}
+    ):
+        log_warn(f"[workflow] {func.name}: branch provider batch was stale or conflicting")
+        return None
+    return validated
+
+
+def _legacy_branch_plan(bv, llil, state, profile):
+    """Keep bundled profiles on their private migration path."""
+    try:
+        plans = profile.resolve_branch_gadget(bv, llil, state.verified_branch_targets())
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — legacy plugin boundary.
+        log_warn(f"[workflow] legacy branch planner failed: {error}")
+        return None
+    return validate_current_branch_plans(bv, llil, plans)
+
+
+def _provider_reproof_settled(bv, func, state, resolved_targets):
+    """Clear a binding-change guard only after the new provider proves all metadata."""
+    pending = _pending_reproof_functions(bv)
+    if pending is None:
+        log_warn(f"[workflow] {func.name}: provider branch reproof state is malformed")
+        return False
+    if func.start not in pending:
+        return True
+    if all(
+        resolved_targets.get(source) == targets
+        for source, targets in state.current_user_branch_targets().items()
+    ):
+        if not _set_pending_reproof_functions(bv, pending - {func.start}):
+            log_warn(f"[workflow] {func.name}: failed to clear provider branch reproof guard")
+            return False
+    updated = _pending_reproof_functions(bv)
+    return updated is not None and func.start not in updated
+
+
 def _submit_branch_mutations(bv, func, state, resolved_targets):
-    mutations = state.branch_updates_for(resolved_targets)
-    for source, targets in mutations.items():
-        try:
-            func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
+    submitted = {}
+    attempted = False
+    for source, targets in state.branch_updates_for(resolved_targets).items():
+        if state.branch_metadata_matches(source, targets):
             changed = state.mark_branch_applied(source, targets)
             if changed:
                 log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
-        except Exception as e:  # noqa: BLE001
+            continue
+        attempted = True
+        try:
+            func.set_user_indirect_branches(source, [(bv.arch, target) for target in targets])
+            if not state.branch_metadata_matches(source, targets):
+                log_warn(
+                    f"[workflow] {func.name}: branch target readback did not match "
+                    f"at {hex(source)}"
+                )
+                continue
+            changed = state.mark_branch_applied(source, targets)
+            submitted[source] = targets
+            if changed:
+                log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
+        except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — the only core-owned indirect-branch mutation boundary.
             log_warn(f"[workflow] {func.name}: failed to set branch targets @ {hex(source)}: {e}")
-    return mutations
+    return submitted, attempted
 
 
 def _converge_branches(
     ctx,
     state,
-    profile,
+    provider,
     plan_llil,
     coverage_llil,
     rewrite_llil=False,
     announce_stable=False,
+    current_plan=None,
+    legacy=None,
 ):
     func = ctx.function
     bv = ctx.view
     jump_sources = {jump.address for jump in iter_llil_indirect_jumps(coverage_llil)}
-    plan = validate_current_branch_plans(
-        bv,
-        plan_llil,
-        profile.resolve_branch_gadget(bv, plan_llil, state.verified_branch_targets()),
+    plan = current_plan
+    if plan is None:
+        plan = (
+            _legacy_branch_plan(bv, plan_llil, state, legacy)
+            if legacy is not None
+            else _provider_branch_plan(bv, func, plan_llil, provider)
     )
+    if plan is None:
+        return {}
     if rewrite_llil and any(len(item["targets"]) == 1 for item in plan):
         apply_llil_jump_rewrites(bv, plan_llil, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    mutations = _submit_branch_mutations(bv, func, state, resolved_targets)
-    if mutations:
+    mutations, attempted = _submit_branch_mutations(bv, func, state, resolved_targets)
+    reproof_settled = _provider_reproof_settled(bv, func, state, resolved_targets)
+    if attempted:
         return mutations
 
-    mapped = {branch.source_addr for branch in getattr(func, "indirect_branches", ())}
-    covered = set(resolved_targets) | mapped
-    if not FunctionWorkflowState.unmapped_unresolved_sources(func) and jump_sources <= covered:
+    covered = set(state.verified_branch_targets())
+    if (
+        reproof_settled
+        and not FunctionWorkflowState.unmapped_unresolved_sources(func)
+        and jump_sources <= covered
+        and set(state.current_user_branch_targets()) <= covered
+    ):
         if announce_stable:
             log_info(f"All of {func.name}'s indirect jumps have been resolved")
         state.mark_branch_stable()
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
     return mutations
-
-
-def _resolve_pending_branches(ctx, state, profile):
-    func = ctx.function
-    llil = ctx.llil
-    if llil is None:
-        return False
-
-    mutations = _converge_branches(ctx, state, profile, llil, llil)
-    if mutations:
-        log_info(f"[workflow] {func.name}: submitted {len(mutations)} pending indirect branch target update(s)")
-        return True
-    return False
 
 
 def resolve_jumps_llil(ctx: AnalysisContext):
@@ -282,10 +418,7 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     if bv.arch.name != "aarch64":
         log_debug(f"[dispatchthis] {func.name}: skipping non-aarch64 view")
         return
-    if not _ensure_analysis_settings(func):
-        return
-
-    profile, state = _active_profile_state(bv, func)
+    provider, legacy, state = _active_provider_state(bv, func)
     if state is None:
         return
 
@@ -296,14 +429,25 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
     llil = ctx.llil
+    plan = (
+        _legacy_branch_plan(bv, llil, state, legacy)
+        if legacy is not None
+        else _provider_branch_plan(bv, func, llil, provider)
+    )
+    if plan is None:
+        return
+    if not _ensure_analysis_settings(func):
+        return
     mutations = _converge_branches(
         ctx,
         state,
-        profile,
+        provider,
         llil,
         llil,
         rewrite_llil=True,
         announce_stable=True,
+        current_plan=plan,
+        legacy=legacy,
     )
 
     log_info(f"[dispatchthis] resolve_llil @ {func.start:#x}: submitted {len(mutations)} branch mutation(s)")
@@ -315,16 +459,17 @@ def resolve_jumps_llil(ctx: AnalysisContext):
 def resolve_calls_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
-    if not _ensure_analysis_settings(func):
-        return
-
-    profile, state = _active_profile_state(bv, func)
+    _provider, profile, state = _active_provider_state(bv, func)
     if state is None:
         return
 
     if not state.branch_stable(func):
-        if bv.arch.name == "aarch64":
-            _resolve_pending_branches(ctx, state, profile)
+        return
+
+    if profile is None:
+        return
+
+    if not _ensure_analysis_settings(func):
         return
 
     mlil = ctx.mlil
@@ -395,7 +540,7 @@ def resolve_calls_mlil(ctx: AnalysisContext):
                 adjustment_failed = True
                 continue
             adjustments += 1
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — the only core-owned call-adjustment mutation boundary.
             log_warn(f"[workflow] {func.name}: type-adjust @ {hex(call_addr)} failed: {e}")
             adjustment_failed = True
 
@@ -460,16 +605,15 @@ def translate_branches_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return
+    _provider, _legacy, state = _active_provider_state(bv, func)
+    if state is None:
+        return
     if not _ensure_analysis_settings(func):
         return
 
     deflatten_enabled = _deflatten_enabled(func)
     if deflatten_enabled:
         _clear_deflatten_stability(bv, func)
-
-    _, state = _active_profile_state(bv, func)
-    if state is None:
-        return
     # A current-overlay fixed-point exception is valid only for this translator
     # attempt. Never let it survive a fresh MLIL generation or a failed cleanup.
     state.clear_branch_cleanup_overlay_ready()
@@ -517,11 +661,12 @@ def resolve_globals_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return
-    if not _ensure_analysis_settings(func):
-        return
-
-    profile, state = _active_profile_state(bv, func)
+    _provider, profile, state = _active_provider_state(bv, func)
     if state is None:
+        return
+    if profile is None:
+        return
+    if not _ensure_analysis_settings(func):
         return
     if not state.branch_stable(func):
         return
@@ -574,7 +719,7 @@ def resolve_globals_mlil(ctx: AnalysisContext):
                 continue
             state.mark_global_slot(slot_addr, type_name)
             applied += 1
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja global-data mutation boundary.
             failed = True
             log_warn(f"[workflow] {func.name}: global const slot @ {hex(slot_addr)} failed: {e}")
 
@@ -590,11 +735,15 @@ def resolve_globals_mlil(ctx: AnalysisContext):
 def recover_phi_stores_mlil(ctx: AnalysisContext):
     func = ctx.function
     bv = ctx.view
-    if bv.arch.name != "aarch64" or not _ensure_analysis_settings(func):
+    if bv.arch.name != "aarch64":
         return
 
-    profile, state = _active_profile_state(bv, func)
+    _provider, profile, state = _active_provider_state(bv, func)
     if state is None:
+        return
+    if profile is None:
+        return
+    if not _ensure_analysis_settings(func):
         return
     if not state.branch_stable(func) or not state.call_stable() or not state.global_stable():
         return
@@ -614,11 +763,12 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return 0
-    if not _ensure_analysis_settings(func):
-        return 0
-
-    profile, state = _active_profile_state(bv, func)
+    _provider, profile, state = _active_provider_state(bv, func)
     if state is None:
+        return 0
+    if profile is None:
+        return 0
+    if not _ensure_analysis_settings(func):
         return 0
     if not state.branch_stable(func):
         return 0
@@ -644,16 +794,18 @@ def deflatten_mlil(ctx: AnalysisContext):
     mlil = ctx.mlil
     if mlil is None:
         return
-    if not _ensure_analysis_settings(func):
-        return
 
     # Eligibility (the Deflatten per-function toggle) gates whether this activity
     # runs at all; by the time we're here the function is enrolled in deflatten.
 
     # Don't deflatten until the LLIL pass has drained every indirect jump;
     # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
-    profile, state = _active_profile_state(bv, func)
+    _provider, profile, state = _active_provider_state(bv, func)
     if state is None:
+        return
+    if profile is None:
+        return
+    if not _ensure_analysis_settings(func):
         return
     if not state.branch_stable(func):
         return

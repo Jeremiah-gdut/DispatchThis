@@ -130,6 +130,23 @@ def fake_active_profile(bv):
     )
 
 
+_legacy_provider_view = None
+
+
+class FakeProviderBindingError(RuntimeError):
+    pass
+
+
+def fake_active_provider(bv):
+    global _legacy_provider_view
+    _legacy_provider_view = bv
+    return types.SimpleNamespace(provider_id="test")
+
+
+def fake_legacy_profile(_provider_id):
+    return fake_active_profile(_legacy_provider_view)
+
+
 class FakeWorkflowState:
     receipts = {}
     verified_receipts = None
@@ -155,7 +172,7 @@ class FakeWorkflowState:
     branch_cleanup_overlay = False
     call_cleanup = True
 
-    def __init__(self, _func, _profile_id=None):
+    def __init__(self, _func, seed_legacy_branch_receipts=False):
         pass
 
     @staticmethod
@@ -171,12 +188,18 @@ class FakeWorkflowState:
     def verified_branch_targets(self):
         return self.receipts if self.verified_receipts is None else self.verified_receipts
 
+    def current_user_branch_targets(self):
+        return self.receipts
+
     @property
     def branch_receipts(self):
         return FakeWorkflowState.receipts
 
     def branch_updates_for(self, _resolved_targets):
         return self.updates
+
+    def branch_metadata_matches(self, _source, _targets):
+        return True
 
     def mark_branch_stable(self):
         FakeWorkflowState.marked_stable = True
@@ -325,6 +348,13 @@ _FAKE_MODULES = {
     ),
     "plugins.DispatchThis.profiles": types.SimpleNamespace(
         active_profile=fake_active_profile,
+    ),
+    "plugins.DispatchThis.providers": types.SimpleNamespace(
+        ProviderBindingError=FakeProviderBindingError,
+        active_provider=fake_active_provider,
+        _legacy_profile=fake_legacy_profile,
+        _pending_reproof_functions=lambda _bv: frozenset(),
+        _set_pending_reproof_functions=lambda _bv, _starts: True,
     ),
     "plugins.DispatchThis.utils.log": types.SimpleNamespace(
         log_info=lambda _msg: None,
@@ -486,8 +516,8 @@ def test_branch_resolver_stops_before_profile_when_settings_do_not_verify(monkey
         ("integer", "analysis.limits.maxFunctionUpdateCount", 1024, ctx.function, "function"),
         ("bool", "analysis.outlining.builtins", False, ctx.function, "function"),
     ]
-    assert active_profile_calls == []
-    assert branch_plan_calls == []
+    assert active_profile_calls == [ctx.view]
+    assert len(branch_plan_calls) == 1
     assert FakeWorkflowState.marked_stable is False
 
 
@@ -507,12 +537,12 @@ def test_branch_resolver_stops_before_profile_when_setting_write_fails(monkeypat
     assert settings.writes == [
         ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
     ]
-    assert active_profile_calls == []
-    assert branch_plan_calls == []
+    assert active_profile_calls == [ctx.view]
+    assert len(branch_plan_calls) == 1
     assert FakeWorkflowState.marked_stable is False
 
 
-def test_call_phase_stops_before_pending_branch_recovery_when_settings_fail(monkeypatch):
+def test_call_phase_requires_branch_stability_before_settings_or_branch_work(monkeypatch):
     settings = FakeAnalysisSettings(ignore_key="analysis.limits.maxFunctionSize")
     ctx = _branch_settings_context()
     ctx.function.low_level_il = "function-llil"
@@ -527,7 +557,7 @@ def test_call_phase_stops_before_pending_branch_recovery_when_settings_fail(monk
 
     workflow.resolve_calls_mlil(ctx)
 
-    assert active_profile_calls == []
+    assert active_profile_calls == [ctx.view]
     assert branch_plan_calls == []
     assert FakeWorkflowState.marked_stable is False
 
@@ -829,10 +859,11 @@ def test_branch_resolver_skips_llil_rewrite_for_multi_target_only_plan(monkeypat
     workflow._converge_branches(
         ctx,
         state,
-        profile,
+        types.SimpleNamespace(),
         "context-llil",
         "context-llil",
         rewrite_llil=True,
+        legacy=profile,
     )
 
     assert rewrite_calls == []
@@ -988,7 +1019,7 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
     FakeWorkflowState.stable = False
 
 
-def test_call_phase_submits_pending_context_llil_branches_before_call_work():
+def test_call_phase_never_runs_the_disabled_branch_pass_implicitly():
     submitted = []
     FakeWorkflowState.receipts = {0x1000: (0x2000,)}
     FakeWorkflowState.unmapped = {0x3000}
@@ -1005,16 +1036,16 @@ def test_call_phase_submits_pending_context_llil_branches_before_call_work():
 
     workflow.resolve_calls_mlil(ctx)
 
-    assert [llil for llil, _known_targets in branch_plan_calls] == ["context-llil"]
-    assert submitted == [(0x3000, [(ctx.view.arch, 0x4000), (ctx.view.arch, 0x5000)])]
-    assert FakeWorkflowState.applied == [(0x3000, (0x4000, 0x5000))]
+    assert branch_plan_calls == []
+    assert submitted == []
+    assert FakeWorkflowState.applied == []
     assert "dispatchthis_llil_stable" not in ctx.view.session_data
     branch_plan_results.clear()
     FakeWorkflowState.updates = {}
     FakeWorkflowState.unmapped = set()
 
 
-def test_call_phase_does_not_mark_branch_stable_when_pending_context_llil_has_uncovered_jump():
+def test_call_phase_leaves_an_unstable_branch_phase_untouched():
     FakeWorkflowState.receipts = {}
     FakeWorkflowState.unmapped = set()
     FakeWorkflowState.marked_stable = False
@@ -1030,7 +1061,7 @@ def test_call_phase_does_not_mark_branch_stable_when_pending_context_llil_has_un
 
     workflow.resolve_calls_mlil(ctx)
 
-    assert [llil for llil, _known_targets in branch_plan_calls] == ["context-llil"]
+    assert branch_plan_calls == []
     assert FakeWorkflowState.marked_stable is False
     branch_iter_items.clear()
 

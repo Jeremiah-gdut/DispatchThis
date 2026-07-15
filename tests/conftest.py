@@ -95,6 +95,9 @@ class FakeSettings:
         return False
 
     def get_string(self, *_args, **_kwargs):
+        key = _args[0] if _args else ""
+        if key == "analysis.plugins.dispatchThis.providerReproofPendingFunctions":
+            return "[]"
         return ""
 
     def set_string(self, *_args, **_kwargs):

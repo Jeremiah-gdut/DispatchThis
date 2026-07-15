@@ -6,6 +6,7 @@ from conftest import load_plugin_module
 
 
 ui = load_plugin_module("plugins.DispatchThis.ui")
+settings_module = load_plugin_module("plugins.DispatchThis.settings")
 
 
 class FakeSettings:
@@ -24,12 +25,8 @@ class FakeSettings:
 
 class FakeBv:
     def __init__(self):
-        self.updated = 0
         self.session_data = {}
         self.functions = []
-
-    def update_analysis_and_wait(self):
-        self.updated += 1
 
 
 class FakeFunc:
@@ -52,91 +49,83 @@ class FakePluginCommand:
         cls.registered.append((name, description, action, is_valid))
 
 
-def test_toggle_function_setting_flips_current_function_resource_setting():
+def test_toggle_function_pass_flips_current_function_resource_setting():
     bv = FakeBv()
     func = FakeFunc()
     settings = FakeSettings()
 
-    assert ui.toggle_function_setting(bv, func, "analysis.plugins.dispatchThis.indirectJumpsCalls", settings) is True
-    assert ui.toggle_function_setting(bv, func, "analysis.plugins.dispatchThis.indirectJumpsCalls", settings) is False
+    assert ui.toggle_function_pass(bv, func, settings_module.BRANCH_TARGETS_SETTING, settings) is True
+    assert ui.toggle_function_pass(bv, func, settings_module.BRANCH_TARGETS_SETTING, settings) is True
 
     assert settings.writes == [
-        ("analysis.plugins.dispatchThis.indirectJumpsCalls", True, func, ui.SettingsScope.SettingsResourceScope),
-        ("analysis.plugins.dispatchThis.indirectJumpsCalls", False, func, ui.SettingsScope.SettingsResourceScope),
+        (settings_module.BRANCH_TARGETS_SETTING, True, func, ui.SettingsScope.SettingsResourceScope),
+        (settings_module.BRANCH_TARGETS_SETTING, False, func, ui.SettingsScope.SettingsResourceScope),
     ]
     assert func.reanalyzed == 2
-    assert bv.updated == 0
 
 
-def test_disable_function_settings_clears_only_the_requested_keys():
+def test_disable_function_settings_clears_all_visible_passes():
     bv = FakeBv()
     func = FakeFunc()
     settings = FakeSettings()
-    keys = ("resolve", "deflatten", "string")
 
-    ui.disable_function_settings(bv, func, keys, settings)
+    assert ui.disable_function_settings(bv, func, settings, reanalyze=True)
 
     assert settings.writes == [
-        ("resolve", False, func, ui.SettingsScope.SettingsResourceScope),
-        ("deflatten", False, func, ui.SettingsScope.SettingsResourceScope),
-        ("string", False, func, ui.SettingsScope.SettingsResourceScope),
+        (key, False, func, ui.SettingsScope.SettingsResourceScope)
+        for key in settings_module.PASS_SETTING_IDS
     ]
     assert func.reanalyzed == 1
-    assert bv.updated == 0
 
 
-def test_use_profile_updates_view_profile_without_function_settings(monkeypatch):
-    bv = FakeBv()
-    func = FakeFunc()
-    calls = []
-    monkeypatch.setattr(
-        ui,
-        "set_active_profile",
-        lambda bv_arg, profile_id: (calls.append((bv_arg, profile_id)), True)[1],
-    )
-
-    ui.use_profile(bv, func, "dyzznb")
-
-    assert calls == [(bv, "dyzznb")]
-    assert func.reanalyzed == 1
-    assert bv.updated == 0
-
-
-def test_use_profile_refuses_to_mix_existing_recovery_receipts(monkeypatch):
+def test_use_provider_clears_function_evidence_without_storing_provider_identity(monkeypatch):
     bv = FakeBv()
     func = FakeFunc()
     bv.functions = [func]
     func.session_data["dispatchthis_workflow_state"] = {
-        "profile_id": "default",
         "branch": {"receipts": {0x1000: (0x2000,)}},
     }
     calls = []
-    monkeypatch.setattr(ui, "active_profile_id", lambda _bv: "default")
+    monkeypatch.setattr(ui, "active_provider_id", lambda _bv, _settings: None)
     monkeypatch.setattr(
         ui,
-        "set_active_profile",
-        lambda *_args: calls.append(True),
+        "set_active_provider",
+        lambda bv_arg, provider_id, configured: (calls.append((bv_arg, provider_id, configured)), True)[1],
     )
+    pending_writes = []
+    monkeypatch.setattr(ui, "_pending_reproof_functions", lambda _bv, _settings: frozenset())
+    monkeypatch.setattr(
+        ui,
+        "_set_pending_reproof_functions",
+        lambda bv_arg, starts, configured: (pending_writes.append((bv_arg, starts, configured)), True)[1],
+    )
+    settings = object()
 
-    assert ui.use_profile(bv, func, "dyzznb") is False
-    assert calls == []
-    assert func.reanalyzed == 0
+    assert ui.use_provider(bv, func, "external", settings)
+
+    assert calls == [(bv, "external", settings)]
+    assert pending_writes == [(bv, frozenset({0x1000}), settings)]
+    assert func.session_data == {}
+    assert func.reanalyzed == 1
 
 
-def test_register_ui_commands_adds_profile_and_toggle_function_commands(monkeypatch):
+def test_register_ui_commands_adds_one_selector_and_seven_pass_commands(monkeypatch):
     FakePluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
     monkeypatch.setattr(ui, "_schedule_shortcuts", lambda: None)
 
-    ui.register_ui_commands("resolve", "deflatten", "string")
+    ui.register_ui_commands()
 
     names = [item[0] for item in FakePluginCommand.registered]
-    assert "DispatchThis\\Profile\\Use default" in names
-    assert "DispatchThis\\Profile\\Use dyzznb" in names
-    assert "DispatchThis\\Toggle Resolver" in names
-    assert "DispatchThis\\Toggle Deflatten" in names
-    assert "DispatchThis\\Toggle String Decrypt" in names
-    assert "DispatchThis\\Disable All" in names
+    assert names == [
+        "DispatchThis\\Select Provider…",
+        *[
+            f"DispatchThis\\Toggle {settings_module.PASS_LABELS[key]}"
+            for key in settings_module.PASS_SETTING_IDS
+        ],
+        "DispatchThis\\Disable All",
+    ]
+    assert not any("Profile\\" in name for name in names)
 
 
 def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
@@ -163,9 +152,9 @@ def test_register_shortcuts_sets_key_on_selection_target_action(monkeypatch):
     ui._register_shortcuts()
 
     assert FakeUIAction.registered == {
-        "Selection Target\\DispatchThis\\Toggle Resolver": "Alt+Q",
+        "Selection Target\\DispatchThis\\Toggle Indirect Branch Targets": "Alt+Q",
         "Selection Target\\DispatchThis\\Toggle Deflatten": "Alt+W",
-        "Selection Target\\DispatchThis\\Toggle String Decrypt": "Alt+E",
+        "Selection Target\\DispatchThis\\Toggle String Recovery": "Alt+E",
         "Selection Target\\DispatchThis\\Disable All": "Alt+R",
     }
 
@@ -210,6 +199,6 @@ def test_register_ui_commands_schedules_shortcuts(monkeypatch):
     monkeypatch.setattr(binaryninja, "PluginCommand", FakePluginCommand, raising=False)
     monkeypatch.setattr(ui, "_schedule_shortcuts", lambda: scheduled.append(True))
 
-    ui.register_ui_commands("resolve", "deflatten", "string")
+    ui.register_ui_commands()
 
     assert scheduled == [True]

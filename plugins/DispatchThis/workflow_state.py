@@ -5,13 +5,8 @@ ROOT_KEY = "dispatchthis_workflow_state"
 CLEANUP_RECEIPT_VERSION = 6
 
 
-class ProfileStateMismatch(RuntimeError):
-    pass
-
-
 def _fresh_state():
     return {
-        "profile_id": None,
         "branch": {
             "stable": False,
             "receipts": {},
@@ -31,22 +26,6 @@ def _fresh_state():
             "receipts": {},
         },
     }
-
-
-def _has_recovery_evidence(data):
-    return any((
-        data.get("branch", {}).get("stable", False),
-        data.get("branch", {}).get("receipts"),
-        data.get("call", {}).get("stable", False),
-        data.get("call", {}).get("receipts"),
-        data.get("call", {}).get("targets"),
-        data.get("global", {}).get("stable", False),
-        data.get("global", {}).get("receipts"),
-    ))
-
-
-def function_has_recovery_evidence(func):
-    return _has_recovery_evidence(func.session_data.get(ROOT_KEY, {}))
 
 
 def _targets_tuple(targets):
@@ -71,6 +50,10 @@ def _user_branch_targets(func):
 
 
 def _normalize_state(data):
+    # Provider binding is BinaryView-scoped.  Older versions persisted profile
+    # provenance here; discard it rather than carrying an identity into a
+    # function-level receipt store.
+    data.pop("profile_id", None)
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
@@ -101,32 +84,17 @@ def _normalize_state(data):
 class FunctionWorkflowState:
     """Phase semantics over one function's session_data."""
 
-    def __init__(self, func, profile_id=None):
+    def __init__(self, func, seed_legacy_branch_receipts=False):
         self.func = func
         raw_state = func.session_data.setdefault(ROOT_KEY, _fresh_state())
-        had_evidence = _has_recovery_evidence(raw_state)
         self.data = _normalize_state(raw_state)
-        recorded_profile = self.data.get("profile_id")
-        if profile_id is not None:
-            if recorded_profile is None:
-                if had_evidence:
-                    raise ProfileStateMismatch(
-                        "legacy recovery state has no resolver profile provenance"
-                    )
-                self.data["profile_id"] = profile_id
-            elif recorded_profile != profile_id:
-                if had_evidence:
-                    raise ProfileStateMismatch(
-                        f"function state belongs to profile {recorded_profile!r}, "
-                        f"not {profile_id!r}"
-                    )
-                self.data["profile_id"] = profile_id
-        self.seed_branch_receipts()
+        if seed_legacy_branch_receipts:
+            self._seed_legacy_branch_receipts()
 
     @staticmethod
     def unmapped_unresolved_sources(func):
         unresolved = {source for _, source in func.unresolved_indirect_branches}
-        mapped = {branch.source_addr for branch in func.indirect_branches}
+        mapped = set(_user_branch_targets(func))
         return unresolved - mapped
 
     @property
@@ -145,23 +113,18 @@ class FunctionWorkflowState:
             if applied_targets.get(source) == targets
         }
 
-    def seed_branch_receipts(self, func=None):
-        """Import existing user indirect-branch metadata as branch receipts.
+    def current_user_branch_targets(self):
+        """Read current non-auto user metadata without promoting it to a receipt."""
+        return _user_branch_targets(self.func)
 
-        This keeps hot-reload or reopened BNDB sessions from resubmitting the
-        same set_user_indirect_branches mutations just because session_data was
-        empty.
-        """
-        func = func or self.func
-        by_source = _user_branch_targets(func)
+    def branch_metadata_matches(self, source, targets):
+        """Require an exact current non-auto user-branch target tuple."""
+        return _user_branch_targets(self.func).get(source) == _targets_tuple(targets)
 
-        seeded = 0
-        for source, targets in by_source.items():
-            if source in self.branch_receipts:
-                continue
-            self.branch_receipts[source] = _targets_tuple(targets)
-            seeded += 1
-        return seeded
+    def _seed_legacy_branch_receipts(self):
+        """Preserve bundled-profile receipts during the private migration path."""
+        for source, targets in _user_branch_targets(self.func).items():
+            self.branch_receipts.setdefault(source, targets)
 
     def branch_updates_for(self, resolved_targets):
         mutations = {}
@@ -192,7 +155,11 @@ class FunctionWorkflowState:
         if not self.data["branch"]["stable"] or self.unmapped_unresolved_sources(func):
             return False
         applied_targets = _user_branch_targets(func)
-        return all(applied_targets.get(source) == targets for source, targets in self.branch_targets().items())
+        receipts = self.branch_targets()
+        return (
+            set(applied_targets) <= set(receipts)
+            and all(applied_targets.get(source) == targets for source, targets in receipts.items())
+        )
 
     def branch_cleanup_needed(self):
         return not self.data["branch"]["cleanup_done"]
@@ -235,7 +202,7 @@ class FunctionWorkflowState:
         """Compare the desired override with Binary Ninja's current fact."""
         try:
             needed = self.func.get_call_type_adjustment(call_addr) != adjust_type
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja adjustment lookup boundary.
             needed = True
         if needed:
             self.invalidate_call_cleanup()
