@@ -29,6 +29,17 @@ from .semantics import (
     StringRecoveryFact,
     StringRecoveryQuery,
 )
+from .helpers.values import (
+    AnalysisBudget,
+    CompleteValues,
+    DefinitionGraph,
+    Handled,
+    NotHandled,
+    PathSource,
+    ValueCase,
+    ValuePolicy,
+    evaluate_values,
+)
 from .settings import PASS_LABELS, PASS_SETTING_IDS
 from .ui import register_ui_commands
 from .utils.log import log_warn
@@ -212,5 +223,14 @@ __all__ = (
     "SampleSemantics",
     "StringRecoveryFact",
     "StringRecoveryQuery",
+    "AnalysisBudget",
+    "CompleteValues",
+    "DefinitionGraph",
+    "Handled",
+    "NotHandled",
+    "PathSource",
+    "ValueCase",
+    "ValuePolicy",
+    "evaluate_values",
     "register_provider",
 )

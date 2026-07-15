@@ -66,7 +66,12 @@ def test_plugin_entrypoint_registers_each_pass_with_its_own_setting(monkeypatch)
     CapturedPluginCommand.registered = []
     monkeypatch.setattr(binaryninja, "PluginCommand", CapturedPluginCommand, raising=False)
 
-    load_plugin_module("plugins.DispatchThis.__init__")
+    plugin = load_plugin_module("plugins.DispatchThis.__init__")
+
+    assert plugin.evaluate_values is not None
+    assert {"AnalysisBudget", "Handled", "NotHandled", "ValuePolicy"} <= set(
+        plugin.__all__
+    )
 
     configs = {
         json.loads(activity.config)["name"]: json.loads(activity.config)
