@@ -6,7 +6,6 @@ from ..helpers import facts, memory, mlil
 from ..passes.low.gadget_llil import resolve_llil_jump_plan
 from ..passes.medium.deflatten import compute_redirections
 from ..passes.medium.indirect_calls import plan_indirect_calls
-from ..passes.medium.string_decrypt import plan_string_decrypt_calls as _plan_string_decrypt_calls
 from ..utils.log import log_info, log_warn
 
 
@@ -22,7 +21,6 @@ CONST_SLOT_TYPE = "uint8_t const* const"
 # - global constants: custom
 # - correlated stores: omitted
 # - deflatten: custom
-# - string decrypt: custom
 #
 # Validation:
 # - raw libdyzznb.so / sub_9641b4: HLIL control predicates are x9 == 1,
@@ -88,7 +86,3 @@ def plan_global_constant_slots(bv, il):
 
 def plan_deflatten_redirections(bv, func, mlil_func):
     return compute_redirections(bv, func, mlil=mlil_func)
-
-
-def plan_string_decrypt_calls(bv, func, mlil_func, mlil_stable):
-    return _plan_string_decrypt_calls(bv, func, mlil_func, mlil_stable)

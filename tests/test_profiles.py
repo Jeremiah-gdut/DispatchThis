@@ -43,7 +43,6 @@ def test_default_resolver_profile_is_registered():
     assert profile.plan_global_constant_slots is not None
     assert profile.correlated_stores is None
     assert profile.plan_deflatten_redirections is not None
-    assert profile.plan_string_decrypt_calls is not None
 
 
 def test_dyzznb_resolver_profile_is_registered():
@@ -59,7 +58,6 @@ def test_dyzznb_resolver_profile_is_registered():
     assert profile.plan_global_constant_slots is not None
     assert profile.correlated_stores is None
     assert profile.plan_deflatten_redirections is not None
-    assert profile.plan_string_decrypt_calls is not None
 
 
 def test_valorant_2_6_resolver_profile_is_registered():
@@ -75,7 +73,6 @@ def test_valorant_2_6_resolver_profile_is_registered():
     assert profile.plan_global_constant_slots is not None
     assert profile.correlated_stores is not None
     assert profile.plan_deflatten_redirections is not None
-    assert profile.plan_string_decrypt_calls is not None
 
 
 def test_driver_2_6_resolver_profile_is_registered():
@@ -89,7 +86,6 @@ def test_driver_2_6_resolver_profile_is_registered():
     assert profile.plan_global_constant_slots is not None
     assert profile.correlated_stores is None
     assert profile.plan_deflatten_redirections is not None
-    assert profile.plan_string_decrypt_calls is not None
 
 
 def test_profile_missing_hook_defaults_to_no_recovery():
@@ -108,7 +104,6 @@ def test_profile_missing_hook_defaults_to_no_recovery():
     assert profile.plan_global_constant_slots(None, None) == []
     assert profile.correlated_stores is None
     assert profile.plan_deflatten_redirections(None, None, None) == []
-    assert profile.plan_string_decrypt_calls(None, None, None, {}) == []
 
 
 def test_profile_rejects_present_noncallable_hook():
@@ -134,7 +129,6 @@ def test_explicit_noop_hooks_are_valid():
         resolve_call_gadget=lambda *_args: [],
         plan_global_constant_slots=lambda *_args: [],
         plan_deflatten_redirections=lambda *_args: [],
-        plan_string_decrypt_calls=lambda *_args: [],
     )
 
     profile = profiles.resolver_profile_from_module(module)
@@ -145,7 +139,6 @@ def test_explicit_noop_hooks_are_valid():
     assert profile.plan_global_constant_slots(None, None) == []
     assert profile.correlated_stores is None
     assert profile.plan_deflatten_redirections(None, None, None) == []
-    assert profile.plan_string_decrypt_calls(None, None, None, {}) == []
 
 
 def test_dyzznb_profile_delegates_to_existing_planners(monkeypatch):
@@ -155,7 +148,6 @@ def test_dyzznb_profile_delegates_to_existing_planners(monkeypatch):
     monkeypatch.setattr(dyzznb, "resolve_llil_jump_plan", lambda *args: ("branch", args))
     monkeypatch.setattr(dyzznb, "plan_indirect_calls", lambda *args: ("call", args))
     monkeypatch.setattr(dyzznb, "compute_redirections", lambda *args, **kwargs: ("deflatten", args, kwargs))
-    monkeypatch.setattr(dyzznb, "_plan_string_decrypt_calls", lambda *args: ("string", args))
 
     profile = profiles.resolver_profile_from_module(dyzznb)
 
@@ -169,10 +161,6 @@ def test_dyzznb_profile_delegates_to_existing_planners(monkeypatch):
         "deflatten",
         ("bv", "func"),
         {"mlil": "mlil"},
-    )
-    assert profile.plan_string_decrypt_calls("bv", "func", "mlil", {"stable": True}) == (
-        "string",
-        ("bv", "func", "mlil", {"stable": True}),
     )
 
 
@@ -235,7 +223,6 @@ def test_active_profile_uses_configured_profile(monkeypatch):
         resolve_call_gadget=lambda *_args: [],
         plan_global_constant_slots=lambda *_args: [],
         plan_deflatten_redirections=lambda *_args: [],
-        plan_string_decrypt_calls=lambda *_args: [],
     )
     configured = profiles.resolver_profile_from_module(module)
     monkeypatch.setitem(profiles._PROFILES, configured.id, configured)

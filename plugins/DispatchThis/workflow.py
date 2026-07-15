@@ -46,6 +46,8 @@ from .semantics import (
     GlobalDataFact,
     GlobalDataQuery,
     Inconclusive,
+    StringRecoveryFact,
+    StringRecoveryQuery,
 )
 from .utils.log import log_info, log_warn, log_debug, log_error
 from .workflow_state import FunctionWorkflowState
@@ -103,6 +105,18 @@ def _deflatten_enabled(func):
 
 def _clear_deflatten_stability(bv, func):
     bv.session_data.get("dispatchthis_mlil_stable", {}).pop(func.start, None)
+
+
+def _deflattened_function_starts(bv):
+    """Copy the cross-function deflatten gate into a provider-safe value."""
+    stable = getattr(bv, "session_data", {}).get("dispatchthis_mlil_stable", {})
+    if type(stable) is not dict:
+        return frozenset()
+    return frozenset(
+        start
+        for start, complete in stable.items()
+        if type(start) is int and start >= 0 and complete is True
+    )
 
 
 def branch_cleanup_current(mlil, state):
@@ -425,6 +439,53 @@ def _provider_correlated_store_plans(bv, func, mlil, provider):
         log_warn(f"[workflow] {func.name}: correlated STORE provider returned an invalid batch")
         return None
     return result.facts
+
+
+def _provider_string_facts(bv, func, mlil, provider):
+    """Validate one complete external string-recovery scan before annotation."""
+    slot = getattr(provider, "string_recovery", None)
+    if slot is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement string recovery")
+        return ()
+    try:
+        result = slot(
+            StringRecoveryQuery(
+                bv,
+                func,
+                mlil,
+                _deflattened_function_starts(bv),
+            )
+        )
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must fail closed.
+        log_warn(f"[workflow] {func.name}: string provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: string provider was inconclusive: {result.reason}")
+        return None
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(fact) is not StringRecoveryFact for fact in result.facts)
+    ):
+        log_warn(f"[workflow] {func.name}: string provider returned an invalid batch")
+        return None
+    try:
+        facts = tuple(
+            StringRecoveryFact(
+                fact.call_addr,
+                fact.source_addr,
+                fact.destination_addr,
+                fact.plaintext,
+            )
+            for fact in result.facts
+        )
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — re-validate the provider-owned fact boundary.
+        log_warn(f"[workflow] {func.name}: string batch validation failed: {error}")
+        return None
+    if len({fact.call_addr for fact in facts}) != len(facts):
+        log_warn(f"[workflow] {func.name}: string provider returned duplicate callsites")
+        return None
+    return facts
 
 
 def _provider_branch_plan(bv, func, llil, provider):
@@ -1060,10 +1121,8 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return 0
-    _provider, profile, state = _active_provider_state(bv, func)
-    if state is None:
-        return 0
-    if profile is None:
+    provider, _legacy, state = _active_provider_state(bv, func)
+    if provider is None or state is None:
         return 0
     if not _ensure_analysis_settings(func):
         return 0
@@ -1074,8 +1133,12 @@ def string_decrypt_mlil(ctx: AnalysisContext):
     if not state.global_stable():
         return 0
 
-    mlil_stable = bv.session_data.get("dispatchthis_mlil_stable", {})
-    facts = profile.plan_string_decrypt_calls(bv, func, ctx.mlil, mlil_stable)
+    mlil = ctx.mlil
+    if mlil is None:
+        return 0
+    facts = _provider_string_facts(bv, func, mlil, provider)
+    if facts is None:
+        return 0
     annotated = apply_decrypted_string_comments(func, facts)
     if annotated:
         state.invalidate_cleanup()

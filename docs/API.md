@@ -935,17 +935,3 @@ global_constant_fact(slot_addr, type_name)
 `type_name` 为空/非字符串时抛出 `MalformedRecoveryFact`。它不定义 data variable；BinaryView
 修改和函数全局阶段回执归工作流。它不校验 section、store 行为或地址有效性；与 profile
 有关的原始值、已解析地址或使用点等识别证据不属于该事实。
-
-### `string_decrypt_fact`
-
-**签名**
-
-```python
-string_decrypt_fact(call_addr, src_addr, dst_addr, plaintext)
-```
-
-构造字符串解密恢复事实。`call_addr` 为解密调用点地址，`src_addr` 为源加密 blob 地址，
-`dst_addr` 为目标 buffer 地址，`plaintext` 为 `bytes` 或 `bytearray` 恢复结果。返回含整数
-`call_addr`、`src_addr`、`dst_addr` 和不可变 `bytes` `plaintext` 的 dict。地址字段非非负
-整数或 `plaintext` 非 `bytes`/`bytearray` 时抛出 `MalformedRecoveryFact`；`bytearray` 会转为
-`bytes`。它不写注释，注释由字符串解密后端负责。

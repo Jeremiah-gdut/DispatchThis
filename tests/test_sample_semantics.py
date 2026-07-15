@@ -1,3 +1,5 @@
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from conftest import load_plugin_module
@@ -54,6 +56,37 @@ def test_complete_batch_and_inconclusive_have_distinct_contracts():
     assert complete.facts == ()
     assert inconclusive.reason == "definition graph incomplete"
     assert complete != inconclusive
+
+
+def test_string_query_freezes_deflattened_callee_evidence():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+
+    query = semantics.StringRecoveryQuery(
+        view=object(),
+        function=object(),
+        mlil=object(),
+        deflattened_function_starts=frozenset({0x2000}),
+    )
+
+    assert query.deflattened_function_starts == frozenset({0x2000})
+    with pytest.raises(FrozenInstanceError):
+        query.deflattened_function_starts = frozenset()
+    with pytest.raises(ValueError, match="frozenset"):
+        semantics.StringRecoveryQuery(object(), object(), object(), {0x2000})
+
+
+def test_string_fact_requires_exact_binary_payload_and_is_frozen():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+
+    fact = semantics.StringRecoveryFact(0x5000, 0x7000, 0x6000, b"plain")
+
+    assert fact.plaintext == b"plain"
+    with pytest.raises(FrozenInstanceError):
+        fact.plaintext = b"changed"
+    with pytest.raises(ValueError, match="plaintext"):
+        semantics.StringRecoveryFact(0x5000, 0x7000, 0x6000, bytearray(b"plain"))
+    with pytest.raises(ValueError, match="call_addr"):
+        semantics.StringRecoveryFact(True, 0x7000, 0x6000, b"plain")
 
 
 def test_branch_fact_requires_a_nonempty_canonical_target_tuple():

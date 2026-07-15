@@ -431,22 +431,6 @@ def correlated_store_fixture(
     return valorant, bv, func, il, store, true_goto, false_goto
 
 
-def encoded_blob(plaintext, key):
-    out = bytearray(key)
-    previous = 0
-    for index, plain in enumerate(plaintext):
-        key_index = index % len(key)
-        key_byte = key[key_index]
-        decoded = plain ^ key_byte
-        if ((key_index * key_byte) & 1) == 0:
-            encoded = (((decoded ^ ((~key_byte) & 0xFF)) - previous) & 0xFF)
-        else:
-            encoded = ((((-decoded) & 0xFF) ^ key_byte) + previous) & 0xFF
-        out.append(encoded)
-        previous = plain
-    return bytes(out)
-
-
 def test_branch_profile_resolves_main_two_target_jump():
     valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
     bv = FakeBv()
@@ -954,45 +938,6 @@ def test_binding_lookup_does_not_merge_distinct_same_named_variables():
     assert valorant._bound_value(bindings, second) is None
 
 
-def test_string_decoder_stays_profile_local():
-    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
-    blob = encoded_blob(b"vanguard", b"k3y!")
-    bv = types.SimpleNamespace(read=lambda _addr, size: blob[:size])
-
-    assert valorant._decode_string_blob(
-        bv,
-        0x7000,
-        {"key_modulus": 4, "length": 8},
-    ) == b"vanguard"
-
-
-def test_string_recognizers_reject_ambiguous_specs(monkeypatch):
-    valorant = import_module("plugins.DispatchThis.profiles.valorant_2_6")
-    il = object()
-    monkeypatch.setattr(valorant, "_has_done_flag_store", lambda _il: True)
-    monkeypatch.setattr(valorant, "_has_byte_crypto_store", lambda _il: True)
-    monkeypatch.setattr(valorant, "_rem_moduli", lambda _il: {3})
-    monkeypatch.setattr(valorant, "_cmp_ne_constants", lambda _il: {8, 9})
-
-    assert valorant._recognize_rem_loop_string_decrypt(il) is None
-
-    func = types.SimpleNamespace(mlil=il)
-    monkeypatch.setattr(valorant, "_parameters", lambda *_args: ("dst", "src"))
-    monkeypatch.setattr(
-        valorant,
-        "_recognize_rem_loop_string_decrypt",
-        lambda _il: {"key_modulus": 3, "length": 5},
-    )
-    monkeypatch.setattr(
-        valorant,
-        "_recognize_index0_loop_string_decrypt",
-        lambda _il: {"key_modulus": 4, "length": 5},
-    )
-    monkeypatch.setattr(valorant, "_recognize_unrolled_string_decrypt", lambda _il: None)
-
-    assert valorant._recognize_string_decrypt_function(func) is None
-
-
 if __name__ == "__main__":
     test_branch_profile_resolves_main_two_target_jump()
     test_branch_profile_rejects_partly_invalid_cached_targets()
@@ -1017,4 +962,3 @@ if __name__ == "__main__":
     test_value_folding_requires_every_phi_arm_and_honors_struct_offset()
     test_branch_value_folding_correlates_phi_arms()
     test_value_folding_preserves_bindings_through_direct_phi_expr()
-    test_string_decoder_stays_profile_local()

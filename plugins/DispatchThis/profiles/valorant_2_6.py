@@ -4,14 +4,14 @@ from . import default
 from ..helpers._values_identity import entity_key, same_entity
 from ..helpers import facts, llil, memory, mlil
 from ..semantics import CompleteBatch, CorrelatedStoreArm, CorrelatedStorePlan
-from ..utils.log import log_debug, log_warn
+from ..utils.log import log_warn
 
 
 PROFILE_ID = "valorant_2_6"
 PROFILE_NAME = "Valorant 2.6"
 PROFILE_DESCRIPTION = (
     "Rules for the valorant_2_6 binary: main branch and call gadgets; "
-    "global constants; loop and unrolled string decrypt clones."
+    "global constants."
 )
 
 # Supported:
@@ -20,15 +20,10 @@ PROFILE_DESCRIPTION = (
 # - global constants: custom
 # - correlated stores: custom
 # - deflatten: alias default compatibility profile
-# - string decrypt: custom (rem-loop, index0-loop, unrolled; ignores mlil_stable)
 #
 # Validation:
 # - branch: 0x6c5f6c -> 0x6c5f70, 0x6c6a4c
 # - call: 0x6c5ee0 -> 0x6cb194
-# - string decrypt (live main const 2-arg sweep: 11 hits):
-#   - rem-loop 0x6c7a28 -> 0x6da548 / 0x129e304
-#   - unrolled 0x6c7b34 -> 0x6da5c8 / 0x129e39c
-#   - index0-loop 0x6c9e08 -> 0x6da834 / 0x129e522
 
 U64 = 0xFFFFFFFFFFFFFFFF
 MAIN_BRANCH_KEY = 0x5C76880DE50178C9
@@ -53,10 +48,6 @@ _CONST_OPS = (*llil.CONST_OPS, *mlil.CONST_OPS)
 _LOAD_OPS = (*llil.LOAD_OPS, *mlil.LOAD_OPS)
 _SET_OPS = (*llil.SET_REG_OPS, *mlil.SET_VAR_OPS, M.MLIL_SET_VAR_SSA.name)
 _PHI_OPS = (L.LLIL_REG_PHI.name, M.MLIL_VAR_PHI.name)
-_CALL_OPS = tuple(op.name for op in (M.MLIL_CALL, M.MLIL_CALL_SSA, M.MLIL_CALL_UNTYPED))
-_CMP_NE_OPS = (M.MLIL_CMP_NE.name,)
-_STORE_OPS = mlil.STORE_OPS
-_VAR_OPS = tuple(op.name for op in (M.MLIL_VAR, M.MLIL_VAR_SSA, M.MLIL_VAR_ALIASED, M.MLIL_VAR_FIELD))
 _PURE_JOIN_OPS = tuple(op.name for op in (M.MLIL_SET_VAR, M.MLIL_SET_VAR_FIELD, M.MLIL_NOP))
 _CAST_OPS = tuple(
     op.name
@@ -817,304 +808,3 @@ def _mutable_scalar(bv, address, width):
     return getattr(type_, "width", None) == width and not bool(
         getattr(type_, "const", False)
     )
-
-
-def _mlil_const(il, expr):
-    return mlil.expression_scalar_value(il, expr)
-
-
-def _parameters(func, il):
-    for owner in (func, getattr(il, "source_function", None)):
-        params = getattr(owner, "parameter_vars", None)
-        if params:
-            return list(params)
-    return []
-
-
-def _has_done_flag_store(il):
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) not in _STORE_OPS or getattr(expr, "size", None) != 1:
-                continue
-            if _mlil_const(il, getattr(expr, "src", None)) == 1:
-                return True
-    return False
-
-
-def _has_byte_crypto_store(il):
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) not in _STORE_OPS or getattr(expr, "size", None) != 1:
-                continue
-            if _mlil_const(il, getattr(expr, "src", None)) == 1:
-                continue
-            # XOR/NOT often sits on the defining assignment, not the store leaf.
-            ops = {
-                _op(child)
-                for child in mlil.walk_expr_with_defs(il, getattr(expr, "src", None))
-            }
-            if ops & {M.MLIL_XOR.name, M.MLIL_NOT.name, M.MLIL_NEG.name}:
-                return True
-    return False
-
-
-def _rem_moduli(il):
-    """Strength-reduced `i % M` appears as `i - q * M`."""
-    out = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) != M.MLIL_SUB.name:
-                continue
-            right = getattr(expr, "right", None)
-            if _op(right) != M.MLIL_MUL.name:
-                continue
-            for side in (getattr(right, "left", None), getattr(right, "right", None)):
-                if _op(side) not in _CONST_OPS:
-                    continue
-                value = side.constant
-                if isinstance(value, int) and 2 <= value <= 256:
-                    out.add(value)
-    return out
-
-
-def _cmp_ne_constants(il):
-    out = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) not in _CMP_NE_OPS:
-                continue
-            for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
-                if _op(side) not in _CONST_OPS:
-                    continue
-                value = side.constant
-                if isinstance(value, int) and value > 1:
-                    out.add(value)
-    return out
-
-
-def _relative_const_offset(expr):
-    """Return const displacement for `var` / `var+const` style addresses."""
-    if expr is None:
-        return None
-    if _op(expr) in _VAR_OPS:
-        return 0
-    if _op(expr) == M.MLIL_ADD.name:
-        left, right = getattr(expr, "left", None), getattr(expr, "right", None)
-        if _op(left) in _CONST_OPS and _op(right) not in _CONST_OPS:
-            value = left.constant
-            return value if isinstance(value, int) else None
-        if _op(right) in _CONST_OPS and _op(left) not in _CONST_OPS:
-            value = right.constant
-            return value if isinstance(value, int) else None
-    if _op(expr) == M.MLIL_SUB.name:
-        left, right = getattr(expr, "left", None), getattr(expr, "right", None)
-        if _op(right) in _CONST_OPS and _op(left) not in _CONST_OPS:
-            value = right.constant
-            if isinstance(value, int):
-                return -value
-    return None
-
-
-def _and_moduli(il):
-    """`i % (mask+1)` sometimes appears as `i & mask` with mask = 2^n - 1."""
-    out = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) != M.MLIL_AND.name:
-                continue
-            for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
-                if _op(side) not in _CONST_OPS:
-                    continue
-                value = side.constant
-                if isinstance(value, int) and value in (0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F, 0xFF):
-                    out.add(value + 1)
-    return out
-
-
-def _payload_const_offsets(il):
-    out = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) in _LOAD_OPS and getattr(expr, "size", None) == 1:
-                offset = _relative_const_offset(getattr(expr, "src", None))
-                if offset is not None and offset > 0:
-                    out.add(offset)
-        # payload base may be hoisted: x = arg2 + M; load [x + i]
-        if _op(ins) not in (
-            M.MLIL_SET_VAR.name,
-            M.MLIL_SET_VAR_FIELD.name,
-            M.MLIL_SET_VAR_SSA.name,
-        ):
-            continue
-        src = getattr(ins, "src", None)
-        if _op(src) != M.MLIL_ADD.name:
-            continue
-        for side in (getattr(src, "left", None), getattr(src, "right", None)):
-            if _op(side) not in _CONST_OPS:
-                continue
-            value = side.constant
-            if isinstance(value, int) and 2 <= value <= 256:
-                out.add(value)
-    return out
-
-
-def _recognize_rem_loop_string_decrypt(il):
-    """Loop with strength-reduced rem: index starts at M, end_exclusive = M + length."""
-    if not _has_done_flag_store(il) or not _has_byte_crypto_store(il):
-        return None
-    rem = _rem_moduli(il)
-    if not rem:
-        return None
-    ends = _cmp_ne_constants(il)
-    specs = {
-        (modulus, bound - modulus)
-        for modulus in rem
-        for bound in ends
-        if 0 < bound - modulus <= 4096
-    }
-    return _unique_string_spec(specs)
-
-
-def _recognize_index0_loop_string_decrypt(il):
-    """Loop with i from 0: `if (i != length)` and payload at src[M + i]."""
-    if not _has_done_flag_store(il) or not _has_byte_crypto_store(il):
-        return None
-    if _rem_moduli(il):
-        return None
-    ends = {bound for bound in _cmp_ne_constants(il) if 1 < bound <= 4096}
-    if len(ends) != 1:
-        return None
-    length = next(iter(ends))
-    and_moduli = _and_moduli(il)
-    if and_moduli:
-        return _unique_string_spec({(modulus, length) for modulus in and_moduli})
-    # Bare key index `i` requires length <= M; M is the fixed payload base offset.
-    return _unique_string_spec({
-        (modulus, length)
-        for modulus in _payload_const_offsets(il)
-        if 2 <= modulus <= 256 and length <= modulus
-    })
-
-
-def _recognize_unrolled_string_decrypt(il):
-    if not _has_done_flag_store(il) or not _has_byte_crypto_store(il):
-        return None
-    if _rem_moduli(il) or _and_moduli(il):
-        return None
-    load_offsets = set()
-    store_offsets = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if _op(expr) in _LOAD_OPS and getattr(expr, "size", None) == 1:
-                offset = _relative_const_offset(getattr(expr, "src", None))
-                if offset is not None and offset > 0:
-                    load_offsets.add(offset)
-            if _op(expr) not in _STORE_OPS or getattr(expr, "size", None) != 1:
-                continue
-            if _mlil_const(il, getattr(expr, "src", None)) == 1:
-                continue
-            offset = _relative_const_offset(getattr(expr, "dest", None))
-            if offset is not None and offset >= 0:
-                store_offsets.add(offset)
-
-    if not store_offsets or not load_offsets:
-        return None
-    length = max(store_offsets) + 1
-    if length > 4096 or set(range(length)) != store_offsets:
-        return None
-
-    # Payload bytes sit at src[M + i]; recover M from a contiguous load run of size length.
-    # Prefer the largest matching base so sparse key-index loads below M are not chosen.
-    matches = []
-    for modulus in sorted(offset for offset in load_offsets if offset >= length):
-        expected = {modulus + index for index in range(length)}
-        if expected <= load_offsets:
-            matches.append(modulus)
-    return _unique_string_spec({(modulus, length) for modulus in matches})
-
-
-def _unique_string_spec(specs):
-    if len(specs) != 1:
-        return None
-    modulus, length = next(iter(specs))
-    return {"key_modulus": modulus, "length": length}
-
-
-def _recognize_string_decrypt_function(func, il=None):
-    il = il or getattr(func, "mlil", None) or getattr(func, "medium_level_il", None)
-    if il is None or len(_parameters(func, il)) < 2:
-        return None
-    specs = {
-        (spec["key_modulus"], spec["length"])
-        for spec in (
-            _recognize_rem_loop_string_decrypt(il),
-            _recognize_index0_loop_string_decrypt(il),
-            _recognize_unrolled_string_decrypt(il),
-        )
-        if spec is not None
-    }
-    return _unique_string_spec(specs)
-
-
-def _decode_string_blob(bv, source_addr, spec):
-    key_modulus = spec["key_modulus"]
-    length = spec["length"]
-    try:
-        data = bv.read(source_addr, key_modulus + length)
-    except Exception:  # noqa: BLE001
-        return None
-    if data is None or len(data) < key_modulus + length:
-        return None
-
-    key = data[:key_modulus]
-    payload = data[key_modulus:key_modulus + length]
-    out = bytearray()
-    previous = 0
-    for index, encoded in enumerate(payload):
-        key_index = index % key_modulus
-        key_byte = key[key_index]
-        if ((key_index * key_byte) & 1) == 0:
-            decoded = ((previous + encoded) & 0xFF) ^ ((~key_byte) & 0xFF)
-        else:
-            decoded = (-(((encoded - previous) & 0xFF) ^ key_byte)) & 0xFF
-        plain = decoded ^ key_byte
-        out.append(plain)
-        previous = plain
-    return bytes(out)
-
-
-def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
-    """Plan decrypt comments for const 2-arg calls.
-
-    Valorant decrypt clones are plain functions, so callee deflatten / mlil_stable
-    receipts are intentionally ignored.
-    """
-    if il is None:
-        return []
-
-    out = []
-    for call in mlil.iter_calls(il, _CALL_OPS):
-        target = _mlil_const(il, getattr(call, "dest", None))
-        params = list(getattr(call, "params", ()) or ())
-        if target is None or len(params) < 2:
-            continue
-        dst_addr = _mlil_const(il, params[0])
-        src_addr = _mlil_const(il, params[1])
-        if dst_addr is None or src_addr is None:
-            continue
-        callee = bv.get_function_at(target)
-        if callee is None:
-            log_debug(f"[valorant_2_6:sdecrypt] {hex(call.address)}: no function at {hex(target)}")
-            continue
-        spec = _recognize_string_decrypt_function(callee)
-        if spec is None:
-            continue
-        plaintext = _decode_string_blob(bv, src_addr, spec)
-        if plaintext is None:
-            log_warn(
-                f"[valorant_2_6:sdecrypt] {hex(call.address)}: "
-                f"source blob @ {hex(src_addr)} is too short for {spec}"
-            )
-            continue
-        out.append(facts.string_decrypt_fact(call.address, src_addr, dst_addr, plaintext))
-    return out

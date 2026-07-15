@@ -15,4 +15,3 @@ resolve_branch_gadget = dyzznb.resolve_branch_gadget
 resolve_call_gadget = dyzznb.resolve_call_gadget
 plan_global_constant_slots = dyzznb.plan_global_constant_slots
 plan_deflatten_redirections = dyzznb.plan_deflatten_redirections
-plan_string_decrypt_calls = dyzznb.plan_string_decrypt_calls

@@ -12,15 +12,6 @@ from test_global_constants import (
     var as global_var,
 )
 from test_indirect_calls import decoded_call_fixture
-from test_string_decrypt import (
-    FakeBv as StringFakeBv,
-    FakeFunc as StringFakeFunc,
-    FakeMlil as StringFakeMlil,
-    call as string_call,
-    const as string_const,
-    decrypt_callee,
-    encoded_blob,
-)
 
 
 def test_call_profile_returns_call_facts():
@@ -58,30 +49,4 @@ def test_global_profile_returns_constant_slot_facts():
     assert dyzznb.plan_global_constant_slots(bv, il) == [{
         "slot_addr": 0xA43D70,
         "type": dyzznb.CONST_SLOT_TYPE,
-    }]
-
-
-def test_string_profile_returns_decrypt_facts():
-    dyzznb = import_module("plugins.DispatchThis.profiles.dyzznb")
-    bv = StringFakeBv()
-    callee = decrypt_callee("glDrawElements")
-    bv.functions[callee.start] = callee
-    bv.session_data["dispatchthis_mlil_stable"][callee.start] = True
-    bv.memory[0x7000] = encoded_blob("glDrawElements")
-    caller = StringFakeFunc(0x1000)
-    caller.mlil = StringFakeMlil(
-        [string_call(string_const(callee.start), [string_const(0x6000), string_const(0x7000)])],
-        caller,
-    )
-
-    assert dyzznb.plan_string_decrypt_calls(
-        bv,
-        caller,
-        caller.mlil,
-        bv.session_data["dispatchthis_mlil_stable"],
-    ) == [{
-        "call_addr": 0x5000,
-        "src_addr": 0x7000,
-        "dst_addr": 0x6000,
-        "plaintext": b"glDrawElements",
     }]

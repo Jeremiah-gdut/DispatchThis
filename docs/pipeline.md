@@ -179,7 +179,7 @@ provider 返回包含精确槽位见证和完整原生 Binary Ninja `Type` 的 `
 当前 provider 的字符串槽位检查当前 MLIL 并返回 `StringRecoveryFact`，不写注释。
 provider 可消费核心提供的只读稳定证据，要求候选 callee 已成功安装去平坦化替换。共享
 后端 `apply_decrypted_string_comments` 将接纳事实变为以下形式的函数级注释：
-`[decrypt] <escaped-string>, src=0x... dst=0x...`；已有手工注释行会保留。
+`[DispatchThis decrypt] <escaped-string>, src=0x... dst=0x...`；已有手工注释行会保留。
 
 具体样本 provider 只识别自己精确样本的直接解密调用形态，并自行承担完整识别证明；核心不
 提供默认 provider、样本家族识别或通用字符串反混淆器。

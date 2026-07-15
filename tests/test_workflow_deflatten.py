@@ -145,9 +145,18 @@ def fake_plan_deflatten_redirections(bv, func, mlil):
     return [{"kind": "uncond"}]
 
 
-def fake_plan_string_decrypt_calls(bv, func, mlil, mlil_stable):
-    string_decrypt_calls.append((bv, func, mlil, mlil_stable))
-    return string_decrypt_results.pop(0) if string_decrypt_results else []
+def fake_string_recovery(query):
+    string_decrypt_calls.append(
+        (
+            query.view,
+            query.function,
+            query.mlil,
+            query.deflattened_function_starts,
+        )
+    )
+    return semantics.CompleteBatch(
+        tuple(string_decrypt_results.pop(0) if string_decrypt_results else ())
+    )
 
 
 def fake_apply_decrypted_string_comments(_func, facts):
@@ -187,7 +196,6 @@ def fake_active_profile(bv):
         resolve_call_gadget=fake_resolve_call_gadget,
         plan_global_constant_slots=fake_plan_global_constant_slots,
         plan_deflatten_redirections=fake_plan_deflatten_redirections,
-        plan_string_decrypt_calls=fake_plan_string_decrypt_calls,
     )
 
 
@@ -205,6 +213,7 @@ def fake_active_provider(bv):
         provider_id="test",
         call_targets=fake_call_targets,
         correlated_stores=fake_correlated_stores,
+        string_recovery=fake_string_recovery,
     )
 
 
@@ -2234,12 +2243,15 @@ def test_string_decrypt_does_not_require_deflatten_stability():
     FakeWorkflowState.cleanup_invalidated = False
     active_profile_calls.clear()
     string_decrypt_calls.clear()
-    string_decrypt_results[:] = [[{"call_addr": 0x5000}, {"call_addr": 0x5010}]]
+    string_decrypt_results[:] = [[
+        semantics.StringRecoveryFact(0x5000, 0x7000, 0x6000, b"first"),
+        semantics.StringRecoveryFact(0x5010, 0x7001, 0x6001, b"second"),
+    ]]
     ctx = FakeContext()
 
     assert workflow.string_decrypt_mlil(ctx) == 2
     assert active_profile_calls == [ctx.view]
-    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, {})]
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
     assert FakeWorkflowState.cleanup_invalidated is True
     assert "dispatchthis_mlil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
@@ -2259,7 +2271,7 @@ def test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged():
 
     assert workflow.string_decrypt_mlil(ctx) == 0
     assert active_profile_calls == [ctx.view]
-    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, {})]
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
     assert FakeWorkflowState.cleanup_invalidated is False
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False

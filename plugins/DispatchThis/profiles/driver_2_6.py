@@ -11,7 +11,7 @@ PROFILE_ID = "driver_2_6"
 PROFILE_NAME = "Driver 2.6"
 PROFILE_DESCRIPTION = (
     "Rules for the 2.6 driver binary: Valorant-compatible branch/call "
-    "hooks plus driver deflattening and string decrypt."
+    "hooks plus driver deflattening."
 )
 
 # Supported:
@@ -20,12 +20,10 @@ PROFILE_DESCRIPTION = (
 # - global constants: custom
 # - correlated stores: omitted
 # - deflatten: custom
-# - string decrypt: custom
 #
 # Validation:
 # - deflatten: main @ 0x36d10, state var_124, state pointer var_168,
 #   40 redirection plans recovered in driver.bndb.
-# - string decrypt: main @ 0x36d10, 65 decrypt facts recovered in driver.bndb.
 
 _DISPATCHER_MIN_ROWS = 3
 _CONST_DATA_SECTIONS = {".data"}
@@ -104,163 +102,6 @@ def _add_driver_global_constant_plan(plans, bv, il, slot_addr):
         return
     type_name = _CONST_PTR_TYPE if is_void_pointer else _CONST_QWORD_TYPE
     plans[slot_addr] = facts.global_constant_fact(slot_addr, type_name)
-
-
-def plan_string_decrypt_calls(bv, _func, il, _mlil_stable):
-    if il is None:
-        return []
-
-    out = []
-    for call in mlil.iter_calls(il, _DIRECT_CALL_OPS):
-        target = mlil.expression_scalar_value(il, getattr(call, "dest", None))
-        params = list(getattr(call, "params", ()) or ())
-        if target is None or len(params) < 2:
-            continue
-        dst_addr = mlil.expression_scalar_value(il, params[0])
-        src_addr = mlil.expression_scalar_value(il, params[1])
-        if dst_addr is None or src_addr is None:
-            continue
-        callee = bv.get_function_at(target)
-        if callee is None:
-            continue
-        spec = _recognize_driver_string_decrypt_function(callee)
-        if spec is None:
-            continue
-        plaintext = _decode_driver_string_blob(bv, src_addr, spec)
-        if plaintext is None:
-            log_warn(
-                f"[driver_2_6:sdecrypt] {hex(call.address)}: "
-                f"source blob @ {hex(src_addr)} is too short for {spec}"
-            )
-            continue
-        out.append(facts.string_decrypt_fact(call.address, src_addr, dst_addr, plaintext))
-    return out
-
-
-def _const_from_binary_expr(expr):
-    for side in (getattr(expr, "left", None), getattr(expr, "right", None)):
-        if mlil.operation(side) == M.MLIL_CONST:
-            return side.constant
-    return None
-
-
-def _divu_constants(il):
-    values = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            if mlil.operation(expr) != M.MLIL_DIVU:
-                continue
-            value = _const_from_binary_expr(expr)
-            if value is not None:
-                values.add(value)
-    return values
-
-
-def _var_defined_as_increment(il, var):
-    for definition in il.get_var_definitions(var):
-        src = getattr(definition, "src", None)
-        if mlil.operation(src) != M.MLIL_ADD:
-            continue
-        left = getattr(src, "left", None)
-        right = getattr(src, "right", None)
-        if (
-            mlil.direct_var_from_expr(left) is not None
-            and mlil.operation(right) == M.MLIL_CONST
-            and right.constant == 1
-        ) or (
-            mlil.direct_var_from_expr(right) is not None
-            and mlil.operation(left) == M.MLIL_CONST
-            and left.constant == 1
-        ):
-            return True
-    return False
-
-
-def _length_constants(il):
-    values = set()
-    for ins in getattr(il, "instructions", ()) or ():
-        if mlil.operation(ins) != M.MLIL_IF:
-            continue
-        cond = getattr(ins, "condition", None)
-        if mlil.operation(cond) != M.MLIL_CMP_E:
-            continue
-        sides = (getattr(cond, "left", None), getattr(cond, "right", None))
-        const_expr = next(
-            (side for side in sides if mlil.operation(side) == M.MLIL_CONST),
-            None,
-        )
-        var_expr = next((side for side in sides if mlil.var_from_expr(side) is not None), None)
-        if const_expr is None or var_expr is None:
-            continue
-        value = const_expr.constant
-        if 1 < value <= 4096 and _var_defined_as_increment(il, mlil.var_from_expr(var_expr)):
-            values.add(value)
-    return values
-
-
-def _recognize_driver_string_decrypt_function(func):
-    il = getattr(func, "mlil", None) or getattr(func, "medium_level_il", None)
-    if il is None:
-        return None
-    if not _has_driver_decrypt_body(il):
-        return None
-    divu_values = _divu_constants(il)
-    length_values = _length_constants(il)
-    if len(divu_values) != 1 or len(length_values) != 1:
-        return None
-    key_modulus = next(iter(divu_values))
-    length = next(iter(length_values))
-    if not (0 < key_modulus <= 4096) or length <= 0:
-        return None
-    return {"key_modulus": key_modulus, "length": length}
-
-
-def _has_driver_decrypt_body(il):
-    byte_loads = 0
-    byte_stores = 0
-    has_xor = False
-    has_mul = False
-    has_and = False
-    for ins in getattr(il, "instructions", ()) or ():
-        for expr in mlil.walk_expr(ins):
-            op = mlil.operation(expr)
-            if op in mlil.LOAD_OPERATIONS and getattr(expr, "size", None) == 1:
-                byte_loads += 1
-            elif op in mlil.STORE_OPERATIONS and getattr(expr, "size", None) == 1:
-                byte_stores += 1
-            elif op == M.MLIL_XOR:
-                has_xor = True
-            elif op == M.MLIL_MUL:
-                has_mul = True
-            elif op == M.MLIL_AND:
-                has_and = True
-    return byte_loads >= 2 and byte_stores >= 1 and has_xor and has_mul and has_and
-
-
-def _decode_driver_string_blob(bv, source_addr, spec):
-    key_modulus = spec["key_modulus"]
-    length = spec["length"]
-    try:
-        data = bv.read(source_addr, key_modulus + length)
-    except Exception:  # noqa: BLE001
-        return None
-    if data is None or len(data) < key_modulus + length:
-        return None
-
-    out = bytearray()
-    previous = 0
-    for index in range(length):
-        key_index = index % key_modulus
-        key = data[key_index]
-        cipher = data[key_modulus + index]
-        if ((key_index * key) & 1) == 0:
-            decoded = ((previous + cipher) & 0xFF) ^ ((~key) & 0xFF)
-        else:
-            decoded = (-(((cipher - previous) & 0xFF) ^ key)) & 0xFF
-        plain = decoded ^ key
-        out.append(plain)
-        previous = plain
-    return bytes(out)
 
 
 def _last(il, bb):

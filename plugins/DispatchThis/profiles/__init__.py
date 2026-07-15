@@ -14,7 +14,6 @@ PROFILE_HOOKS = (
     "resolve_call_gadget",
     "plan_global_constant_slots",
     "plan_deflatten_redirections",
-    "plan_string_decrypt_calls",
 )
 
 ResolverProfile = namedtuple(

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     )
 
 
-CORE_API_VERSION = 2
+CORE_API_VERSION = 3
 
 T = TypeVar("T")
 
@@ -114,6 +114,16 @@ class StringRecoveryQuery:
     view: BinaryView
     function: Function
     mlil: MediumLevelILFunction
+    deflattened_function_starts: frozenset[int]
+
+    def __post_init__(self) -> None:
+        if type(self.deflattened_function_starts) is not frozenset or any(
+            type(start) is not int or start < 0
+            for start in self.deflattened_function_starts
+        ):
+            raise ProviderContractError(
+                "deflattened_function_starts must be a frozenset of non-negative integers"
+            )
 
 
 @dataclass(frozen=True, slots=True)

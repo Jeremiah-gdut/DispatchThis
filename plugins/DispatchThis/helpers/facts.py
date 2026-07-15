@@ -74,21 +74,9 @@ def global_constant_fact(slot_addr, type_name):
     }
 
 
-def string_decrypt_fact(call_addr, src_addr, dst_addr, plaintext):
-    if not isinstance(plaintext, (bytes, bytearray)):
-        raise MalformedRecoveryFact("plaintext must be bytes")
-    return {
-        "call_addr": _require_int("call_addr", call_addr),
-        "src_addr": _require_int("src_addr", src_addr),
-        "dst_addr": _require_int("dst_addr", dst_addr),
-        "plaintext": bytes(plaintext),
-    }
-
-
 __all__ = (
     "MalformedRecoveryFact",
     "branch_fact",
     "call_fact",
     "global_constant_fact",
-    "string_decrypt_fact",
 )
