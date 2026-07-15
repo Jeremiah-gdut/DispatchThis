@@ -145,6 +145,20 @@ def fake_plan_deflatten_redirections(bv, func, mlil):
     return [{"kind": "uncond"}]
 
 
+def fake_deflatten(query):
+    calls.append(("compute", query.function.start, query.mlil))
+    return semantics.CompleteBatch(
+        (
+            semantics.DeflattenPlan(
+                kind=semantics.DeflattenPlanKind.UNCONDITIONAL,
+                owner_block=object(),
+                exit_redirections=(semantics.DeflattenRedirection(object(), 0x2000),),
+                state_token=semantics.DeflattenStateToken(0x1234, 4),
+            ),
+        )
+    )
+
+
 def fake_string_recovery(query):
     string_decrypt_calls.append(
         (
@@ -213,6 +227,7 @@ def fake_active_provider(bv):
         provider_id="test",
         call_targets=fake_call_targets,
         correlated_stores=fake_correlated_stores,
+        deflatten=fake_deflatten,
         string_recovery=fake_string_recovery,
     )
 

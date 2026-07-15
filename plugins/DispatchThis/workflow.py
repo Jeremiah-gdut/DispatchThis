@@ -43,6 +43,8 @@ from .semantics import (
     CompleteBatch,
     CorrelatedStorePlan,
     CorrelatedStoreQuery,
+    DeflattenPlan,
+    DeflattenQuery,
     GlobalDataFact,
     GlobalDataQuery,
     Inconclusive,
@@ -133,13 +135,13 @@ def branch_cleanup_current(mlil, state):
     )
 
 
-def _apply_deflatten(ctx, bv, func, profile, mlil):
-    redirections = profile.plan_deflatten_redirections(bv, func, mlil)
-    if not redirections:
+def _apply_deflatten(ctx, bv, func, provider, mlil):
+    plans = _provider_deflatten_plans(bv, func, mlil, provider)
+    if not plans:
         return False
 
-    new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, redirections)
-    if new_mlil is None or applied != len(redirections) or not _commit_mlil(ctx, new_mlil):
+    new_mlil, applied = rewrite_redirections_mlil(ctx, mlil, plans)
+    if new_mlil is None or applied != len(plans) or not _commit_mlil(ctx, new_mlil):
         return False
 
     bv.session_data.setdefault("dispatchthis_mlil_stable", {})[func.start] = True
@@ -437,6 +439,30 @@ def _provider_correlated_store_plans(bv, func, mlil, provider):
         or any(type(plan) is not CorrelatedStorePlan for plan in result.facts)
     ):
         log_warn(f"[workflow] {func.name}: correlated STORE provider returned an invalid batch")
+        return None
+    return result.facts
+
+
+def _provider_deflatten_plans(bv, func, mlil, provider):
+    """Validate one complete typed deflatten scan before its atomic rewrite."""
+    slot = getattr(provider, "deflatten", None)
+    if slot is None:
+        log_debug(f"[workflow] {func.name}: provider does not implement deflatten")
+        return ()
+    try:
+        result = slot(DeflattenQuery(bv, func, mlil))
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — provider boundary must fail closed.
+        log_warn(f"[workflow] {func.name}: deflatten provider failed: {error}")
+        return None
+    if type(result) is Inconclusive:
+        log_warn(f"[workflow] {func.name}: deflatten provider was inconclusive: {result.reason}")
+        return None
+    if (
+        type(result) is not CompleteBatch
+        or type(result.facts) is not tuple
+        or any(type(plan) is not DeflattenPlan for plan in result.facts)
+    ):
+        log_warn(f"[workflow] {func.name}: deflatten provider returned an invalid batch")
         return None
     return result.facts
 
@@ -1160,10 +1186,8 @@ def deflatten_mlil(ctx: AnalysisContext):
 
     # Don't deflatten until the LLIL pass has drained every indirect jump;
     # otherwise the CFG is still incomplete and the dispatcher cluster may be partial.
-    _provider, profile, state = _active_provider_state(bv, func)
+    provider, _legacy, state = _active_provider_state(bv, func)
     if state is None:
-        return
-    if profile is None:
         return
     if not _ensure_analysis_settings(func):
         return
@@ -1179,4 +1203,4 @@ def deflatten_mlil(ctx: AnalysisContext):
         return
     if not branch_cleanup_current(mlil, state):
         return
-    _apply_deflatten(ctx, bv, func, profile, mlil)
+    _apply_deflatten(ctx, bv, func, provider, mlil)

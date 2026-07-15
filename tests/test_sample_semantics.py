@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import types
 
 import pytest
 
@@ -146,6 +147,31 @@ def test_correlated_store_plan_requires_explicit_path_and_value_witnesses():
         )
 
 
+def test_deflatten_plan_requires_one_typed_rewrite_shape_and_owned_cleanup_witnesses():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    write = semantics.DeflattenStateWriteWitness(7, object())
+    plan = semantics.DeflattenPlan(
+        kind=semantics.DeflattenPlanKind.UNCONDITIONAL,
+        owner_block=object(),
+        exit_redirections=(semantics.DeflattenRedirection(object(), 0x2000),),
+        state_token=semantics.DeflattenStateToken(0x1234, 4),
+        obsolete_state_writes=frozenset({7}),
+        obsolete_state_write_witnesses=(write,),
+    )
+
+    assert plan.kind is semantics.DeflattenPlanKind.UNCONDITIONAL
+    with pytest.raises(FrozenInstanceError):
+        plan.state_token = semantics.DeflattenStateToken(0x5678, 4)
+    with pytest.raises(ValueError, match="exactly match"):
+        semantics.DeflattenPlan(
+            kind=semantics.DeflattenPlanKind.UNCONDITIONAL,
+            owner_block=object(),
+            exit_redirections=(semantics.DeflattenRedirection(object(), 0x2000),),
+            state_token=semantics.DeflattenStateToken(0x1234, 4),
+            obsolete_state_writes=frozenset({7}),
+        )
+
+
 def test_legacy_profile_adapter_exposes_only_typed_correlated_store_batches():
     semantics = load_plugin_module("plugins.DispatchThis.semantics")
     providers = load_plugin_module("plugins.DispatchThis.providers")
@@ -165,6 +191,43 @@ def test_legacy_profile_adapter_exposes_only_typed_correlated_store_batches():
 
     assert provider.correlated_stores is not None
     assert provider.correlated_stores(object()) == semantics.CompleteBatch(())
+
+
+def test_legacy_deflatten_adapter_exposes_only_typed_plan_batches():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    load_plugin_module("plugins.DispatchThis.passes.medium.deflatten")
+    providers = load_plugin_module("plugins.DispatchThis.providers")
+    profile = type(
+        "Profile",
+        (),
+        {
+            "id": "legacy-deflatten-typed",
+            "name": "Legacy deflatten typed",
+            "resolve_branch_gadget": staticmethod(lambda *_args: []),
+            "plan_deflatten_redirections": staticmethod(
+                lambda *_args: [
+                    {
+                        "kind": "uncond",
+                        "obb": object(),
+                        "exit_jumps": (object(),),
+                        "target_bb": types.SimpleNamespace(start=0x2000),
+                        "state_token": (0x1234, 4),
+                        "obsolete_state_writes": set(),
+                        "obsolete_state_write_witnesses": {},
+                    }
+                ]
+            ),
+        },
+    )()
+
+    assert providers._register_legacy_profile(profile)
+    provider = providers.get_provider(profile.id)
+
+    assert provider.deflatten is not None
+    result = provider.deflatten(types.SimpleNamespace(view=object(), function=object(), mlil=object()))
+    assert type(result) is semantics.CompleteBatch
+    assert len(result.facts) == 1
+    assert type(result.facts[0]) is semantics.DeflattenPlan
 
 
 def test_active_provider_never_falls_back_to_a_registered_provider():

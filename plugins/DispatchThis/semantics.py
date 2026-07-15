@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
@@ -16,11 +17,13 @@ if TYPE_CHECKING:
         LowLevelILInstruction,
         MediumLevelILFunction,
         MediumLevelILInstruction,
+        MediumLevelILOperation,
         Type,
+        Variable,
     )
 
 
-CORE_API_VERSION = 3
+CORE_API_VERSION = 4
 
 T = TypeVar("T")
 
@@ -257,6 +260,64 @@ class StringRecoveryFact:
             raise ProviderContractError("plaintext must be bytes")
 
 
+class DeflattenPlanKind(Enum):
+    """The one atomic rewrite shape described by a deflatten plan."""
+
+    UNCONDITIONAL = "unconditional"
+    CONDITIONAL_ARM_EXITS = "conditional_arm_exits"
+    CONDITIONAL_SHARED_EXIT = "conditional_shared_exit"
+    CONDITIONAL_SHORTCUT = "conditional_shortcut"
+
+
+@dataclass(frozen=True, slots=True)
+class DeflattenStateToken:
+    """One concrete dispatcher token, including its exact byte width."""
+
+    value: int
+    width: int
+
+    def __post_init__(self) -> None:
+        if type(self.value) is not int or self.value < 0:
+            raise ProviderContractError("state token value must be a non-negative integer")
+        if type(self.width) is not int or self.width <= 0:
+            raise ProviderContractError("state token width must be a positive integer")
+        if self.value.bit_length() > self.width * 8:
+            raise ProviderContractError("state token value does not fit its width")
+
+
+@dataclass(frozen=True, slots=True)
+class DeflattenConditionWitness:
+    """The direct variable/constant predicate safe to replay at a shared exit."""
+
+    operation: MediumLevelILOperation
+    comparison_variable: Variable
+    bound_token: DeflattenStateToken
+    state_variable_on_left: bool
+
+    def __post_init__(self) -> None:
+        if self.operation is None:
+            raise ProviderContractError("condition operation is required")
+        if self.comparison_variable is None:
+            raise ProviderContractError("condition comparison variable is required")
+        if type(self.bound_token) is not DeflattenStateToken:
+            raise ProviderContractError("condition bound token must be a DeflattenStateToken")
+        if type(self.state_variable_on_left) is not bool:
+            raise ProviderContractError("condition operand order must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class DeflattenStateWriteWitness:
+    """One exact state-write instruction owned by this plan's cleanup proof."""
+
+    instr_index: int
+    state_write_il: MediumLevelILInstruction
+
+    def __post_init__(self) -> None:
+        _require_address("state write instruction index", self.instr_index)
+        if self.state_write_il is None:
+            raise ProviderContractError("state write instruction is required")
+
+
 @dataclass(frozen=True, slots=True)
 class DeflattenRedirection:
     """One current MLIL exit and its recovered original-block successor."""
@@ -272,18 +333,114 @@ class DeflattenRedirection:
 
 @dataclass(frozen=True, slots=True)
 class DeflattenPlan:
-    """A complete, declarative batch of dispatcher exit redirections."""
+    """A complete, non-mutating proof for one atomic dispatcher rewrite."""
 
-    redirections: tuple[DeflattenRedirection, ...]
+    kind: DeflattenPlanKind
+    owner_block: BasicBlock
+    exit_redirections: tuple[DeflattenRedirection, ...] = ()
+    state_token: DeflattenStateToken | None = None
+    condition_il: MediumLevelILInstruction | None = None
+    shared_exit_il: MediumLevelILInstruction | None = None
+    state_variable: Variable | None = None
+    true_target_block_start: int | None = None
+    false_target_block_start: int | None = None
+    true_token: DeflattenStateToken | None = None
+    false_token: DeflattenStateToken | None = None
+    replay_condition_il: MediumLevelILInstruction | None = None
+    replay_condition_witness: DeflattenConditionWitness | None = None
     obsolete_state_writes: frozenset[int] = frozenset()
+    obsolete_state_write_witnesses: tuple[DeflattenStateWriteWitness, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.redirections) is not tuple or not self.redirections:
-            raise ProviderContractError("redirections must be a non-empty tuple")
+        if type(self.kind) is not DeflattenPlanKind:
+            raise ProviderContractError("deflatten plan kind must be a DeflattenPlanKind")
+        if self.owner_block is None:
+            raise ProviderContractError("deflatten plan owner block is required")
+        if type(self.exit_redirections) is not tuple or any(
+            type(redirection) is not DeflattenRedirection
+            for redirection in self.exit_redirections
+        ):
+            raise ProviderContractError("exit redirections must be a tuple of DeflattenRedirection")
         if type(self.obsolete_state_writes) is not frozenset or any(
             type(index) is not int or index < 0 for index in self.obsolete_state_writes
         ):
             raise ProviderContractError("obsolete_state_writes must be non-negative instruction indexes")
+        if type(self.obsolete_state_write_witnesses) is not tuple or any(
+            type(witness) is not DeflattenStateWriteWitness
+            for witness in self.obsolete_state_write_witnesses
+        ):
+            raise ProviderContractError(
+                "obsolete state write witnesses must be a tuple of DeflattenStateWriteWitness"
+            )
+        if (
+            frozenset(witness.instr_index for witness in self.obsolete_state_write_witnesses)
+            != self.obsolete_state_writes
+            or len(self.obsolete_state_write_witnesses) != len(self.obsolete_state_writes)
+        ):
+            raise ProviderContractError(
+                "obsolete_state_writes must exactly match their owned write witnesses"
+            )
+
+        if self.kind is DeflattenPlanKind.UNCONDITIONAL:
+            if not self.exit_redirections:
+                raise ProviderContractError("unconditional plans require at least one exit redirection")
+            if type(self.state_token) is not DeflattenStateToken:
+                raise ProviderContractError("unconditional plans require one state token")
+            if len({item.target_block_start for item in self.exit_redirections}) != 1:
+                raise ProviderContractError("unconditional exits must replay to one target")
+            if any(
+                value is not None
+                for value in (
+                    self.condition_il,
+                    self.shared_exit_il,
+                    self.state_variable,
+                    self.true_target_block_start,
+                    self.false_target_block_start,
+                    self.true_token,
+                    self.false_token,
+                    self.replay_condition_il,
+                    self.replay_condition_witness,
+                )
+            ):
+                raise ProviderContractError("unconditional plans cannot carry conditional evidence")
+            return
+
+        if self.state_token is not None:
+            raise ProviderContractError("conditional plans cannot carry an unconditional state token")
+        if self.condition_il is None:
+            raise ProviderContractError("conditional plans require the source IF instruction")
+        if self.state_variable is None:
+            raise ProviderContractError("conditional plans require the dispatcher state variable")
+        if self.true_target_block_start is None or self.false_target_block_start is None:
+            raise ProviderContractError("conditional plans require both recovered targets")
+        _require_address("true_target_block_start", self.true_target_block_start)
+        _require_address("false_target_block_start", self.false_target_block_start)
+        if type(self.true_token) is not DeflattenStateToken or type(self.false_token) is not DeflattenStateToken:
+            raise ProviderContractError("conditional plans require both state tokens")
+        if (
+            self.true_token.width != self.false_token.width
+            or self.true_token.value == self.false_token.value
+        ):
+            raise ProviderContractError("conditional state tokens must be distinct and equally wide")
+
+        if self.kind is DeflattenPlanKind.CONDITIONAL_ARM_EXITS:
+            if not self.exit_redirections or self.shared_exit_il is not None:
+                raise ProviderContractError("arm-exit plans require only exact exit redirections")
+            if self.replay_condition_il is not None or self.replay_condition_witness is not None:
+                raise ProviderContractError("arm-exit plans cannot replay a shared condition")
+            return
+        if self.kind is DeflattenPlanKind.CONDITIONAL_SHARED_EXIT:
+            if self.exit_redirections or self.shared_exit_il is None:
+                raise ProviderContractError("shared-exit plans require one shared exit and no arm exits")
+            if (self.replay_condition_il is None) != (self.replay_condition_witness is None):
+                raise ProviderContractError("shared condition replay requires both IL and witness")
+            if self.replay_condition_witness is not None and type(self.replay_condition_witness) is not DeflattenConditionWitness:
+                raise ProviderContractError("shared-exit replay witness must be a DeflattenConditionWitness")
+            return
+        if self.exit_redirections or self.shared_exit_il is not None:
+            raise ProviderContractError("conditional shortcuts replace only their source IF")
+        if self.replay_condition_il is not None or self.replay_condition_witness is not None:
+            raise ProviderContractError("conditional shortcuts cannot carry a shared replay witness")
 
 
 BranchSlot: TypeAlias = Callable[[BranchTargetQuery], CompleteBatch[BranchTargetFact] | Inconclusive]
@@ -341,6 +498,10 @@ __all__ = (
     "CorrelatedStorePlan",
     "CorrelatedStoreArm",
     "StringRecoveryFact",
+    "DeflattenPlanKind",
+    "DeflattenStateToken",
+    "DeflattenConditionWitness",
+    "DeflattenStateWriteWitness",
     "DeflattenPlan",
     "DeflattenRedirection",
     "CompleteBatch",

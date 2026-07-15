@@ -203,7 +203,8 @@ provider 可消费核心提供的只读稳定证据，要求候选 callee 已成
   因此去平坦化不携带第二个条件发现器。独立 OBB 状态变量只有经一个等宽整变量 latch 才能映射到
   比较变量，该 latch 必须是唯一调度器入口且至少由两个独立目标头区域共享。该显式 latch
   之外的反向边界扩展只接受 `NOP* + GOTO` 块。provider 可调用核心的完整证明 API 生成
-  `DeflattenPlan`，但核心不提供隐式默认样本算法。
+  `DeflattenPlan`，但核心不提供隐式默认样本算法。外部槽位只能返回冻结强类型计划；裸
+  dict 只保留在 bundled legacy profile 的私有迁移适配器内，不能越过 provider 边界。
 - `rewrite_redirections_mlil` 使用 MLIL copy-transform 后端构建原子替换：每个私有调度器
   出口重定向至其唯一已证明目标；条件转移明确选择私有臂出口改写、私有共享尾出口改写或
   完整证明的条件捷径。共享出口默认用具体 state token 路由；原 IF 为直接变量/常量比较且其

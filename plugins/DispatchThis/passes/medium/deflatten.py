@@ -14,6 +14,15 @@ from binaryninja import (
 )
 
 from ...helpers import mlil as mlil_helpers
+from ...semantics import (
+    DeflattenConditionWitness,
+    DeflattenPlan,
+    DeflattenPlanKind,
+    DeflattenRedirection,
+    DeflattenStateToken,
+    DeflattenStateWriteWitness,
+    ProviderContractError,
+)
 from ...utils.log import log_info, log_warn, log_debug
 from .rewrite import copied_label_for_source, copy_mlil_with_instruction_rewrites
 
@@ -1281,6 +1290,171 @@ def _valid_state_token(token):
     )
 
 
+def _target_start(target):
+    """Accept a legacy BasicBlock or a typed plan's exact block-start witness."""
+    return target if _valid_instruction_index(target) else getattr(target, "start", None)
+
+
+def _state_token_fact(token):
+    if not _valid_state_token(token):
+        return None
+    try:
+        return DeflattenStateToken(token[0], token[1])
+    except ProviderContractError:
+        return None
+
+
+def _legacy_cleanup_witnesses(redirection):
+    cleanup = redirection.get("obsolete_state_writes")
+    witnesses = redirection.get("obsolete_state_write_witnesses")
+    if (
+        type(cleanup) is not set
+        or any(not _valid_instruction_index(index) for index in cleanup)
+        or not isinstance(witnesses, Mapping)
+        or set(witnesses) != cleanup
+    ):
+        return None
+    try:
+        return (
+            frozenset(cleanup),
+            tuple(
+                DeflattenStateWriteWitness(index, witnesses[index])
+                for index in sorted(cleanup)
+            ),
+        )
+    except ProviderContractError:
+        return None
+
+
+def _legacy_exit_redirections(raw_exits, target):
+    target_start = _target_start(target)
+    if not _valid_instruction_index(target_start) or not isinstance(raw_exits, (tuple, list)):
+        return None
+    try:
+        return tuple(DeflattenRedirection(exit_il, target_start) for exit_il in raw_exits)
+    except ProviderContractError:
+        return None
+
+
+def _legacy_condition_witness(raw):
+    if raw is None:
+        return None
+    if not isinstance(raw, (tuple, list)) or len(raw) != 4:
+        return None
+    operation, state_variable, token, variable_on_left = raw
+    token_fact = _state_token_fact(token)
+    if token_fact is None:
+        return None
+    try:
+        return DeflattenConditionWitness(
+            operation,
+            state_variable,
+            token_fact,
+            variable_on_left,
+        )
+    except ProviderContractError:
+        return None
+
+
+def _typed_plan_from_legacy_redirection(redirection):
+    """Privately translate bundled raw plans into the public frozen contract."""
+    if not isinstance(redirection, Mapping):
+        return None
+    cleanup = _legacy_cleanup_witnesses(redirection)
+    if cleanup is None:
+        return None
+    obsolete_state_writes, obsolete_state_write_witnesses = cleanup
+    owner_block = redirection.get("obb")
+    kind = redirection.get("kind")
+
+    if kind == "uncond":
+        exits = _legacy_exit_redirections(
+            redirection.get("exit_jumps"),
+            redirection.get("target_bb"),
+        )
+        state_token = _state_token_fact(redirection.get("state_token"))
+        if exits is None or state_token is None:
+            return None
+        try:
+            return DeflattenPlan(
+                DeflattenPlanKind.UNCONDITIONAL,
+                owner_block,
+                exit_redirections=exits,
+                state_token=state_token,
+                obsolete_state_writes=obsolete_state_writes,
+                obsolete_state_write_witnesses=obsolete_state_write_witnesses,
+            )
+        except ProviderContractError:
+            return None
+
+    if kind != "if_else":
+        return None
+    mode = redirection.get("rewrite_mode")
+    true_token = _state_token_fact(redirection.get("true_token"))
+    false_token = _state_token_fact(redirection.get("false_token"))
+    true_target = _target_start(redirection.get("true_target"))
+    false_target = _target_start(redirection.get("false_target"))
+    if (
+        true_token is None
+        or false_token is None
+        or not _valid_instruction_index(true_target)
+        or not _valid_instruction_index(false_target)
+    ):
+        return None
+    common = {
+        "owner_block": owner_block,
+        "condition_il": redirection.get("if_il"),
+        "state_variable": redirection.get("state_var"),
+        "true_target_block_start": true_target,
+        "false_target_block_start": false_target,
+        "true_token": true_token,
+        "false_token": false_token,
+        "obsolete_state_writes": obsolete_state_writes,
+        "obsolete_state_write_witnesses": obsolete_state_write_witnesses,
+    }
+    try:
+        if mode == "arm_exits":
+            raw_exits = redirection.get("exit_targets")
+            if not isinstance(raw_exits, (tuple, list)):
+                return None
+            exits = tuple(
+                DeflattenRedirection(exit_il, _target_start(target))
+                for exit_il, target in raw_exits
+            )
+            return DeflattenPlan(
+                DeflattenPlanKind.CONDITIONAL_ARM_EXITS,
+                exit_redirections=exits,
+                **common,
+            )
+        if mode == "shared_exit":
+            shared_condition = redirection.get("shared_condition")
+            witness = _legacy_condition_witness(
+                redirection.get("shared_condition_witness")
+            )
+            if (shared_condition is None) != (witness is None):
+                return None
+            return DeflattenPlan(
+                DeflattenPlanKind.CONDITIONAL_SHARED_EXIT,
+                shared_exit_il=redirection.get("shared_exit"),
+                replay_condition_il=shared_condition,
+                replay_condition_witness=witness,
+                **common,
+            )
+        if mode == "condition":
+            return DeflattenPlan(DeflattenPlanKind.CONDITIONAL_SHORTCUT, **common)
+    except (ProviderContractError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _typed_plans_from_legacy_redirections(redirections):
+    """Keep legacy profile dicts behind one private, fail-closed migration seam."""
+    if not isinstance(redirections, (tuple, list)):
+        return None
+    plans = tuple(_typed_plan_from_legacy_redirection(item) for item in redirections)
+    return None if any(plan is None for plan in plans) else plans
+
+
 def _expression_witness(expr):
     expr_index = getattr(expr, "expr_index", None)
     operation = _op(expr)
@@ -1328,7 +1502,7 @@ def _source_operand_witness(source):
 def _replacements_for_redirection(redirection):
     kind = redirection.get("kind")
     if kind == "uncond":
-        target_start = getattr(redirection.get("target_bb"), "start", None)
+        target_start = _target_start(redirection.get("target_bb"))
         if not _valid_instruction_index(target_start):
             return None
 
@@ -1350,8 +1524,8 @@ def _replacements_for_redirection(redirection):
         rewrite_mode = redirection.get("rewrite_mode")
         if rewrite_mode == "shared_exit":
             jump = redirection.get("shared_exit")
-            true_start = getattr(redirection.get("true_target"), "start", None)
-            false_start = getattr(redirection.get("false_target"), "start", None)
+            true_start = _target_start(redirection.get("true_target"))
+            false_start = _target_start(redirection.get("false_target"))
             if (
                 _op(jump) != M.MLIL_GOTO
                 or not _valid_instruction_index(true_start)
@@ -1423,7 +1597,7 @@ def _replacements_for_redirection(redirection):
                 jump_index = getattr(jump, "instr_index", None)
                 if not _valid_instruction_index(jump_index):
                     return None
-                target_start = getattr(target, "start", None)
+                target_start = _target_start(target)
                 if not _valid_instruction_index(target_start):
                     return None
                 prior = seen.get(jump_index)
@@ -1445,8 +1619,8 @@ def _replacements_for_redirection(redirection):
         if rewrite_mode != "condition":
             return None
 
-        true_start = getattr(redirection.get("true_target"), "start", None)
-        false_start = getattr(redirection.get("false_target"), "start", None)
+        true_start = _target_start(redirection.get("true_target"))
+        false_start = _target_start(redirection.get("false_target"))
         if not all(
             _valid_instruction_index(start)
             for start in (true_start, false_start)
@@ -1519,6 +1693,167 @@ def _same_instruction_identity(left, right):
     )
 
 
+def _current_blocks_by_start(mlil):
+    try:
+        blocks = tuple(mlil.basic_blocks)
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — current MLIL witness boundary must fail closed.
+        return None
+    by_start = {}
+    for block in blocks:
+        start = getattr(block, "start", None)
+        if not _valid_instruction_index(start) or start in by_start:
+            return None
+        by_start[start] = block
+    return by_start
+
+
+def _typed_cleanup_witnesses(plan):
+    cleanup = getattr(plan, "obsolete_state_writes", None)
+    witnesses = getattr(plan, "obsolete_state_write_witnesses", None)
+    if (
+        type(cleanup) is not frozenset
+        or any(not _valid_instruction_index(index) for index in cleanup)
+        or type(witnesses) is not tuple
+        or any(type(witness) is not DeflattenStateWriteWitness for witness in witnesses)
+    ):
+        return None
+    mapped = {witness.instr_index: witness.state_write_il for witness in witnesses}
+    if len(mapped) != len(witnesses) or set(mapped) != cleanup:
+        return None
+    return set(cleanup), mapped
+
+
+def _typed_plan_redirection(mlil, plan):
+    """Revalidate a public plan, then lower it into the private rewrite backend."""
+    if type(plan) is not DeflattenPlan:
+        return None
+    blocks = _current_blocks_by_start(mlil)
+    owner_start = getattr(plan.owner_block, "start", None)
+    if blocks is None or not _valid_instruction_index(owner_start) or owner_start not in blocks:
+        return None
+    cleanup = _typed_cleanup_witnesses(plan)
+    if cleanup is None:
+        return None
+    cleanup_indices, cleanup_witnesses = cleanup
+    if (
+        type(plan.exit_redirections) is not tuple
+        or any(type(item) is not DeflattenRedirection for item in plan.exit_redirections)
+    ):
+        return None
+
+    if plan.kind is DeflattenPlanKind.UNCONDITIONAL:
+        token = plan.state_token
+        exits = plan.exit_redirections
+        if (
+            type(token) is not DeflattenStateToken
+            or not exits
+            or any(item.target_block_start not in blocks for item in exits)
+            or len({item.target_block_start for item in exits}) != 1
+        ):
+            return None
+        return {
+            "kind": "uncond",
+            "obb": blocks[owner_start],
+            "exit_jumps": tuple(item.exit_il for item in exits),
+            "target_bb": exits[0].target_block_start,
+            "state_token": (token.value, token.width),
+            "obsolete_state_writes": cleanup_indices,
+            "obsolete_state_write_witnesses": cleanup_witnesses,
+        }
+
+    if plan.kind not in {
+        DeflattenPlanKind.CONDITIONAL_ARM_EXITS,
+        DeflattenPlanKind.CONDITIONAL_SHARED_EXIT,
+        DeflattenPlanKind.CONDITIONAL_SHORTCUT,
+    }:
+        return None
+    if (
+        plan.condition_il is None
+        or plan.state_variable is None
+        or type(plan.true_token) is not DeflattenStateToken
+        or type(plan.false_token) is not DeflattenStateToken
+        or not _valid_instruction_index(plan.true_target_block_start)
+        or not _valid_instruction_index(plan.false_target_block_start)
+        or plan.true_target_block_start not in blocks
+        or plan.false_target_block_start not in blocks
+        or plan.true_token.width != plan.false_token.width
+        or plan.true_token.value == plan.false_token.value
+    ):
+        return None
+    current_condition = _current_plan_source(mlil, plan.condition_il)
+    if current_condition is None:
+        return None
+    common = {
+        "kind": "if_else",
+        "obb": blocks[owner_start],
+        "if_il": current_condition,
+        "state_var": plan.state_variable,
+        "true_target": plan.true_target_block_start,
+        "false_target": plan.false_target_block_start,
+        "true_token": (plan.true_token.value, plan.true_token.width),
+        "false_token": (plan.false_token.value, plan.false_token.width),
+        "obsolete_state_writes": cleanup_indices,
+        "obsolete_state_write_witnesses": cleanup_witnesses,
+    }
+    if plan.kind is DeflattenPlanKind.CONDITIONAL_ARM_EXITS:
+        exits = plan.exit_redirections
+        if (
+            not exits
+            or plan.shared_exit_il is not None
+            or plan.replay_condition_il is not None
+            or plan.replay_condition_witness is not None
+            or any(item.target_block_start not in blocks for item in exits)
+        ):
+            return None
+        return {
+            **common,
+            "rewrite_mode": "arm_exits",
+            "exit_targets": tuple(
+                (item.exit_il, item.target_block_start) for item in exits
+            ),
+        }
+    if plan.kind is DeflattenPlanKind.CONDITIONAL_SHARED_EXIT:
+        if plan.exit_redirections or plan.shared_exit_il is None:
+            return None
+        replay_il = plan.replay_condition_il
+        replay_witness = plan.replay_condition_witness
+        if (replay_il is None) != (replay_witness is None):
+            return None
+        if replay_il is not None:
+            current_replay = _current_plan_source(mlil, replay_il)
+            if (
+                type(replay_witness) is not DeflattenConditionWitness
+                or current_replay is None
+                or not _same_instruction_identity(current_replay, current_condition)
+            ):
+                return None
+            shared_condition = current_replay
+            shared_condition_witness = (
+                replay_witness.operation,
+                replay_witness.comparison_variable,
+                (replay_witness.bound_token.value, replay_witness.bound_token.width),
+                replay_witness.state_variable_on_left,
+            )
+        else:
+            shared_condition = None
+            shared_condition_witness = None
+        return {
+            **common,
+            "rewrite_mode": "shared_exit",
+            "shared_exit": plan.shared_exit_il,
+            "shared_condition": shared_condition,
+            "shared_condition_witness": shared_condition_witness,
+        }
+    if (
+        plan.exit_redirections
+        or plan.shared_exit_il is not None
+        or plan.replay_condition_il is not None
+        or plan.replay_condition_witness is not None
+    ):
+        return None
+    return {**common, "rewrite_mode": "condition"}
+
+
 def rewrite_redirections_mlil(ctx, mlil, redirections):
     """Create an atomic replacement MLIL function for planned redirections."""
     if mlil is None:
@@ -1531,7 +1866,11 @@ def rewrite_redirections_mlil(ctx, mlil, redirections):
     replacements = {}
     cleanup_witnesses = {}
     for redirection in redirections:
-        if not isinstance(redirection, dict):
+        if type(redirection) is DeflattenPlan:
+            redirection = _typed_plan_redirection(mlil, redirection)
+            if redirection is None:
+                return None, 0
+        elif not isinstance(redirection, dict):
             return None, 0
         if redirection.get("rewrite_mode") == "shared_exit":
             shared_condition = redirection.get("shared_condition")
@@ -1578,6 +1917,8 @@ def rewrite_redirections_mlil(ctx, mlil, redirections):
                 or current.instr_index != instr_index
                 or _op(current) not in (M.MLIL_SET_VAR, M.MLIL_STORE)
             ):
+                return None, 0
+            if instr_index in cleanup_witnesses:
                 return None, 0
             cleanup_witnesses[instr_index] = current
 

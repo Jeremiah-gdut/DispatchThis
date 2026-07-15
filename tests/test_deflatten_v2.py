@@ -713,6 +713,46 @@ def test_compute_redirections_recovers_unconditional_transition_from_dispatcher_
     )
 
 
+def test_typed_deflatten_plan_reuses_the_atomic_rewrite_backend(monkeypatch):
+    func, obb1, obb2 = build_uncond_function()
+    raw_plan = next(
+        plan
+        for plan in compute_redirections(FakeBv(), func)
+        if plan["kind"] == "uncond" and plan["obb"] is obb1
+    )
+    plans = deflatten._typed_plans_from_legacy_redirections((raw_plan,))
+    ctx = types.SimpleNamespace(mlil=func.mlil, llil="context-llil")
+    copied = CopiedMlil()
+
+    def fake_copy(ctx_arg, replacements, mlil=None):
+        assert ctx_arg is ctx
+        assert mlil is func.mlil
+        assert set(replacements) == {obb1[10].instr_index, obb1[11].instr_index}
+        copied.outputs[obb1[10].instr_index] = replacements[obb1[10].instr_index](copied, obb1[10])
+        copied.outputs[obb1[11].instr_index] = replacements[obb1[11].instr_index](copied, obb1[11])
+        return copied, 2
+
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        fake_copy,
+        raising=False,
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(ctx, func.mlil, plans)
+
+    assert new_mlil is copied
+    assert applied == 1
+    assert copied.outputs == {
+        obb1[10].instr_index: ("nop", ("loc", obb1[10].expr_index)),
+        obb1[11].instr_index: (
+            "goto",
+            ("copied-label", obb2.start),
+            ("loc", obb1[11].expr_index),
+        ),
+    }
+
+
 def test_compute_redirections_recovers_transition_before_shared_state_latch():
     func, obb1, obb2, shared_tail, commit = build_shared_state_latch_function()
 
@@ -2434,6 +2474,49 @@ def test_rewrite_rejects_stale_cleanup_write_operand(monkeypatch):
             "obsolete_state_writes": {13},
             "obsolete_state_write_witnesses": {13: recorded},
         }],
+    )
+
+    assert new_mlil is None
+    assert applied == 0
+
+
+def test_rewrite_rejects_duplicate_plan_owned_cleanup_witness(monkeypatch):
+    func, chooser, obb2, obb3 = build_cond_function()
+    uncond_jump = goto(200)
+    source = Block(200, uncond_jump)
+    uncond_jump.function = func.mlil
+    func.mlil._by_index[200] = uncond_jump
+    monkeypatch.setattr(
+        deflatten,
+        "copy_mlil_with_instruction_rewrites",
+        lambda *_args, **_kwargs: pytest.fail(
+            "duplicate cleanup witness reached copy backend"
+        ),
+    )
+
+    new_mlil, applied = rewrite_redirections_mlil(
+        types.SimpleNamespace(mlil=func.mlil, llil="context-llil"),
+        func.mlil,
+        [
+            {
+                "kind": "uncond",
+                "exit_jumps": (uncond_jump,),
+                "target_bb": obb2,
+                "obb": source,
+                "obsolete_state_writes": {13},
+                "obsolete_state_write_witnesses": {13: func.mlil[13]},
+            },
+            {
+                "kind": "if_else",
+                "rewrite_mode": "condition",
+                "if_il": chooser[10],
+                "true_target": obb2,
+                "false_target": obb3,
+                "obb": chooser,
+                "obsolete_state_writes": {13},
+                "obsolete_state_write_witnesses": {13: func.mlil[13]},
+            },
+        ],
     )
 
     assert new_mlil is None

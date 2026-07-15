@@ -8,6 +8,7 @@ from typing import Protocol
 
 from binaryninja import Settings, SettingsScope
 
+from .passes.medium.deflatten import _typed_plans_from_legacy_redirections
 from .semantics import (
     CORE_API_VERSION,
     SLOT_NAMES,
@@ -15,6 +16,7 @@ from .semantics import (
     BranchTargetQuery,
     CompleteBatch,
     CorrelatedStorePlan,
+    DeflattenPlan,
     Inconclusive,
     ProviderContractError,
     SampleSemantics,
@@ -36,6 +38,8 @@ class _LegacyProfile(Protocol):
     description: str
 
     def resolve_branch_gadget(self, bv, llil, known_targets): ...
+
+    def plan_deflatten_redirections(self, bv, function, mlil): ...
 
     correlated_stores: object
 
@@ -238,10 +242,27 @@ def _legacy_correlated_stores(profile: _LegacyProfile, query):
     return result
 
 
+def _legacy_deflatten(profile: _LegacyProfile, query):
+    """Translate the bundled raw planner without exposing dicts to providers."""
+    try:
+        raw_plans = profile.plan_deflatten_redirections(
+            query.view,
+            query.function,
+            query.mlil,
+        )
+    except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — legacy plugin boundary; never let it mutate core state.
+        return Inconclusive(f"legacy deflatten planner failed: {error}")
+    plans = _typed_plans_from_legacy_redirections(raw_plans)
+    if plans is None or any(type(plan) is not DeflattenPlan for plan in plans):
+        return Inconclusive("legacy deflatten planner returned an invalid plan")
+    return CompleteBatch(plans)
+
+
 def _register_legacy_profile(profile: _LegacyProfile) -> bool:
     """Install one bundled profile behind the private migration adapter."""
 
     correlated_stores = getattr(profile, "correlated_stores", None)
+    deflatten = getattr(profile, "plan_deflatten_redirections", None)
     provider = SampleSemantics(
         provider_id=profile.id,
         name=profile.name,
@@ -250,6 +271,11 @@ def _register_legacy_profile(profile: _LegacyProfile) -> bool:
         correlated_stores=(
             (lambda query: _legacy_correlated_stores(profile, query))
             if correlated_stores is not None
+            else None
+        ),
+        deflatten=(
+            (lambda query: _legacy_deflatten(profile, query))
+            if deflatten is not None
             else None
         ),
     )
