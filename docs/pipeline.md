@@ -247,8 +247,11 @@ provider 可消费核心提供的只读稳定证据，要求候选 callee 已成
 | `provider_id` | 当前函数证据对应的显式 BinaryView provider 绑定；绑定改变时使该函数全部阶段证据失效 |
 | `branch.stable` | 间接分支解析已到达当前不动点 |
 | `branch.receipts` | `{source_addr: (target_addr, ...)}`，已针对当前用户分支元数据验证 |
+| `branch.conditions` | `{source_addr: {anchor, true_target, false_target}}`，有效 provider condition receipt；anchor 仅保存可在当前 LLIL 重绑的标量位置 |
+| `branch.condition_failures` | `{source_addr: reason_value}`，当前 condition failure 的稳定去重原因；显示 detail 不持久化 |
 | `branch.cleanup_done` | 当前分支回执的分支目标解码清理已无剩余改动 |
 | `branch.cleanup_overlay_ready` | 仅当前 translator/MLIL overlay：已 NOP 且局部收敛，允许下游作一次空根复证 |
+| `branch.cleanup_overlay_sources` | 仅本次实际安装 condition translation 的源地址，用于同一 MLIL 的 cleanup 空根复证；不保存跨重新分析的索引 |
 | `call.stable` | provider 扫描可信，受支持的单目标改写/类型调整已收敛且当前无待提交调用修改；不表示所有间接调用均已解析 |
 | `call.receipts` | `{call_addr: target_addr}`，调用类型决策已完成：读回具体覆盖，或当前调用点证据无需覆盖 |
 | `call.targets` | `{call_addr: target_addr}`，验证为当前调用目标，包含无需类型调整的调用 |

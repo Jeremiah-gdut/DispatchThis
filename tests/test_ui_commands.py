@@ -36,9 +36,13 @@ class FakeFunc:
     def __init__(self):
         self.reanalyzed = 0
         self.session_data = {}
+        self.removed_tags = []
 
     def reanalyze(self):
         self.reanalyzed += 1
+
+    def remove_auto_address_tags_of_type(self, source, tag_type):
+        self.removed_tags.append((source, tag_type))
 
 
 class FakePluginCommand:
@@ -107,6 +111,26 @@ def test_use_provider_clears_function_evidence_without_storing_provider_identity
     assert pending_writes == [(bv, frozenset({0x1000}), settings)]
     assert func.session_data == {}
     assert func.reanalyzed == 1
+
+
+def test_invalidating_evidence_removes_condition_failure_tags():
+    func = FakeFunc()
+    func.session_data["dispatchthis_workflow_state"] = {
+        "branch": {
+            "conditions": {
+                0x1000: {},
+                0x2000: {},
+            },
+        },
+    }
+
+    ui._invalidate_function_evidence(func)
+
+    assert func.removed_tags == [
+        (0x1000, "DispatchThis Condition Failure"),
+        (0x2000, "DispatchThis Condition Failure"),
+    ]
+    assert func.session_data == {}
 
 
 def test_register_ui_commands_adds_one_selector_and_seven_pass_commands(monkeypatch):

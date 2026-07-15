@@ -371,6 +371,56 @@ def test_legacy_profile_provenance_is_removed_from_function_state():
     assert refreshed.branch_targets() == {0x1000: (0x2000,)}
 
 
+def _condition_receipt_data(owner_source=0x900, operand=1, true_target=0x2000, false_target=0x3000):
+    return {
+        "anchor": {
+            "owner_source": owner_source,
+            "source_operand": operand,
+            "operand_path": (("dest", -1),),
+            "operation": "LLIL_CMP_NE",
+            "width": 1,
+        },
+        "true_target": true_target,
+        "false_target": false_target,
+    }
+
+
+def test_condition_receipts_only_gate_current_matching_branch_evidence():
+    state = FunctionWorkflowState(FakeFunction())
+    state.mark_branch_applied(0x1000, (0x2000, 0x3000))
+    receipt = _condition_receipt_data()
+
+    assert state.set_condition_receipt(0x1000, receipt)
+    assert state.condition_receipts == {0x1000: receipt}
+    assert state.conditions_complete()
+
+    assert state.record_condition_failure(0x1000, "mlil_mapping_missing")
+    assert not state.conditions_complete()
+    assert not state.record_condition_failure(0x1000, "mlil_mapping_missing")
+    assert state.record_condition_failure(0x1000, "target_mismatch")
+    assert state.clear_condition_failure(0x1000)
+    assert state.conditions_complete()
+
+    assert state.set_condition_receipt(0x1000, None)
+    assert state.condition_receipts == {}
+    assert state.conditions_complete()
+
+
+def test_condition_receipt_and_overlay_sources_invalidate_with_branch_change():
+    state = FunctionWorkflowState(FakeFunction())
+    state.mark_branch_applied(0x1000, (0x2000, 0x3000))
+    state.set_condition_receipt(0x1000, _condition_receipt_data())
+
+    state.mark_branch_cleanup_overlay_ready((0x1000,))
+    assert state.branch_cleanup_overlay_sources() == (0x1000,)
+
+    assert state.mark_branch_applied(0x1000, (0x2000, 0x4000))
+    assert state.condition_receipts == {}
+    assert state.condition_failures == {}
+    assert state.branch_cleanup_overlay_sources() == ()
+    assert state.branch_cleanup_needed()
+
+
 if __name__ == "__main__":
     test_branch_receipts_gate_repeated_mutations_and_invalidate_calls()
     test_call_receipts_gate_repeated_adjustments()

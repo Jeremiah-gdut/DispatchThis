@@ -81,12 +81,68 @@ def test_external_branch_provider_submits_once_then_converges(monkeypatch):
 
     assert received_queries == [semantics.BranchTargetQuery(bv, func, llil)]
     assert func.submitted == [(0x1000, ((bv.arch, 0x2000),))]
+    assert func.session_data["dispatchthis_workflow_state"]["branch"]["conditions"] == {}
 
     jumps.clear()
     workflow.resolve_jumps_llil(_context(func, bv, llil))
 
     assert func.submitted == [(0x1000, ((bv.arch, 0x2000),))]
     assert func.session_data["dispatchthis_workflow_state"]["branch"]["stable"] is True
+
+
+def test_conditional_fact_is_captured_before_branch_metadata_mutation(monkeypatch):
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_conditions")
+    workflow = load_plugin_module("plugins.DispatchThis.workflow")
+    func = FakeFunction()
+    bv = FakeView(func)
+    llil = types.SimpleNamespace()
+    jump = _jump()
+    condition = types.SimpleNamespace()
+    receipt = branch_conditions.ConditionReceipt(
+        0x1000,
+        branch_conditions.ILAnchor(0x900, 1, (("dest", -1),), "LLIL_CMP_NE", 1),
+        0x3000,
+        0x2000,
+    )
+    provider = semantics.SampleSemantics(
+        provider_id="conditional-provider",
+        name="Conditional provider",
+        api_version=semantics.CORE_API_VERSION,
+        branch_targets=lambda _query: semantics.CompleteBatch(
+            (
+                semantics.BranchTargetFact(
+                    jump,
+                    (0x2000, 0x3000),
+                    condition=condition,
+                    true_target=0x3000,
+                    false_target=0x2000,
+                ),
+            )
+        ),
+    )
+    captured = []
+
+    def capture(current_llil, source, current_condition, true_target, false_target):
+        captured.append((current_llil, source, current_condition, true_target, false_target, tuple(func.submitted)))
+        return receipt
+
+    monkeypatch.setattr(workflow, "active_provider", lambda _bv: provider)
+    monkeypatch.setattr(workflow, "_ensure_analysis_settings", lambda _func: True)
+    monkeypatch.setattr(workflow, "capture_condition_receipt", capture, raising=False)
+    monkeypatch.setattr(workflow, "iter_llil_indirect_jumps", lambda _llil: (jump,))
+    monkeypatch.setattr(workflow, "validate_current_branch_plans", lambda _bv, _llil, plans: plans)
+    monkeypatch.setattr(workflow, "apply_llil_jump_rewrites", lambda *_args: 0)
+    monkeypatch.setattr(workflow, "clear_resolved_indirect_branch_tags", lambda _func: None)
+    monkeypatch.setattr(workflow, "_schedule_tag_cleanup", lambda *_args: None)
+
+    workflow.resolve_jumps_llil(_context(func, bv, llil))
+
+    assert captured == [(llil, 0x1000, condition, 0x3000, 0x2000, ())]
+    assert func.submitted == [(0x1000, ((bv.arch, 0x2000), (bv.arch, 0x3000)))]
+    assert func.session_data["dispatchthis_workflow_state"]["branch"]["conditions"] == {
+        0x1000: receipt.as_data(),
+    }
 
 
 def test_missing_provider_binding_refuses_branch_work_without_a_fallback(monkeypatch):
@@ -200,6 +256,7 @@ def test_multitarget_branch_fact_submits_once_without_an_llil_rewrite(monkeypatc
     ]
     assert rewrites == []
     assert func.session_data["dispatchthis_workflow_state"]["branch"]["stable"] is True
+    assert func.session_data["dispatchthis_workflow_state"]["branch"]["conditions"] == {}
 
 
 def test_inconclusive_or_invalid_external_branch_result_creates_no_receipt(monkeypatch):

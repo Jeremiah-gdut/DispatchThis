@@ -5,6 +5,7 @@ from __future__ import annotations
 import binaryninja
 from binaryninja import Settings, SettingsScope
 
+from .passes.medium.branch_conditions import clear_condition_failure_tags
 from .providers import (
     ProviderBindingError,
     _pending_reproof_functions,
@@ -57,6 +58,10 @@ def _clear_deflatten_stability(bv, func=None) -> None:
 
 
 def _invalidate_function_evidence(func) -> None:
+    branch = func.session_data.get(ROOT_KEY, {}).get("branch", {})
+    conditions = branch.get("conditions", {}) if type(branch) is dict else {}
+    if type(conditions) is dict:
+        clear_condition_failure_tags(func, conditions)
     func.session_data.pop(ROOT_KEY, None)
 
 

@@ -2,7 +2,7 @@
 
 
 ROOT_KEY = "dispatchthis_workflow_state"
-CLEANUP_RECEIPT_VERSION = 6
+CLEANUP_RECEIPT_VERSION = 7
 
 
 def _fresh_state():
@@ -10,8 +10,11 @@ def _fresh_state():
         "branch": {
             "stable": False,
             "receipts": {},
+            "conditions": {},
+            "condition_failures": {},
             "cleanup_done": False,
             "cleanup_overlay_ready": False,
+            "cleanup_overlay_sources": (),
             "cleanup_version": CLEANUP_RECEIPT_VERSION,
         },
         "call": {
@@ -37,6 +40,49 @@ def _targets_tuple(targets):
     return tuple(sorted(set(targets)))
 
 
+def _valid_uint(value):
+    return type(value) is int and value >= 0
+
+
+def _valid_condition_receipt(data):
+    if type(data) is not dict:
+        return False
+    anchor = data.get("anchor")
+    if type(anchor) is not dict:
+        return False
+    path = anchor.get("operand_path")
+    if type(path) is not tuple or not all(
+        type(step) is tuple
+        and len(step) == 2
+        and type(step[0]) is str
+        and type(step[1]) is int
+        and step[1] >= -1
+        for step in path
+    ):
+        return False
+    true_target = data.get("true_target")
+    false_target = data.get("false_target")
+    return (
+        _valid_uint(anchor.get("owner_source"))
+        and _valid_uint(anchor.get("source_operand"))
+        and type(anchor.get("operation")) is str
+        and bool(anchor["operation"])
+        and type(anchor.get("width")) is int
+        and anchor["width"] >= 0
+        and _valid_uint(true_target)
+        and _valid_uint(false_target)
+        and true_target != false_target
+    )
+
+
+def _overlay_sources(sources):
+    if type(sources) not in (tuple, list, set, frozenset):
+        return ()
+    if not all(_valid_uint(source) for source in sources):
+        return ()
+    return tuple(sorted(set(sources)))
+
+
 def _user_branch_targets(func):
     by_source = {}
     for branch in getattr(func, "indirect_branches", ()):
@@ -58,15 +104,43 @@ def _normalize_state(data):
     branch = data.setdefault("branch", {})
     branch.setdefault("stable", False)
     branch.setdefault("receipts", {})
+    branch.setdefault("conditions", {})
+    branch.setdefault("condition_failures", {})
     # An instruction index only identifies one MLIL generation. Never reuse a
     # persisted cleanup root after reanalysis can assign that index to other IL.
     branch.pop("cleanup_roots", None)
     branch.setdefault("cleanup_done", False)
     branch.setdefault("cleanup_overlay_ready", False)
+    branch.setdefault("cleanup_overlay_sources", ())
     if branch.get("cleanup_version") != CLEANUP_RECEIPT_VERSION:
+        branch["stable"] = False
+        branch["conditions"] = {}
+        branch["condition_failures"] = {}
         branch["cleanup_done"] = False
         branch["cleanup_overlay_ready"] = False
+        branch["cleanup_overlay_sources"] = ()
         branch["cleanup_version"] = CLEANUP_RECEIPT_VERSION
+    conditions = branch["conditions"]
+    if (
+        type(conditions) is not dict
+        or any(
+            not _valid_uint(source) or not _valid_condition_receipt(receipt)
+            for source, receipt in conditions.items()
+        )
+    ):
+        branch["conditions"] = {}
+        branch["condition_failures"] = {}
+        branch["stable"] = False
+    failures = branch["condition_failures"]
+    if (
+        type(failures) is not dict
+        or any(
+            source not in branch["conditions"] or type(reason) is not str or not reason
+            for source, reason in failures.items()
+        )
+    ):
+        branch["condition_failures"] = {}
+    branch["cleanup_overlay_sources"] = _overlay_sources(branch["cleanup_overlay_sources"])
     call = data.setdefault("call", {})
     call.setdefault("stable", False)
     call.setdefault("receipts", {})
@@ -125,6 +199,14 @@ class FunctionWorkflowState:
     def branch_receipts(self):
         return self.data["branch"]["receipts"]
 
+    @property
+    def condition_receipts(self):
+        return self.data["branch"]["conditions"]
+
+    @property
+    def condition_failures(self):
+        return self.data["branch"]["condition_failures"]
+
     def branch_targets(self):
         return {source: _targets_tuple(targets) for source, targets in self.branch_receipts.items()}
 
@@ -165,9 +247,11 @@ class FunctionWorkflowState:
         targets = _targets_tuple(targets)
         previous = self.branch_receipts.get(source)
         self.branch_receipts[source] = targets
+        if previous is not None and previous != targets:
+            self.condition_receipts.pop(source, None)
+            self.condition_failures.pop(source, None)
         self.data["branch"]["stable"] = False
-        self.data["branch"]["cleanup_done"] = False
-        self.data["branch"]["cleanup_overlay_ready"] = False
+        self.invalidate_branch_cleanup()
         self.invalidate_calls()
         return previous is not None and previous != targets
 
@@ -191,13 +275,15 @@ class FunctionWorkflowState:
     def mark_branch_cleanup_done(self):
         self.data["branch"]["cleanup_done"] = True
         self.data["branch"]["cleanup_overlay_ready"] = False
+        self.data["branch"]["cleanup_overlay_sources"] = ()
         self.data["branch"]["cleanup_version"] = CLEANUP_RECEIPT_VERSION
 
     def invalidate_branch_cleanup(self):
         self.data["branch"]["cleanup_done"] = False
         self.data["branch"]["cleanup_overlay_ready"] = False
+        self.data["branch"]["cleanup_overlay_sources"] = ()
 
-    def mark_branch_cleanup_overlay_ready(self):
+    def mark_branch_cleanup_overlay_ready(self, sources=()):
         """Permit one downstream current-MLIL cleanup fixed-point check.
 
         This is set only after the branch translator NOPs and settles decode
@@ -207,12 +293,67 @@ class FunctionWorkflowState:
         """
         self.data["branch"]["cleanup_done"] = False
         self.data["branch"]["cleanup_overlay_ready"] = True
+        self.data["branch"]["cleanup_overlay_sources"] = _overlay_sources(sources)
 
     def clear_branch_cleanup_overlay_ready(self):
         self.data["branch"]["cleanup_overlay_ready"] = False
+        self.data["branch"]["cleanup_overlay_sources"] = ()
 
     def branch_cleanup_overlay_ready(self):
         return bool(self.data["branch"].get("cleanup_overlay_ready", False))
+
+    def branch_cleanup_overlay_sources(self):
+        return self.data["branch"]["cleanup_overlay_sources"]
+
+    def set_condition_receipt(self, source, receipt):
+        """Replace one condition receipt only when the provider fact truly changed."""
+        if not _valid_uint(source):
+            return False
+        if receipt is None:
+            changed = source in self.condition_receipts or source in self.condition_failures
+            self.condition_receipts.pop(source, None)
+            self.condition_failures.pop(source, None)
+        elif not _valid_condition_receipt(receipt):
+            return False
+        elif self.condition_receipts.get(source) == receipt:
+            return False
+        else:
+            self.condition_receipts[source] = receipt
+            self.condition_failures.pop(source, None)
+            changed = True
+        if changed:
+            self.invalidate_branch_cleanup()
+        return changed
+
+    def record_condition_failure(self, source, reason):
+        """Store only the stable reason used to deduplicate user diagnostics."""
+        if (
+            source not in self.condition_receipts
+            or type(reason) is not str
+            or not reason
+            or self.condition_failures.get(source) == reason
+        ):
+            return False
+        self.condition_failures[source] = reason
+        self.invalidate_branch_cleanup()
+        return True
+
+    def clear_condition_failure(self, source):
+        if source not in self.condition_failures:
+            return False
+        self.condition_failures.pop(source, None)
+        return True
+
+    def conditions_complete(self):
+        """All active condition receipts must still match their branch evidence."""
+        for source, receipt in self.condition_receipts.items():
+            if source in self.condition_failures:
+                return False
+            if self.branch_receipts.get(source) != _targets_tuple(
+                (receipt["true_target"], receipt["false_target"])
+            ):
+                return False
+        return True
 
     @property
     def call_receipts(self):

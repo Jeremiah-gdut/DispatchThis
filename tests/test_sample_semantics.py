@@ -66,6 +66,25 @@ def test_branch_fact_requires_a_nonempty_canonical_target_tuple():
         semantics.BranchTargetFact(jump_il=jump, targets=(0x3000, 0x2000))
 
 
+def test_degenerate_conditional_branch_fact_must_be_an_unconditional_single_target():
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    jump = type("Jump", (), {})()
+
+    unconditional = semantics.BranchTargetFact(jump_il=jump, targets=(0x2000,))
+
+    assert unconditional.condition is None
+    assert unconditional.true_target is None
+    assert unconditional.false_target is None
+    with pytest.raises(ValueError, match="distinct branch arms"):
+        semantics.BranchTargetFact(
+            jump_il=jump,
+            targets=(0x2000,),
+            condition=object(),
+            true_target=0x2000,
+            false_target=0x2000,
+        )
+
+
 def test_active_provider_never_falls_back_to_a_registered_provider():
     semantics = load_plugin_module("plugins.DispatchThis.semantics")
     providers = load_plugin_module("plugins.DispatchThis.providers")

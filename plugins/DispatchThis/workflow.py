@@ -10,7 +10,15 @@ from .passes.medium.indirect_calls import (
     validate_current_call_facts,
     validate_current_call_plans,
 )
-from .passes.medium.branch_conditions import translate_indirect_branch_conditions
+from .passes.medium.branch_conditions import (
+    ConditionFailureReason,
+    ConditionReceipt,
+    ConditionTranslationStatus,
+    capture_condition_receipt,
+    clear_condition_failure_tags,
+    publish_condition_failure_tag,
+    translate_indirect_branch_conditions,
+)
 from .passes.medium.phase_cleanup import settle_cleanup_decode
 from .passes.medium.string_decrypt import apply_decrypted_string_comments
 from .helpers.mlil import iter_indirect_calls, set_roots_before
@@ -97,13 +105,15 @@ def _clear_deflatten_stability(bv, func):
 
 def branch_cleanup_current(mlil, state):
     """Whether this MLIL overlay has no branch decode assignments left to clean."""
+    if not state.conditions_complete():
+        return False
     if not state.branch_cleanup_needed():
         return True
     if not state.branch_cleanup_overlay_ready():
         return False
     return not set_roots_before(
         mlil,
-        state.branch_receipts,
+        state.branch_cleanup_overlay_sources(),
     )
 
 
@@ -418,16 +428,27 @@ def _provider_branch_plan(bv, func, llil, provider):
     plans = []
     sources = set()
     for fact in result.facts:
-        if (
-            type(fact) is not BranchTargetFact
-            or fact.condition is not None
-            or fact.true_target is not None
-            or fact.false_target is not None
-        ):
+        if type(fact) is not BranchTargetFact:
             log_warn(f"[workflow] {func.name}: branch provider returned an unsupported fact")
             return None
         jump_il = fact.jump_il
         targets = fact.targets
+        condition_receipt = None
+        if fact.condition is None:
+            if fact.true_target is not None or fact.false_target is not None:
+                log_warn(f"[workflow] {func.name}: branch provider returned an unsupported fact")
+                return None
+        else:
+            condition_receipt = capture_condition_receipt(
+                llil,
+                getattr(jump_il, "address", None),
+                fact.condition,
+                fact.true_target,
+                fact.false_target,
+            )
+            if condition_receipt is None:
+                log_warn(f"[workflow] {func.name}: branch provider returned an unanchorable condition")
+                return None
         source = getattr(jump_il, "address", None)
         dest_expr_index = getattr(getattr(jump_il, "dest", None), "expr_index", None)
         if (
@@ -444,14 +465,15 @@ def _provider_branch_plan(bv, func, llil, provider):
             log_warn(f"[workflow] {func.name}: branch provider returned a malformed fact")
             return None
         sources.add(source)
-        plans.append(
-            {
-                "source": source,
-                "dest_expr_index": dest_expr_index,
-                "targets": targets,
-                "jump_il": jump_il,
-            }
-        )
+        plan = {
+            "source": source,
+            "dest_expr_index": dest_expr_index,
+            "targets": targets,
+            "jump_il": jump_il,
+        }
+        if condition_receipt is not None:
+            plan["condition_receipt"] = condition_receipt
+        plans.append(plan)
 
     try:
         validated = validate_current_branch_plans(bv, llil, plans)
@@ -497,12 +519,32 @@ def _provider_reproof_settled(bv, func, state, resolved_targets):
     return updated is not None and func.start not in updated
 
 
-def _submit_branch_mutations(bv, func, state, resolved_targets):
+def _handoff_condition_receipt(func, state, plan):
+    receipt = plan.get("condition_receipt")
+    changed = state.set_condition_receipt(
+        plan["source"],
+        None if receipt is None else receipt.as_data(),
+    )
+    if changed:
+        clear_condition_failure_tags(func, (plan["source"],))
+    return changed
+
+
+def _submit_branch_mutations(bv, func, state, plans):
     submitted = {}
     attempted = False
-    for source, targets in state.branch_updates_for(resolved_targets).items():
+    for plan in plans:
+        source = plan["source"]
+        targets = plan["targets"]
+        needs_update = source in state.branch_updates_for({source: targets})
+        if not needs_update:
+            _handoff_condition_receipt(func, state, plan)
+            continue
         if state.branch_metadata_matches(source, targets):
             changed = state.mark_branch_applied(source, targets)
+            if changed:
+                clear_condition_failure_tags(func, (source,))
+            _handoff_condition_receipt(func, state, plan)
             if changed:
                 log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
             continue
@@ -516,6 +558,9 @@ def _submit_branch_mutations(bv, func, state, resolved_targets):
                 )
                 continue
             changed = state.mark_branch_applied(source, targets)
+            if changed:
+                clear_condition_failure_tags(func, (source,))
+            _handoff_condition_receipt(func, state, plan)
             submitted[source] = targets
             if changed:
                 log_warn(f"[workflow] {func.name}: branch targets changed at {hex(source)}")
@@ -551,7 +596,7 @@ def _converge_branches(
         apply_llil_jump_rewrites(bv, plan_llil, plan)
 
     resolved_targets = {item["source"]: item["targets"] for item in plan}
-    mutations, attempted = _submit_branch_mutations(bv, func, state, resolved_targets)
+    mutations, attempted = _submit_branch_mutations(bv, func, state, plan)
     reproof_settled = _provider_reproof_settled(bv, func, state, resolved_targets)
     if attempted:
         return mutations
@@ -810,30 +855,83 @@ def translate_branches_mlil(ctx: AnalysisContext):
     if mlil is None:
         return
 
-    new_mlil, n, cleanup_roots = translate_indirect_branch_conditions(bv, ctx, mlil)
-    if new_mlil is None:
-        return
-    if n:
-        log_info(f"[workflow] {func.name}: translated {n} indirect branch condition(s)")
-        # Binary Ninja requires an intermediate copy-transform to be installed
-        # before a second MLIL transform can use correct mappings.
-        if not _commit_mlil(ctx, new_mlil):
+    receipts = []
+    for source, data in state.condition_receipts.items():
+        receipt = ConditionReceipt.from_data(source, data)
+        if receipt is None:
+            state.invalidate_branch_cleanup()
+            log_error(f"[workflow] {func.name}: invalid condition receipt @ {hex(source)}")
             return
-        # The Python binding can still expose the pre-transform value through
-        # ``ctx.mlil`` in this callback. The installed copy is the documented
-        # input to the next transform.
-        mlil = new_mlil
+        receipts.append(receipt)
+
+    # A fresh translator attempt must never reuse a prior overlay's cleanup or
+    # implicit success. Current outcomes below are the only condition evidence.
+    state.invalidate_branch_cleanup()
+    batch = translate_indirect_branch_conditions(ctx, ctx.llil, mlil, tuple(receipts))
+
+    def record_results(suppress_shared_failure_diagnostics=False):
+        for result in batch.results:
+            if result.status is ConditionTranslationStatus.FAILED:
+                failure = result.failure
+                if failure is None:
+                    continue
+                changed = state.record_condition_failure(result.source, failure.reason.value)
+                shared_transform_failure = (
+                    suppress_shared_failure_diagnostics
+                    and failure.reason
+                    in {
+                        ConditionFailureReason.COPY_FAILED,
+                        ConditionFailureReason.INSTALL_FAILED,
+                    }
+                )
+                if changed and shared_transform_failure:
+                    # A copy/install failure has one function-level error. Do
+                    # not leave a tag from an earlier, unrelated site failure.
+                    clear_condition_failure_tags(func, (result.source,))
+                elif changed:
+                    publish_condition_failure_tag(bv, func, failure)
+                    log_warn(
+                        f"[workflow] {func.name}: condition @ {hex(failure.source)} "
+                        f"failed ({failure.reason.value}): {failure.detail}"
+                    )
+                continue
+            if state.clear_condition_failure(result.source):
+                clear_condition_failure_tags(func, (result.source,))
+
+    if batch.backend_failed:
+        record_results(suppress_shared_failure_diagnostics=True)
+        state.invalidate_branch_cleanup()
+        log_error(f"[workflow] {func.name}: branch-condition transform failed")
+        return
+
+    if batch.rewrite_sources:
+        if not _commit_mlil(ctx, batch.new_mlil):
+            batch = batch.with_rewrite_failure(
+                ConditionFailureReason.INSTALL_FAILED,
+                "AnalysisContext rejected the atomic branch-condition MLIL install",
+            )
+            record_results(suppress_shared_failure_diagnostics=True)
+            state.invalidate_branch_cleanup()
+            log_error(f"[workflow] {func.name}: branch-condition MLIL install failed")
+            return
+        mlil = batch.new_mlil
+        log_info(
+            f"[workflow] {func.name}: translated "
+            f"{len(batch.rewrite_sources)} indirect branch condition(s)"
+        )
+
+    record_results()
     cleaned = 0
     settled = True
-    branch_cleanup_needed = state.branch_cleanup_needed()
-    if branch_cleanup_needed or state.branch_receipts or cleanup_roots:
-        cleanup_roots.update(set_roots_before(mlil, state.branch_receipts))
-        cleaned, settled = settle_cleanup_decode(mlil, cleanup_roots, "branch")
-    if not settled:
+    if batch.cleanup_roots:
+        cleaned, settled = settle_cleanup_decode(mlil, set(batch.cleanup_roots), "branch")
+    # A failed receipt keeps the function-level branch cleanup receipt open even
+    # when the successfully installed sites had no further decode assignments.
+    if not settled or not state.conditions_complete():
         state.invalidate_branch_cleanup()
     elif cleaned:
-        state.mark_branch_cleanup_overlay_ready()
-    elif branch_cleanup_needed:
+        state.mark_branch_cleanup_overlay_ready(batch.rewrite_sources)
+    else:
         state.mark_branch_cleanup_done()
 
 
@@ -985,6 +1083,8 @@ def deflatten_mlil(ctx: AnalysisContext):
     if not state.call_stable():
         return
     if not state.global_stable():
+        return
+    if not state.conditions_complete():
         return
     if state.call_cleanup_needed():
         return
