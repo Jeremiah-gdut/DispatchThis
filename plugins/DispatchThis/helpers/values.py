@@ -23,7 +23,7 @@ def evaluate_values(
 ):
     """Return every complete concrete value, or Inconclusive without a subset."""
 
-    builder = _GraphBuilder(il, budget)
+    builder = _GraphBuilder(il, budget, policy)
     graph = builder.build(expression)
     if builder.failure is not None:
         return builder.failure

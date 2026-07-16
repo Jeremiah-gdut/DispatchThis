@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from binaryninja import LowLevelILOperation as L, MediumLevelILOperation as M
+from binaryninja import (
+    LowLevelILOperation as L,
+    MediumLevelILOperation as M,
+    RegisterValueType,
+)
 
 
 def _names(*operations):
@@ -30,6 +34,7 @@ SSA_VARIABLES = _names(
     getattr(L, "LLIL_REG_SSA", None),
     getattr(M, "MLIL_VAR_SSA", None),
 )
+SSA_FIELD_VARIABLES = _names(getattr(M, "MLIL_VAR_SSA_FIELD", None))
 PARTIAL_SSA_VARIABLES = _names(getattr(L, "LLIL_REG_SSA_PARTIAL", None))
 NON_SSA_VARIABLES = _names(getattr(M, "MLIL_VAR", None))
 PHIS = _names(getattr(L, "LLIL_REG_PHI", None), getattr(M, "MLIL_VAR_PHI", None))
@@ -163,11 +168,29 @@ CONTROLLED_LOADS = _names(
     getattr(M, "MLIL_LOAD_STRUCT", None),
     getattr(M, "MLIL_LOAD_STRUCT_SSA", None),
 )
+_VSA_CONSTANT_TYPES = frozenset(
+    (RegisterValueType.ConstantValue, RegisterValueType.ConstantPointerValue)
+)
 
 
 def operation_name(expression):
     name = getattr(getattr(expression, "operation", None), "name", None)
     return name if type(name) is str else None
+
+
+def controlled_load_value(expression):
+    """Return one Binary Ninja-proven controlled-load value, if available."""
+
+    if operation_name(expression) not in CONTROLLED_LOADS:
+        return None
+    try:
+        values = expression.possible_values
+    except Exception:  # noqa: BLE001 - Binary Ninja value-set boundary.
+        return None
+    if getattr(values, "type", None) not in _VSA_CONSTANT_TYPES:
+        return None
+    value = getattr(values, "value", None)
+    return value if type(value) is int else None
 
 
 def is_expression(value):

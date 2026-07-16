@@ -11,8 +11,10 @@ from ._values_bnil import (
     PARTIAL_SSA_VARIABLES,
     PHIS,
     SETS,
+    SSA_FIELD_VARIABLES,
     SSA_VARIABLES,
     direct_operands,
+    controlled_load_value,
     mask_for,
     operation_name,
 )
@@ -42,6 +44,8 @@ class _Evaluator:
                 self._evaluate_task(*task[1:])
             elif kind == "mask":
                 self._mask_task(*task[1:])
+            elif kind == "field":
+                self._field_task(*task[1:])
             elif kind == "collect-mask":
                 self._collect_mask_task(*task[1:])
             elif kind == "operands":
@@ -68,7 +72,25 @@ class _Evaluator:
             return
         operation = operation_name(expression)
         next_active = active | {key}
-        if operation in CONSTANTS:
+        resolved_load_values = self.builder.controlled_load_values.get(key)
+        load_value = (
+            None if resolved_load_values is not None else controlled_load_value(expression)
+        )
+        if resolved_load_values is not None:
+            mask = mask_for(expression)
+            if mask is None:
+                self._reject("expression width is unavailable")
+                return
+            self.results[token] = [
+                (value & mask, selections) for value in resolved_load_values
+            ]
+        elif load_value is not None:
+            mask = mask_for(expression)
+            if mask is None:
+                self._reject("expression width is unavailable")
+                return
+            self.results[token] = [(load_value & mask, selections)]
+        elif operation in CONSTANTS:
             value = getattr(expression, "constant", None)
             mask = mask_for(expression)
             if type(value) is not int or mask is None:
@@ -78,6 +100,9 @@ class _Evaluator:
         elif operation in SSA_VARIABLES:
             definition = self.builder.ssa_definition(getattr(expression, "src", None))
             self._schedule_mask(token, expression, definition, selections, next_active)
+        elif operation in SSA_FIELD_VARIABLES:
+            definition = self.builder.ssa_definition(getattr(expression, "src", None))
+            self._schedule_field(token, expression, definition, selections, next_active)
         elif operation in PARTIAL_SSA_VARIABLES:
             definition = self.builder.ssa_definition(
                 getattr(expression, "full_reg", None)
@@ -136,6 +161,18 @@ class _Evaluator:
         self.tasks.append(("mask", token, child, expression))
         self.tasks.append(("evaluate", child, definition, selections, active))
 
+    def _schedule_field(self, token, expression, definition, selections, active):
+        if definition is None:
+            self._reject("required SSA definition is unavailable")
+            return
+        offset = getattr(expression, "offset", None)
+        if type(offset) is not int or offset < 0:
+            self._reject("SSA field offset is unavailable")
+            return
+        child = self._new_token()
+        self.tasks.append(("field", token, child, expression, offset))
+        self.tasks.append(("evaluate", child, definition, selections, active))
+
     def _schedule_many_masked(self, token, expression, jobs):
         children = tuple(self._new_token() for _job in jobs)
         self.tasks.append(("collect-mask", token, children, expression))
@@ -157,6 +194,13 @@ class _Evaluator:
 
     def _mask_task(self, token, child, expression):
         self.results[token] = self._masked(self.results[child], expression)
+
+    def _field_task(self, token, child, expression, offset):
+        shifted = tuple(
+            (value >> (offset * 8), selections)
+            for value, selections in self.results[child]
+        )
+        self.results[token] = self._masked(shifted, expression)
 
     def _collect_mask_task(self, token, children, expression):
         states = []
@@ -243,6 +287,10 @@ class _Evaluator:
             return None
         mask = mask_for(expression)
         if mask is None:
+            if operation_name(expression) in PHIS:
+                # BN reports zero width for some register PHIs. Their typed
+                # consumers still apply the correct mask.
+                return states
             self._reject("expression width is unavailable")
             return None
         return [(value & mask, selections) for value, selections in states]

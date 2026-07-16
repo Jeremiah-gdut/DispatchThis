@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+from binaryninja import RegisterValueType
+
 from complete_values_fakes import Expr, FakeSSA, Var, const, reg, set_reg, values_module
 
 
@@ -130,6 +134,62 @@ def test_known_bnil_operations_cannot_escape_to_value_policy_except_controlled_l
     assert unsupported.reason == "unsupported standard operation MLIL_UNDEF"
     assert load.values == (0x1234,)
     assert calls == [(load_expression, ((0x5000,),))]
+
+
+def test_mlil_ssa_field_extracts_the_exact_field_from_its_definition():
+    values = values_module()
+    source = Var("x9", 3)
+    field = Expr(
+        "MLIL_VAR_SSA_FIELD",
+        src=source,
+        offset=1,
+        size=1,
+    )
+
+    result = values.evaluate_values(
+        None,
+        FakeSSA({source: set_reg(const(0x11223344, size=4))}),
+        field,
+        values.AnalysisBudget(node_limit=32, edge_limit=32),
+    )
+
+    assert result.values == (0x33,)
+
+
+def test_vsa_proven_controlled_load_is_a_leaf_before_its_stack_pointer_is_evaluated():
+    values = values_module()
+    load = Expr("LLIL_LOAD_SSA", src=reg(Var("sp", 2)), size=8)
+    load.possible_values = SimpleNamespace(
+        type=RegisterValueType.ConstantValue,
+        value=0x59,
+    )
+
+    result = _evaluate(values, load)
+
+    assert result.values == (0x59,)
+
+
+def test_policy_can_prove_a_controlled_load_before_its_stack_pointer_is_evaluated():
+    values = values_module()
+    load = Expr("LLIL_LOAD_SSA", src=reg(Var("sp", 2)), size=8)
+    observed = []
+
+    class Policy:
+        def resolve_load(self, expression):
+            observed.append(expression)
+            return values.Handled((0x59,)) if expression is load else values.NotHandled()
+
+        def __call__(self, _expression, _operands):
+            return values.NotHandled()
+
+    result = _evaluate(
+        values,
+        Expr("LLIL_ADD", left=load, right=const(1)),
+        Policy(),
+    )
+
+    assert result.values == (0x5A,)
+    assert observed == [load]
 
 
 def test_value_policy_receives_complete_operands_and_cannot_fall_back_when_it_declines():

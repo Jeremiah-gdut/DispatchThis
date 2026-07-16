@@ -46,6 +46,10 @@ class Block:
     def __init__(self):
         self.incoming_edges = []
         self.outgoing_edges = []
+        self.instructions = []
+
+    def __iter__(self):
+        return iter(self.instructions)
 
 
 class Edge:
@@ -72,12 +76,21 @@ def reg(variable, size=8):
     return Expr("LLIL_REG_SSA", src=variable, size=size)
 
 
-def set_reg(source, block=None):
-    return Expr("LLIL_SET_REG_SSA", src=source, il_basic_block=block)
+def set_reg(source, block=None, dest=None, instr_index=None):
+    attributes = {"src": source, "il_basic_block": block}
+    if dest is not None:
+        attributes["dest"] = dest
+        attributes["detailed_operands"] = (
+            ("dest", dest, "reg_ssa"),
+            ("src", source, "expr"),
+        )
+    if instr_index is not None:
+        attributes["instr_index"] = instr_index
+    return Expr("LLIL_SET_REG_SSA", **attributes)
 
 
-def phi(*sources, block):
-    return Expr("LLIL_REG_PHI", src=sources, il_basic_block=block)
+def phi(*sources, block, size=8):
+    return Expr("LLIL_REG_PHI", src=sources, il_basic_block=block, size=size)
 
 
 def add(left, right, size=8):

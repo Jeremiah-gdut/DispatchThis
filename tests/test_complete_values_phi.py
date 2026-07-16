@@ -49,6 +49,31 @@ def test_sibling_phi_values_follow_exact_raw_cfg_edges_not_operand_order():
     assert {case.sources[0].edges[0] for case in result.cases} == expected_edges
 
 
+def test_zero_width_register_phi_defers_masking_to_its_typed_consumer():
+    values = values_module()
+    left, right, join = Block(), Block(), Block()
+    Edge(left, join)
+    Edge(right, join)
+    left_value, right_value, merged = Var("x0", 0), Var("x0", 1), Var("x0", 2)
+    ssa = FakeSSA(
+        {
+            left_value: set_reg(const(0x40), left),
+            right_value: set_reg(const(0x80), right),
+            merged: phi(left_value, right_value, block=join, size=0),
+        }
+    )
+
+    result = values.evaluate_values(
+        None,
+        ssa,
+        reg(merged, size=8),
+        values.AnalysisBudget(node_limit=30, edge_limit=30),
+    )
+
+    assert type(result) is values.CompleteValues, getattr(result, "reason", None)
+    assert result.values == (0x40, 0x80)
+
+
 def test_forwarded_phi_operand_without_a_direct_edge_owner_is_inconclusive():
     values = values_module()
     origin, left, right, join = Block(), Block(), Block(), Block()
@@ -75,6 +100,82 @@ def test_forwarded_phi_operand_without_a_direct_edge_owner_is_inconclusive():
     assert (
         result.reason == "phi operands cannot be uniquely matched to incoming CFG edges"
     )
+
+
+def test_forwarded_phi_operand_uses_the_only_redefinition_free_predecessor():
+    values = values_module()
+    origin, left, right, join = Block(), Block(), Block(), Block()
+    left_edge = Edge(left, join)
+    right_edge = Edge(right, join)
+    Edge(origin, left)
+    Edge(origin, right)
+    forwarded, direct, merged = Var("x0", 0), Var("x0", 1), Var("x0", 2)
+    forwarded_definition = set_reg(
+        const(1), origin, dest=forwarded, instr_index=0
+    )
+    direct_definition = set_reg(const(2), right, dest=direct, instr_index=0)
+    origin.instructions.append(forwarded_definition)
+    right.instructions.append(direct_definition)
+    ssa = FakeSSA(
+        {
+            forwarded: forwarded_definition,
+            direct: direct_definition,
+            merged: phi(forwarded, direct, block=join),
+        }
+    )
+
+    result = values.evaluate_values(
+        None,
+        ssa,
+        reg(merged),
+        values.AnalysisBudget(node_limit=30, edge_limit=30),
+    )
+
+    assert result.values == (1, 2)
+    assert {case.sources[0].edges[0] for case in result.cases} == {
+        left_edge,
+        right_edge,
+    }
+
+
+def test_one_phi_operand_can_prove_multiple_redefinition_free_predecessors():
+    values = values_module()
+    left, middle, forwarded, join = Block(), Block(), Block(), Block()
+    left_edge = Edge(left, join)
+    middle_edge = Edge(middle, join)
+    forwarded_edge = Edge(forwarded, join)
+    Edge(middle, forwarded)
+    left_value, forwarded_value, merged = Var("x0", 0), Var("x0", 1), Var("x0", 2)
+    left_definition = set_reg(
+        const(1), left, dest=left_value, instr_index=0
+    )
+    forwarded_definition = set_reg(
+        const(2), middle, dest=forwarded_value, instr_index=0
+    )
+    left.instructions.append(left_definition)
+    middle.instructions.append(forwarded_definition)
+    ssa = FakeSSA(
+        {
+            left_value: left_definition,
+            forwarded_value: forwarded_definition,
+            merged: phi(left_value, forwarded_value, block=join),
+        }
+    )
+
+    result = values.evaluate_values(
+        None,
+        ssa,
+        reg(merged),
+        values.AnalysisBudget(node_limit=30, edge_limit=30),
+    )
+
+    sources = {case.value: case.sources for case in result.cases}
+    assert result.values == (1, 2)
+    assert {source.edges[0] for source in sources[1]} == {left_edge}
+    assert {source.edges[0] for source in sources[2]} == {
+        middle_edge,
+        forwarded_edge,
+    }
 
 
 def test_sibling_phi_ambiguity_is_inconclusive_instead_of_guessing_an_edge():

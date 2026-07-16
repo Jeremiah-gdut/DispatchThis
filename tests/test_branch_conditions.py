@@ -58,6 +58,10 @@ class FakeMLIL:
     def __init__(self, *instructions):
         self.instructions = list(instructions)
         self._by_index = {instruction.instr_index: instruction for instruction in instructions}
+        self.basic_blocks = [
+            types.SimpleNamespace(start=instruction.instr_index)
+            for instruction in instructions
+        ]
         for instruction in instructions:
             instruction.function = self
 
@@ -103,10 +107,20 @@ def _jump_site(
     false_target=0x4000,
     true_index=31,
     false_index=32,
+    true_block_address=None,
+    false_block_address=None,
 ):
     destination = MLILExpr("MLIL_CONST")
-    true_block = MLILExpr("MLIL_NOP", address=true_target, instr_index=true_index)
-    false_block = MLILExpr("MLIL_NOP", address=false_target, instr_index=false_index)
+    true_block = MLILExpr(
+        "MLIL_NOP",
+        address=true_target if true_block_address is None else true_block_address,
+        instr_index=true_index,
+    )
+    false_block = MLILExpr(
+        "MLIL_NOP",
+        address=false_target if false_block_address is None else false_block_address,
+        instr_index=false_index,
+    )
     jump = MLILExpr(
         "MLIL_JUMP_TO",
         address=source,
@@ -199,6 +213,98 @@ def test_rejects_ambiguous_current_mlil_mapping_without_fallback():
     assert translated.status is branch_conditions.ConditionTranslationStatus.FAILED
     assert translated.failure.reason is branch_conditions.ConditionFailureReason.MLIL_MAPPING_AMBIGUOUS
     assert result.rewrite_sources == frozenset()
+
+
+def test_selects_unique_nested_condition_mapping_over_its_parent(monkeypatch):
+    root, condition = _condition_tree()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(root),
+        0x2000,
+        condition,
+        0x3000,
+        0x4000,
+    )
+    jump, true_block, false_block = _jump_site()
+    mlil = FakeMLIL(jump, true_block, false_block)
+    current_condition = MLILExpr("MLIL_CMP_NE")
+    parent = MLILExpr(
+        "MLIL_SET_VAR",
+        detailed_operands=[("src", current_condition, "MediumLevelILInstruction")],
+    )
+    current_condition.function = mlil
+    parent.function = mlil
+    condition.mlils = [current_condition, parent]
+    copied = _copy_backend(monkeypatch, mlil)
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(),
+        FakeLLIL(root),
+        mlil,
+        (receipt,),
+    )
+
+    assert result.results[0].status is branch_conditions.ConditionTranslationStatus.REWRITE_READY
+    assert result.rewrite_sources == frozenset({0x2000})
+    assert copied.copied == [current_condition]
+
+
+def test_uses_target_map_block_starts_when_instruction_addresses_differ(monkeypatch):
+    root, condition = _condition_tree()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(root),
+        0x2000,
+        condition,
+        0x3000,
+        0x4000,
+    )
+    jump, true_block, false_block = _jump_site(
+        true_block_address=0x3010,
+        false_block_address=0x4010,
+    )
+    mlil = FakeMLIL(jump, true_block, false_block)
+    current_condition = MLILExpr("MLIL_CMP_NE")
+    current_condition.function = mlil
+    condition.mlils = [current_condition]
+    copied = _copy_backend(monkeypatch, mlil)
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(),
+        FakeLLIL(root),
+        mlil,
+        (receipt,),
+    )
+
+    assert result.results[0].status is branch_conditions.ConditionTranslationStatus.REWRITE_READY
+    assert result.rewrite_sources == frozenset({0x2000})
+    assert copied.replacements[0][1:3] == ("label:31", "label:32")
+
+
+def test_rejects_target_map_index_that_is_not_a_current_block_start():
+    root, condition = _condition_tree()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(root),
+        0x2000,
+        condition,
+        0x3000,
+        0x4000,
+    )
+    jump, true_block, false_block = _jump_site()
+    mlil = FakeMLIL(jump, true_block, false_block)
+    mlil.basic_blocks = [types.SimpleNamespace(start=true_block.instr_index)]
+    current_condition = MLILExpr("MLIL_CMP_NE")
+    current_condition.function = mlil
+    condition.mlils = [current_condition]
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(),
+        FakeLLIL(root),
+        mlil,
+        (receipt,),
+    )
+
+    translated = result.results[0]
+    assert translated.status is branch_conditions.ConditionTranslationStatus.FAILED
+    assert translated.failure.reason is branch_conditions.ConditionFailureReason.TARGET_MISMATCH
 
 
 def test_exact_current_if_is_already_satisfied_without_old_cleanup_ownership():

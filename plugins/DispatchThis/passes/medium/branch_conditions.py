@@ -235,6 +235,39 @@ def _current_instructions(il):
         return ()
 
 
+def _unique_current_expressions(expressions):
+    unique = []
+    for expression in expressions:
+        if not any(_same_current_expression(expression, prior) for prior in unique):
+            unique.append(expression)
+    return tuple(unique)
+
+
+def _contains_current_expression(root, target):
+    for path, candidate in _walk_operand_paths(root):
+        if path and _same_current_expression(candidate, target):
+            return True
+    return False
+
+
+def _direct_mlil_mapping(candidates):
+    """Select one direct mapping while rejecting independent alternatives."""
+
+    current = _unique_current_expressions(candidates)
+    if len(current) == 1:
+        return current[0]
+    direct = [
+        candidate
+        for candidate in current
+        if not any(
+            _contains_current_expression(candidate, other)
+            for other in current
+            if not _same_current_expression(candidate, other)
+        )
+    ]
+    return direct[0] if len(direct) == 1 else None
+
+
 def _follow_operand_path(instruction, path):
     current = instruction
     for name, item_index in path:
@@ -346,9 +379,10 @@ def _current_mlil_mapping(llil_condition, mlil):
     ]
     if not current:
         return None, ConditionFailureReason.MLIL_MAPPING_MISSING, "condition has no current MLIL mapping"
-    if len(current) != 1:
+    condition = _direct_mlil_mapping(current)
+    if condition is None:
         return None, ConditionFailureReason.MLIL_MAPPING_AMBIGUOUS, "condition maps to multiple current MLIL expressions"
-    return current[0], None, ""
+    return condition, None, ""
 
 
 def _site_for_source(mlil, source):
@@ -365,19 +399,25 @@ def _site_for_source(mlil, source):
     return sites[0], None, ""
 
 
-def _instruction_for_target(mlil, index, target):
+def _target_block_for_index(mlil, index):
     if not _valid_uint(index):
         return None
     try:
         instruction = mlil[index]
     except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — MLIL instruction lookup boundary.
         return None
-    return (
-        instruction
-        if getattr(instruction, "instr_index", None) == index
-        and getattr(instruction, "address", None) == target
-        else None
-    )
+    if getattr(instruction, "instr_index", None) != index:
+        return None
+    try:
+        blocks = tuple(getattr(mlil, "basic_blocks", ()) or ())
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — MLIL basic-block boundary.
+        return None
+    starts = [
+        block
+        for block in blocks
+        if type(getattr(block, "start", None)) is int and block.start == index
+    ]
+    return instruction if len(starts) == 1 else None
 
 
 def _directed_target_indexes(mlil, receipt, targets):
@@ -388,8 +428,8 @@ def _directed_target_indexes(mlil, receipt, targets):
     if true_index == false_index:
         return None
     if (
-        _instruction_for_target(mlil, true_index, receipt.true_target) is None
-        or _instruction_for_target(mlil, false_index, receipt.false_target) is None
+        _target_block_for_index(mlil, true_index) is None
+        or _target_block_for_index(mlil, false_index) is None
     ):
         return None
     return true_index, false_index

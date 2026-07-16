@@ -75,7 +75,12 @@ class CompleteValues:
 
 
 class ValuePolicy(Protocol):
-    """Pure extension point for sample-specific operations and controlled loads."""
+    """Pure extension point for sample-specific operations and controlled loads.
+
+    A policy may additionally expose ``resolve_load(expression)``.  That optional
+    method receives a controlled load before its address is expanded and returns a
+    ``Handled`` leaf value, ``NotHandled``, or ``Inconclusive``.
+    """
 
     def __call__(
         self, expression, operands: tuple[tuple[int, ...], ...]
