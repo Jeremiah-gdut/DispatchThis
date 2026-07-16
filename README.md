@@ -8,7 +8,7 @@ DispatchThis 是面向单个 ARM64 ELF 样本的 Binary Ninja 工作流核心。
 
 1. 将 `plugins/DispatchThis` 和目标样本插件放入 Binary Ninja 插件目录。开发时可将样本目录软链接到该目录。
 2. 完整重启 Binary Ninja，打开二进制并在函数菜单中选择 **DispatchThis ▸ Select Provider…**。
-3. 从 **DispatchThis** 菜单启用所需阶段；启用下游阶段会自动启用其前置阶段。
+3. 从 **DispatchThis** 菜单启用所需阶段；有依赖的下游阶段会自动启用其前置阶段。
 4. 用 LLIL/MLIL、日志和最终 HLIL 验证结果，不要只以 switch 或注释数量判断成功。
 
 代码变更后应重启 GUI。`bn py exec` 适合验证纯 Python 逻辑，但不能证明已注册 workflow callback 已重新绑定。

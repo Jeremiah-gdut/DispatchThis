@@ -66,6 +66,9 @@ class FakeWorkflow:
     def insert(self, *_args, **_kwargs):
         pass
 
+    def insert_after(self, *_args, **_kwargs):
+        pass
+
     def register(self):
         pass
 

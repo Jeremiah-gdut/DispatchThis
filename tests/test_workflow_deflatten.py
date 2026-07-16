@@ -2229,29 +2229,42 @@ def test_recover_phi_stores_uses_external_plan_after_global_stability():
     correlated_rewrite_results.clear()
 
 
-def test_string_decrypt_waits_for_branch_call_and_global_stability():
+def test_string_decrypt_runs_without_other_phase_stability():
     ctx = FakeContext()
+    active_profile_calls.clear()
     string_decrypt_calls.clear()
+    string_decrypt_results[:] = [[
+        semantics.StringRecoveryFact(0x5000, 0x7000, 0x6000, b"recovered"),
+    ]]
 
     FakeWorkflowState.stable = False
-    FakeWorkflowState.calls_stable = True
-    FakeWorkflowState.globals_stable = True
-    assert workflow.string_decrypt_mlil(ctx) == 0
-
-    FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = False
-    assert workflow.string_decrypt_mlil(ctx) == 0
-
-    FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = False
-    assert workflow.string_decrypt_mlil(ctx) == 0
 
-    assert string_decrypt_calls == []
-    FakeWorkflowState.stable = False
-    FakeWorkflowState.calls_stable = False
+    assert workflow.string_decrypt_mlil(ctx) == 1
+    assert active_profile_calls == []
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
+    assert FakeWorkflowState.cleanup_invalidated is False
+    string_decrypt_results.clear()
 
 
-def test_string_decrypt_does_not_require_deflatten_stability():
+def test_string_decrypt_does_not_construct_phase_state(monkeypatch):
+    def fail_phase_state(*_args, **_kwargs):
+        raise AssertionError("string recovery must not construct phase state")
+
+    monkeypatch.setattr(workflow, "FunctionWorkflowState", fail_phase_state)
+    string_decrypt_calls.clear()
+    string_decrypt_results[:] = [[
+        semantics.StringRecoveryFact(0x5000, 0x7000, 0x6000, b"recovered"),
+    ]]
+    ctx = FakeContext()
+
+    assert workflow.string_decrypt_mlil(ctx) == 1
+    assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
+    string_decrypt_results.clear()
+
+
+def test_string_decrypt_does_not_invalidate_cleanup_receipts():
     FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = True
     FakeWorkflowState.globals_stable = True
@@ -2265,9 +2278,9 @@ def test_string_decrypt_does_not_require_deflatten_stability():
     ctx = FakeContext()
 
     assert workflow.string_decrypt_mlil(ctx) == 2
-    assert active_profile_calls == [ctx.view]
+    assert active_profile_calls == []
     assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
-    assert FakeWorkflowState.cleanup_invalidated is True
+    assert FakeWorkflowState.cleanup_invalidated is False
     assert "dispatchthis_mlil_stable" not in ctx.view.session_data
     FakeWorkflowState.stable = False
     FakeWorkflowState.calls_stable = False
@@ -2285,7 +2298,7 @@ def test_string_decrypt_leaves_cleanup_receipts_when_comments_are_unchanged():
     ctx = FakeContext()
 
     assert workflow.string_decrypt_mlil(ctx) == 0
-    assert active_profile_calls == [ctx.view]
+    assert active_profile_calls == []
     assert string_decrypt_calls == [(ctx.view, ctx.function, ctx.mlil, frozenset())]
     assert FakeWorkflowState.cleanup_invalidated is False
     FakeWorkflowState.stable = False

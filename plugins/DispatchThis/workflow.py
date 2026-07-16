@@ -149,12 +149,19 @@ def _apply_deflatten(ctx, bv, func, provider, mlil):
     return True
 
 
-def _active_provider_state(bv, func):
-    """Bind one callback run to the explicit view provider and function state."""
+def _bound_provider(bv, func):
+    """Return the explicit view provider, logging an unavailable binding."""
     try:
-        provider = active_provider(bv)
+        return active_provider(bv)
     except ProviderBindingError as error:
         log_warn(f"[workflow] {func.name}: provider binding unavailable: {error}")
+        return None
+
+
+def _active_provider_state(bv, func):
+    """Bind one callback run to the explicit view provider and function state."""
+    provider = _bound_provider(bv, func)
+    if provider is None:
         return None, None, None
     legacy = _legacy_profile(provider.provider_id)
     pending_reproof = _pending_reproof_functions(bv)
@@ -1147,16 +1154,10 @@ def string_decrypt_mlil(ctx: AnalysisContext):
 
     if bv.arch.name != "aarch64":
         return 0
-    provider, _legacy, state = _active_provider_state(bv, func)
-    if provider is None or state is None:
+    provider = _bound_provider(bv, func)
+    if provider is None:
         return 0
     if not _ensure_analysis_settings(func):
-        return 0
-    if not state.branch_stable(func):
-        return 0
-    if not state.call_stable():
-        return 0
-    if not state.global_stable():
         return 0
 
     mlil = ctx.mlil
@@ -1165,10 +1166,7 @@ def string_decrypt_mlil(ctx: AnalysisContext):
     facts = _provider_string_facts(bv, func, mlil, provider)
     if facts is None:
         return 0
-    annotated = apply_decrypted_string_comments(func, facts)
-    if annotated:
-        state.invalidate_cleanup()
-    return annotated
+    return apply_decrypted_string_comments(func, facts)
 
 
 def deflatten_mlil(ctx: AnalysisContext):

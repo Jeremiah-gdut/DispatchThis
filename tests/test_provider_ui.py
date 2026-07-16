@@ -70,7 +70,7 @@ def test_enabling_deflatten_enables_only_its_transitive_prerequisites():
     assert settings.STRING_RECOVERY_SETTING not in enabled_keys
 
 
-def test_disabling_global_data_disables_every_dependent_pass():
+def test_disabling_global_data_leaves_string_recovery_enabled():
     ui = load_plugin_module("plugins.DispatchThis.ui")
     settings = load_plugin_module("plugins.DispatchThis.settings")
     func = FakeFunction(0x1000)
@@ -90,11 +90,27 @@ def test_disabling_global_data_disables_every_dependent_pass():
         settings.GLOBAL_DATA_SETTING,
         settings.BRANCH_CONDITIONS_SETTING,
         settings.CORRELATED_STORES_SETTING,
-        settings.STRING_RECOVERY_SETTING,
         settings.DEFLATTEN_SETTING,
     ]
     assert configured.get_bool(settings.BRANCH_TARGETS_SETTING, func)
     assert configured.get_bool(settings.CALL_TARGETS_SETTING, func)
+    assert configured.get_bool(settings.STRING_RECOVERY_SETTING, func)
+
+
+def test_enabling_string_recovery_has_no_prerequisites():
+    ui = load_plugin_module("plugins.DispatchThis.ui")
+    settings = load_plugin_module("plugins.DispatchThis.settings")
+    func = FakeFunction(0x1000)
+    bv = FakeView([func])
+    configured = FakeSettings()
+
+    assert ui.set_function_pass(bv, func, settings.STRING_RECOVERY_SETTING, True, configured, reanalyze=False)
+
+    assert [
+        key
+        for kind, key, value, resource, _scope in configured.writes
+        if kind == "bool" and value and resource is func
+    ] == [settings.STRING_RECOVERY_SETTING]
 
 
 def test_provider_change_is_view_scoped_and_clears_all_function_evidence():

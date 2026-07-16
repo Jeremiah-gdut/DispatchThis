@@ -81,8 +81,8 @@ pattern 推断 cleanup safety。
 
 独立的 deflatten Cleanup workflow activity、函数范围 NOP scan，以及
 `dispatchthis_state_consts` / `dispatchthis_state_vars` view-level map 均已移除。
-`dispatchthis_mlil_stable` 仅保留为跨函数 string decrypt gate：启用 deflatten 的新一轮
-分支翻译先清除当前函数 marker，末尾 deflatten activity 仅在安装 atomic replacement 后发布它。
+`dispatchthis_mlil_stable` 仅保留为跨函数 string decrypt 的可选证据快照：启用 deflatten 的新一轮
+分支翻译先清除当前函数 marker，末尾 deflatten activity 仅在安装 atomic replacement 后发布它。它不阻塞字符串扫描。
 Binary Ninja 重新分析可能抹掉 MLIL overlay，因此后续 workflow run 会依据 current MLIL
 重新计算 plan 与精确 cleanup evidence。
 

@@ -180,6 +180,13 @@ def register_workflows() -> None:
         "core.function.generateMediumLevelIL",
         [branch, "extension.DispatchThis.IndirectPatcher"],
     )
+    workflow.insert_after(
+        "core.function.findStringReferences",
+        [
+            strings,
+            "extension.DispatchThis.StringRecovery",
+        ],
+    )
     workflow.insert(
         "core.function.generateHighLevelIL",
         [
@@ -191,8 +198,6 @@ def register_workflows() -> None:
             "extension.DispatchThis.BranchConditionTranslator",
             stores,
             "extension.DispatchThis.CorrelatedStoreRecovery",
-            strings,
-            "extension.DispatchThis.StringRecovery",
             deflatten,
             "extension.DispatchThis.Deflatten",
         ],

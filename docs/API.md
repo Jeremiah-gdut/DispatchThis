@@ -26,7 +26,7 @@ register_provider(
 | `call_targets` | `CallTargetQuery(view, function, mlil)` | `CallTargetFact` | 完整 call callee 集。核心目前只改写单目标事实。 |
 | `global_data` | `GlobalDataQuery(view, function, mlil)` | `GlobalDataFact` | 精确槽位与完整 Binary Ninja `Type`。 |
 | `correlated_stores` | `CorrelatedStoreQuery(view, function, mlil)` | `CorrelatedStorePlan` | 当前 MLIL 的两臂 STORE 计划。 |
-| `string_recovery` | `StringRecoveryQuery(view, function, mlil, deflattened_function_starts)` | `StringRecoveryFact` | 调用点、源、目的地和 `bytes` 明文。 |
+| `string_recovery` | `StringRecoveryQuery(view, function, mlil, deflattened_function_starts)` | `StringRecoveryFact` | 调用点、源、目的地和 `bytes` 明文；最后一项是可为空的快照，不是执行前置条件。 |
 | `deflatten` | `DeflattenQuery(view, function, mlil)` | `DeflattenPlan` | 原子 dispatcher 重定向计划。 |
 
 每个 slot 的返回类型都是 `CompleteBatch[Fact] | Inconclusive`：
@@ -36,6 +36,8 @@ return CompleteBatch((fact_a, fact_b))
 return CompleteBatch(())
 return Inconclusive("required current-IL definition is unavailable")
 ```
+
+字符串 provider 必须能在 `deflattened_function_starts == frozenset()` 时扫描当前 MLIL；它不能依赖其他 DispatchThis callback 已运行。
 
 不要返回 list、dict 或插件私有结果类型。批次可省略未支持/未证明站点，但返回站点绝不能带部分目标或部分语义；扫描本身无法完成时才返回 `Inconclusive`，它会使核心保持该阶段开放。
 
