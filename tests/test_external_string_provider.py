@@ -83,7 +83,7 @@ def test_external_string_provider_uses_frozen_gate_and_applies_a_partial_batch(m
         0x5000: (
             "manual note\n"
             "[decrypt] manually written text\n"
-            "[DispatchThis decrypt] A\\0\\n\\\\\\x80Z, src=0x7000 dst=0x6000"
+            "[decrypt] A\\0\\n\\\\\\x80Z, src=0x7000 dst=0x6000"
         )
     }
 
@@ -127,5 +127,5 @@ def test_provider_can_skip_unsupported_calls_without_blocking_a_proven_fact(monk
     assert workflow.string_decrypt_mlil(context) == 1
     assert observed_candidates == ["indirect", "multi-target", "unsupported", "proven"]
     assert function.comments[0x5010] == (
-        "[DispatchThis decrypt] recovered, src=0x7010 dst=0x6010"
+        "[decrypt] recovered, src=0x7010 dst=0x6010"
     )

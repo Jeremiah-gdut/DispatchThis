@@ -7,7 +7,8 @@ from ...semantics import StringRecoveryFact
 from ...utils.log import log_debug, log_info
 
 
-_COMMENT_PREFIX: Final = "[DispatchThis decrypt] "
+_COMMENT_PREFIX: Final = "[decrypt] "
+_LEGACY_COMMENT_PREFIX: Final = "[DispatchThis decrypt] "
 _LINE_ENDINGS: Final = (
     "\r\n",
     "\n",
@@ -63,6 +64,16 @@ def _split_line_ending(item: str) -> tuple[str, str]:
     return item, ""
 
 
+def _is_generated_decrypt_line(content: str) -> bool:
+    if content.startswith(_LEGACY_COMMENT_PREFIX):
+        return True
+    return (
+        content.startswith(_COMMENT_PREFIX)
+        and ", src=0x" in content
+        and " dst=0x" in content
+    )
+
+
 def _set_decrypt_comment(func: object, address: int, line: str) -> bool:
     get_comment_at = getattr(func, "get_comment_at", None)
     set_comment_at = getattr(func, "set_comment_at", None)
@@ -74,7 +85,7 @@ def _set_decrypt_comment(func: object, address: int, line: str) -> bool:
     replaced = False
     for item in old.splitlines(keepends=True):
         content, ending = _split_line_ending(item)
-        if content.startswith(_COMMENT_PREFIX):
+        if _is_generated_decrypt_line(content):
             if not replaced:
                 new_lines.append(line + ending)
                 replaced = True

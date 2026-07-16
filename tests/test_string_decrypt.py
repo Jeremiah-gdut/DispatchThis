@@ -29,7 +29,7 @@ def test_decrypt_comment_preserves_manual_lines_and_is_idempotent():
     assert func.comments[0x5000] == (
         "manual note\n"
         "[decrypt] manually written text\n"
-        "[DispatchThis decrypt] glDrawElements, src=0x7000 dst=0x6000"
+        "[decrypt] glDrawElements, src=0x7000 dst=0x6000"
     )
     assert apply_decrypted_string_comments(func, (fact,)) == 0
 
@@ -43,7 +43,7 @@ def test_decrypt_comment_preserves_manual_text_and_existing_line_endings():
     assert func.comments[0x5000] == (
         "manual one\r\n"
         "manual tail\r\n"
-        "[DispatchThis decrypt] plain, src=0x7000 dst=0x6000"
+        "[decrypt] plain, src=0x7000 dst=0x6000"
     )
 
 
@@ -60,13 +60,13 @@ def test_decrypt_comment_updates_and_deduplicates_dispatchthis_lines():
     assert apply_decrypted_string_comments(func, (changed,)) == 1
     assert func.comments[0x5000] == (
         "before\n"
-        "[DispatchThis decrypt] new, src=0x7001 dst=0x6001\n"
+        "[decrypt] new, src=0x7001 dst=0x6001\n"
         "after\n"
     )
     assert _set_decrypt_comment(
         func,
         0x5000,
-        "[DispatchThis decrypt] new, src=0x7001 dst=0x6001",
+        "[decrypt] new, src=0x7001 dst=0x6001",
     ) is False
 
 
