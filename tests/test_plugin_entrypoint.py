@@ -17,7 +17,6 @@ class CapturedWorkflow:
     def __init__(self, _name):
         self.activities = []
         self.insertions = []
-        self.after_insertions = []
         CapturedWorkflow.last = self
 
     def clone(self):
@@ -28,9 +27,6 @@ class CapturedWorkflow:
 
     def insert(self, *args, **kwargs):
         self.insertions.append((args, kwargs))
-
-    def insert_after(self, *args, **kwargs):
-        self.after_insertions.append((args, kwargs))
 
     def register(self):
         pass
@@ -119,20 +115,10 @@ def test_plugin_entrypoint_registers_each_pass_with_its_own_setting(monkeypatch)
         "extension.DispatchThis.BranchConditionTranslator",
         settings.CORRELATED_STORES_SETTING,
         "extension.DispatchThis.CorrelatedStoreRecovery",
+        settings.STRING_RECOVERY_SETTING,
+        "extension.DispatchThis.StringRecovery",
         settings.DEFLATTEN_SETTING,
         "extension.DispatchThis.Deflatten",
-    ]
-    assert CapturedWorkflow.last.after_insertions == [
-        (
-            (
-                "core.function.findStringReferences",
-                [
-                    settings.STRING_RECOVERY_SETTING,
-                    "extension.DispatchThis.StringRecovery",
-                ],
-            ),
-            {},
-        )
     ]
     assert "extension.DispatchThis.Cleanup" not in high_level
     assert CapturedSettings.writes == []

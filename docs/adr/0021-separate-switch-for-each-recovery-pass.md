@@ -14,7 +14,7 @@ pass 会同步关闭所有依赖者，并使其下游恢复证据失效。核心
 
 直接依赖边固定为：间接调用目标依赖间接分支目标；全局数据语义依赖间接调用目标；分支条件
 翻译依赖全局数据语义；路径关联 STORE 只直接依赖全局数据语义；去平坦化只直接依赖分支条件
-翻译。字符串恢复没有 DispatchThis pass 依赖，独立锚定在当前 MLIL。依赖按传递闭包展开，因此
+翻译。字符串恢复没有 DispatchThis pass 依赖，使用其固定工作流位置中的当前 MLIL。依赖按传递闭包展开，因此
 去平坦化同时要求 branch/call/global/translation 开启，但不要求 STORE 或字符串恢复开启；STORE、
 字符串恢复和条件翻译也不互为前置。cleanup、receipt
 和稳定性检查是所属 pass 的内部 readiness gate，不是额外用户开关。
