@@ -185,6 +185,78 @@ def test_captures_nested_scalar_anchor_and_rebinds_after_reanalysis(monkeypatch)
     assert copied.replacements[0][1:3] == ("label:31", "label:32")
 
 
+def test_rebind_accepts_same_location_equivalent_duplicate_comparisons():
+    register = object()
+
+    def condition():
+        left = LLILExpr("LLIL_REG", 0x1000, 0)
+        left.src = register
+        right = LLILExpr("LLIL_CONST", 0x1000, 0)
+        right.constant = 0
+        return LLILExpr(
+            "LLIL_CMP_NE",
+            0x1000,
+            0,
+            operands=(("left", left), ("right", right)),
+        )
+
+    old_condition = condition()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", old_condition),)),
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", condition()),)),
+        ),
+        0x2000,
+        old_condition,
+        0x3000,
+        0x4000,
+    )
+    current_condition = condition()
+    rebound, reason, _detail = branch_conditions._rebind_anchor(
+        FakeLLIL(
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", current_condition),)),
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", condition()),)),
+        ),
+        receipt.anchor,
+    )
+
+    assert reason is None
+    assert rebound is current_condition
+
+
+def test_rebind_keeps_distinct_same_location_comparisons_ambiguous():
+    def condition(register):
+        left = LLILExpr("LLIL_REG", 0x1000, 0)
+        left.src = register
+        right = LLILExpr("LLIL_CONST", 0x1000, 0)
+        right.constant = 0
+        return LLILExpr(
+            "LLIL_CMP_NE",
+            0x1000,
+            0,
+            operands=(("left", left), ("right", right)),
+        )
+
+    old_condition = condition(object())
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", old_condition),))),
+        0x2000,
+        old_condition,
+        0x3000,
+        0x4000,
+    )
+    rebound, reason, _detail = branch_conditions._rebind_anchor(
+        FakeLLIL(
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", condition(object())),)),
+            LLILExpr("LLIL_JUMP", 0x1000, 0, operands=(("dest", condition(object())),)),
+        ),
+        receipt.anchor,
+    )
+
+    assert rebound is None
+    assert reason is branch_conditions.ConditionFailureReason.ANCHOR_AMBIGUOUS
+
+
 def test_rejects_ambiguous_current_mlil_mapping_without_fallback():
     root, condition = _condition_tree()
     receipt = branch_conditions.capture_condition_receipt(

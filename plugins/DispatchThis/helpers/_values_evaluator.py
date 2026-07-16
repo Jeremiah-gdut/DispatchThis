@@ -28,7 +28,7 @@ class _Evaluator:
     def __init__(self, builder, policy):
         self.builder = builder
         self.policy = policy
-        self.paths = _PathCorrelation(builder.phis)
+        self.paths = _PathCorrelation(builder.phis, builder.il)
         self.failure = None
         self.tasks = []
         self.results = {}

@@ -347,6 +347,62 @@ def capture_condition_receipt(llil, source, condition, true_target, false_target
     )
 
 
+def _direct_comparison_operands(condition):
+    operands = _detailed_operands(condition)
+    if len(operands) != 2:
+        return None
+    by_name = {name: value for name, value in operands}
+    if set(by_name) != {"left", "right"}:
+        return None
+    return by_name["left"], by_name["right"]
+
+
+def _same_direct_llil_operand(left, right):
+    operation = _operation_name(left)
+    if operation != _operation_name(right):
+        return False
+    left_width = getattr(left, "size", None)
+    right_width = getattr(right, "size", None)
+    if (
+        type(left_width) is not int
+        or left_width < 0
+        or left_width != right_width
+    ):
+        return False
+    if operation in {"LLIL_REG", "LLIL_REG_SSA"}:
+        left_source = getattr(left, "src", None)
+        right_source = getattr(right, "src", None)
+        return left_source is not None and _same_owner(left_source, right_source)
+    if operation in {"LLIL_CONST", "LLIL_CONST_PTR"}:
+        left_value = getattr(left, "constant", None)
+        right_value = getattr(right, "constant", None)
+        return type(left_value) is int and left_value == right_value
+    return False
+
+
+def _same_direct_llil_comparison(left, right):
+    operation = _operation_name(left)
+    left_width = getattr(left, "size", None)
+    right_width = getattr(right, "size", None)
+    if (
+        operation is None
+        or not operation.startswith("LLIL_CMP_")
+        or operation != _operation_name(right)
+        or type(left_width) is not int
+        or left_width < 0
+        or left_width != right_width
+    ):
+        return False
+    left_operands = _direct_comparison_operands(left)
+    right_operands = _direct_comparison_operands(right)
+    return (
+        left_operands is not None
+        and right_operands is not None
+        and _same_direct_llil_operand(left_operands[0], right_operands[0])
+        and _same_direct_llil_operand(left_operands[1], right_operands[1])
+    )
+
+
 def _rebind_anchor(llil, anchor):
     candidates = []
     for root in _current_instructions(llil):
@@ -359,9 +415,13 @@ def _rebind_anchor(llil, anchor):
             and getattr(candidate, "size", None) == anchor.width
         ):
             candidates.append(candidate)
+    candidates = _unique_current_expressions(candidates)
     if not candidates:
         return None, ConditionFailureReason.ANCHOR_MISSING, "condition anchor is absent from current LLIL"
-    if len(candidates) != 1:
+    if len(candidates) != 1 and not all(
+        _same_direct_llil_comparison(candidates[0], candidate)
+        for candidate in candidates[1:]
+    ):
         return None, ConditionFailureReason.ANCHOR_AMBIGUOUS, "condition anchor matches multiple current LLIL expressions"
     return candidates[0], None, ""
 

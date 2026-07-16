@@ -1,6 +1,7 @@
 from complete_values_fakes import (
     Block,
     Edge,
+    Expr,
     FakeSSA,
     Var,
     add,
@@ -10,6 +11,11 @@ from complete_values_fakes import (
     set_reg,
     values_module,
 )
+
+
+class _EdgeType:
+    def __init__(self, name):
+        self.name = name
 
 
 def _sibling_phi_expression():
@@ -47,6 +53,72 @@ def test_sibling_phi_values_follow_exact_raw_cfg_edges_not_operand_order():
     assert result.values == (11, 22)
     assert tuple(len(case.sources) for case in result.cases) == (1, 1)
     assert {case.sources[0].edges[0] for case in result.cases} == expected_edges
+
+
+def test_duplicate_ssa_condition_phis_do_not_cross_pair_opposite_arms():
+    values = values_module()
+    entry, first_true, first_false, first_join = (Block() for _ in range(4))
+    second_branch, second_true, second_false, second_join = (
+        Block() for _ in range(4)
+    )
+    true = _EdgeType("TrueBranch")
+    false = _EdgeType("FalseBranch")
+    Edge(entry, first_true, true)
+    Edge(entry, first_false, false)
+    Edge(first_true, first_join)
+    Edge(first_false, first_join)
+    Edge(first_join, second_branch)
+    Edge(second_branch, second_true, true)
+    Edge(second_branch, second_false, false)
+    Edge(second_true, second_join)
+    Edge(second_false, second_join)
+
+    predicate = Var("w0", 1)
+    first_flag, second_flag = Var("cond:0", 1), Var("cond:1", 1)
+    def comparison():
+        return Expr(
+            "LLIL_CMP_NE",
+            left=reg(predicate, size=4),
+            right=const(0, size=4),
+            size=4,
+        )
+    first_definition = Expr("LLIL_SET_FLAG_SSA", src=comparison())
+    second_definition = Expr("LLIL_SET_FLAG_SSA", src=comparison())
+    entry.instructions.append(
+        Expr("LLIL_IF", condition=Expr("LLIL_FLAG_SSA", src=first_flag, size=0))
+    )
+    second_branch.instructions.append(
+        Expr("LLIL_IF", condition=Expr("LLIL_FLAG_SSA", src=second_flag, size=0))
+    )
+
+    first_true_value, first_false_value, first_value = (
+        Var("x0", version) for version in range(3)
+    )
+    second_true_value, second_false_value, second_value = (
+        Var("x1", version) for version in range(3)
+    )
+    ssa = FakeSSA(
+        {
+            first_true_value: set_reg(const(0x100), first_true),
+            first_false_value: set_reg(const(0x200), first_false),
+            first_value: phi(first_true_value, first_false_value, block=first_join),
+            second_true_value: set_reg(const(1), second_true),
+            second_false_value: set_reg(const(2), second_false),
+            second_value: phi(
+                second_true_value, second_false_value, block=second_join
+            ),
+        },
+        {first_flag: first_definition, second_flag: second_definition},
+    )
+
+    result = values.evaluate_values(
+        None,
+        ssa,
+        add(reg(first_value), reg(second_value)),
+        values.AnalysisBudget(node_limit=80, edge_limit=80),
+    )
+
+    assert result.values == (0x101, 0x202)
 
 
 def test_zero_width_register_phi_defers_masking_to_its_typed_consumer():

@@ -53,19 +53,24 @@ class Block:
 
 
 class Edge:
-    def __init__(self, source, target):
+    def __init__(self, source, target, edge_type=None):
         self.source = source
         self.target = target
+        self.type = edge_type
         source.outgoing_edges.append(self)
         target.incoming_edges.append(self)
 
 
 class FakeSSA:
-    def __init__(self, definitions):
+    def __init__(self, definitions, flag_definitions=None):
         self.definitions = definitions
+        self.flag_definitions = {} if flag_definitions is None else flag_definitions
 
     def get_ssa_reg_definition(self, variable):
         return self.definitions.get(variable)
+
+    def get_ssa_flag_definition(self, variable):
+        return self.flag_definitions.get(variable)
 
 
 def const(value, size=8):
