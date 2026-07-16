@@ -1156,6 +1156,10 @@ class _ConcreteMemory:
             self.writes[address + offset] = byte
         return True
 
+    def reset(self):
+        self.writes.clear()
+        self.view_reads.clear()
+
 
 class _ConcreteMLIL:
     def __init__(self, view, il, initial_values=()):
@@ -1163,25 +1167,39 @@ class _ConcreteMLIL:
         self.by_index = {}
         self.next_index = {}
         self.values = {}
-        self.valid = True
+        self._program_valid = True
         self.memory = _ConcreteMemory(view, _byte_order(view) or "little")
 
         for instruction in self.instructions:
             index = _instruction_index(instruction)
             if index is None or index in self.by_index:
-                self.valid = False
+                self._program_valid = False
                 continue
             self.by_index[index] = instruction
         self._record_next_indexes()
+        self.reset(initial_values)
+
+    def reset(self, initial_values=()):
+        self.values.clear()
+        self.memory.reset()
+        self.valid = self._program_valid
         for variable, value in initial_values:
             if type(value) is not int:
                 self.valid = False
                 continue
             self.values[_variable_identity(variable)] = value
+        return self.valid
 
     def _record_next_indexes(self):
+        seen_blocks = set()
         for instruction in self.instructions:
             block = getattr(instruction, "il_basic_block", None)
+            if block is None:
+                continue
+            key = _entity_identity(block)
+            if key in seen_blocks:
+                continue
+            seen_blocks.add(key)
             block_instructions = _block_instructions(block)
             for position, current in enumerate(block_instructions[:-1]):
                 following = block_instructions[position + 1]
@@ -1497,6 +1515,7 @@ def _function_at(view, address):
 def _recover_direct_call_strings(query):
     facts = []
     seen = set()
+    decoders = {}
     for call in _direct_calls(query.mlil):
         call_address = getattr(call, "address", None)
         target = _static_pointer_address(getattr(call, "dest", None))
@@ -1511,23 +1530,36 @@ def _recover_direct_call_strings(query):
         ):
             continue
         seen.add(call_address)
-        function = _function_at(query.view, target)
-        try:
-            parameters = tuple(getattr(function, "parameter_vars", ()) or ())
-        except Exception:  # noqa: BLE001 - Binary Ninja function boundary.
+        decoder = decoders.get(target)
+        if decoder is None:
+            function = _function_at(query.view, target)
+            try:
+                parameters = tuple(getattr(function, "parameter_vars", ()) or ())
+            except Exception:  # noqa: BLE001 - Binary Ninja function boundary.
+                decoders[target] = False
+                continue
+            if len(parameters) != 2:
+                decoders[target] = False
+                continue
+            callee_mlil = getattr(function, "medium_level_il", None)
+            instructions = _instructions(callee_mlil)
+            start = _instruction_index(instructions[0]) if instructions else None
+            if start is None:
+                decoders[target] = False
+                continue
+            machine = _ConcreteMLIL(query.view, callee_mlil)
+            if not machine.valid:
+                decoders[target] = False
+                continue
+            decoder = machine, parameters, start
+            decoders[target] = decoder
+        if decoder is False:
             continue
-        if len(parameters) != 2:
+        machine, parameters, start = decoder
+        if not machine.reset(
+            ((parameters[0], arguments[0]), (parameters[1], arguments[1]))
+        ):
             continue
-        callee_mlil = getattr(function, "medium_level_il", None)
-        instructions = _instructions(callee_mlil)
-        start = _instruction_index(instructions[0]) if instructions else None
-        if start is None:
-            continue
-        machine = _ConcreteMLIL(
-            query.view,
-            callee_mlil,
-            ((parameters[0], arguments[0]), (parameters[1], arguments[1])),
-        )
         completed, _exit = machine.run(start)
         plaintext = _textual_plaintext(machine.memory, arguments[0]) if completed else None
         if plaintext is not None:
@@ -1542,10 +1574,11 @@ def _recover_direct_call_strings(query):
     return tuple(facts)
 
 
-def _mlil_blocks(mlil):
+def _loop_layout(mlil):
+    instructions = _instructions(mlil)
     blocks = []
     seen = set()
-    for instruction in _instructions(mlil):
+    for instruction in instructions:
         block = getattr(instruction, "il_basic_block", None)
         if block is None:
             continue
@@ -1553,33 +1586,39 @@ def _mlil_blocks(mlil):
         if key not in seen:
             seen.add(key)
             blocks.append(block)
-    return tuple(blocks)
+    block_by_key = {_entity_identity(block): block for block in blocks}
+    block_by_index = {}
+    for block in blocks:
+        for instruction in _block_instructions(block):
+            index = _instruction_index(instruction)
+            if index is None or index in block_by_index:
+                return None
+            block_by_index[index] = block
+    instruction_by_index = {
+        index: instruction
+        for instruction in instructions
+        for index in (_instruction_index(instruction),)
+        if index is not None
+    }
+    return instructions, block_by_key, block_by_index, instruction_by_index
 
 
-def _loop_context(mlil, store):
+def _loop_context(store, layout):
     store_block = getattr(store, "il_basic_block", None)
     if store_block is None:
         return None
-    blocks = _mlil_blocks(mlil)
-    block_by_key = {_entity_identity(block): block for block in blocks}
+    _instructions, block_by_key, block_by_index, _instruction_by_index = layout
     store_key = _entity_identity(store_block)
     if (
         store_key not in block_by_key
         or _operation_name(_terminal(store_block)) != "MLIL_IF"
     ):
         return None
-    by_index = {}
-    for block in blocks:
-        for instruction in _block_instructions(block):
-            index = _instruction_index(instruction)
-            if index is None or index in by_index:
-                return None
-            by_index[index] = block
     latch = _terminal(store_block)
     targets = []
     for name in ("true", "false"):
         index = getattr(latch, name, None)
-        target = by_index.get(index) if type(index) is int and index >= 0 else None
+        target = block_by_index.get(index) if type(index) is int and index >= 0 else None
         if target is not None:
             targets.append(target)
     if len(targets) != 2 or _same_entity(targets[0], targets[1]):
@@ -1718,6 +1757,36 @@ def _constant_value(expression):
     return _masked_integer(getattr(expression, "constant", None), expression)
 
 
+def _expression_variables(expression):
+    pending = [expression]
+    seen = set()
+    variables = []
+    variable_keys = set()
+    while pending:
+        current = pending.pop()
+        operation = _operation_name(current)
+        if operation is None:
+            continue
+        key = _expression_identity(current)
+        if key in seen:
+            continue
+        seen.add(key)
+        if operation in {"MLIL_VAR", "MLIL_VAR_SSA"}:
+            variable = getattr(current, "src", None)
+            if variable is None:
+                continue
+            variable_key = _entity_identity(variable)
+            if variable_key not in variable_keys:
+                variable_keys.add(variable_key)
+                variables.append(variable)
+            continue
+        for name in ("src", "left", "right", "condition"):
+            child = getattr(current, name, None)
+            if _operation_name(child) is not None:
+                pending.append(child)
+    return tuple(variables)
+
+
 def _same_variable_expression(expression, variable):
     return (
         _operation_name(expression) in {"MLIL_VAR", "MLIL_VAR_SSA"}
@@ -1768,21 +1837,15 @@ def _counter_bound(latch, variable):
     return None
 
 
-def _inline_feedback_pattern(mlil, store):
+def _inline_feedback_pattern(store, layout):
     pointer = _indexed_static_pointer(getattr(store, "dest", None))
     state = _field_variable(getattr(store, "src", None))
-    context = _loop_context(mlil, store) if pointer is not None and state is not None else None
+    context = _loop_context(store, layout) if pointer is not None and state is not None else None
     if context is None:
         return None
     preheader_start, allowed = context
-    instructions = _instructions(mlil)
-    by_index = {
-        index: instruction
-        for instruction in instructions
-        for index in (_instruction_index(instruction),)
-        if index is not None
-    }
-    preheader = getattr(by_index.get(preheader_start), "il_basic_block", None)
+    _instructions, _block_by_key, _block_by_index, instruction_by_index = layout
+    preheader = getattr(instruction_by_index.get(preheader_start), "il_basic_block", None)
     preheader_goto = _terminal(preheader)
     header_start = getattr(preheader_goto, "dest", None)
     store_block = getattr(store, "il_basic_block", None)
@@ -1793,9 +1856,9 @@ def _inline_feedback_pattern(mlil, store):
         or _operation_name(latch) != "MLIL_IF"
     ):
         return None
-    header = getattr(by_index.get(header_start), "il_basic_block", None)
+    header = getattr(instruction_by_index.get(header_start), "il_basic_block", None)
     targets = [
-        getattr(by_index.get(getattr(latch, name, None)), "il_basic_block", None)
+        getattr(instruction_by_index.get(getattr(latch, name, None)), "il_basic_block", None)
         for name in ("true", "false")
     ]
     exits = [target for target in targets if target is not None and not _same_entity(target, header)]
@@ -1878,58 +1941,156 @@ def _consumer_call(mlil, start_block, destination):
     return next(iter(calls.values())) if len(calls) == 1 else None
 
 
+def _block_dominates(source, target):
+    if _same_entity(source, target):
+        return True
+    try:
+        dominators = tuple(getattr(target, "dominators", ()) or ())
+    except Exception:  # noqa: BLE001 - Binary Ninja CFG boundary.
+        return False
+    return any(_same_entity(source, block) for block in dominators)
+
+
+def _loop_extra_initial_states(layout, header_start, allowed, excluded):
+    instructions, _blocks, block_by_index, instruction_by_index = layout
+    header = block_by_index.get(header_start)
+    if header is None:
+        return ()
+    excluded_keys = {_entity_identity(variable) for variable in excluded}
+    read_variables = []
+    read_keys = set()
+    assigned = set()
+    for index in allowed:
+        instruction = instruction_by_index.get(index)
+        if instruction is None:
+            continue
+        for variable in _expression_variables(instruction):
+            key = _entity_identity(variable)
+            if key not in read_keys:
+                read_keys.add(key)
+                read_variables.append(variable)
+        if _operation_name(instruction) in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"}:
+            variable = getattr(instruction, "dest", None)
+            if variable is not None:
+                assigned.add(_entity_identity(variable))
+    states = []
+    for variable in read_variables:
+        key = _entity_identity(variable)
+        if key in excluded_keys or key not in assigned:
+            continue
+        definitions = []
+        for instruction in instructions:
+            index = _instruction_index(instruction)
+            if (
+                index is None
+                or _operation_name(instruction) not in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"}
+                or not _same_entity(getattr(instruction, "dest", None), variable)
+            ):
+                continue
+            value = _constant_value(getattr(instruction, "src", None))
+            block = getattr(instruction, "il_basic_block", None)
+            if (
+                value is not None
+                and block is not None
+                and not _same_entity(block, header)
+                and _block_dominates(block, header)
+            ):
+                definitions.append(value)
+        if len(definitions) == 1:
+            states.append((variable, definitions[0]))
+    return tuple(states)
+
+
+def _replay_inline_pattern(machine, pattern, extra_states=()):
+    (
+        destination,
+        index_variable,
+        state_variable,
+        initial_index,
+        initial_state,
+        count,
+        step,
+        header_start,
+        allowed,
+        store_index,
+        _exit_block,
+    ) = pattern
+    data = bytearray()
+    sources = set()
+    current_index = initial_index
+    current_state = initial_state
+    extra_values = [value for _variable, value in extra_states]
+    for _iteration in range(count):
+        values = [
+            (index_variable, current_index),
+            (state_variable, current_state),
+            *zip((variable for variable, _value in extra_states), extra_values),
+        ]
+        if not machine.reset(values):
+            return None
+        completed, _exit = machine.run(header_start, allowed, store_index)
+        value = machine.memory.writes.get(destination + current_index)
+        current_state = machine._variable_value(state_variable)
+        extra_values = [
+            machine._variable_value(variable)
+            for variable, _value in extra_states
+        ]
+        if (
+            not completed
+            or type(value) is not int
+            or type(current_state) is not int
+            or any(type(extra) is not int for extra in extra_values)
+            or len(machine.memory.view_reads) < 2
+        ):
+            return None
+        data.append(value)
+        sources.update(machine.memory.view_reads)
+        current_index += step
+    return bytes(data), sources
+
+
 def _recover_inline_loop_strings(query):
+    layout = _loop_layout(query.mlil)
+    if layout is None:
+        return ()
+    machine = None
     facts = []
     seen = set()
-    for store in _instructions(query.mlil):
+    for store in layout[0]:
         if (
             _operation_name(store) not in _MLIL_STORE_OPERATIONS
             or getattr(store, "size", None) != 1
         ):
             continue
-        pattern = _inline_feedback_pattern(query.mlil, store)
+        pattern = _inline_feedback_pattern(store, layout)
         if pattern is None:
             continue
-        (
-            destination,
-            index_variable,
-            state_variable,
-            initial_index,
-            initial_state,
-            count,
-            step,
-            header_start,
-            allowed,
-            store_index,
-            exit_block,
-        ) = pattern
+        destination = pattern[0]
+        index_variable = pattern[1]
+        state_variable = pattern[2]
+        header_start = pattern[7]
+        allowed = pattern[8]
+        store_index = pattern[9]
+        exit_block = pattern[10]
         if (destination, store_index) in seen:
             continue
         seen.add((destination, store_index))
-        data = bytearray()
-        sources = set()
-        current_index = initial_index
-        current_state = initial_state
-        for _iteration in range(count):
-            machine = _ConcreteMLIL(
-                query.view,
-                query.mlil,
-                ((index_variable, current_index), (state_variable, current_state)),
+        if machine is None:
+            machine = _ConcreteMLIL(query.view, query.mlil)
+            if not machine.valid:
+                return tuple(facts)
+        replay = _replay_inline_pattern(machine, pattern)
+        if replay is None:
+            extra_states = _loop_extra_initial_states(
+                layout,
+                header_start,
+                allowed,
+                (index_variable, state_variable),
             )
-            completed, _exit = machine.run(header_start, allowed, store_index)
-            value = machine.memory.writes.get(destination + current_index)
-            current_state = machine._variable_value(state_variable)
-            if (
-                not completed
-                or type(value) is not int
-                or type(current_state) is not int
-                or len(machine.memory.view_reads) < 2
-            ):
-                data = bytearray()
-                break
-            data.append(value)
-            sources.update(machine.memory.view_reads)
-            current_index += step
+            replay = _replay_inline_pattern(machine, pattern, extra_states)
+        if replay is None:
+            continue
+        data, sources = replay
         if 0 not in data or not sources:
             continue
         terminator = data.index(0)
@@ -1937,127 +2098,16 @@ def _recover_inline_loop_strings(query):
             continue
         plaintext = bytes(data[:terminator])
         consumer = _consumer_call(query.mlil, exit_block, destination)
-        if plaintext == b"" or consumer is None:
+        comment = consumer if consumer is not None else store
+        call_address = getattr(comment, "address", None)
+        if (
+            plaintext == b""
+            or type(call_address) is not int
+            or call_address < 0
+        ):
             continue
         source = min(sources)
-        call_address = getattr(consumer, "address", None)
-        if type(call_address) is int and call_address >= 0:
-            facts.append(
-                StringRecoveryFact(call_address, source, destination, plaintext)
-            )
-    return tuple(facts)
-
-
-def _ssa_definition(il, variable):
-    for name in ("get_ssa_var_definition", "get_ssa_reg_definition"):
-        getter = getattr(il, name, None)
-        if not callable(getter):
-            continue
-        try:
-            definition = getter(variable)
-        except Exception:  # noqa: BLE001 - Binary Ninja SSA boundary.
-            continue
-        if definition is not None:
-            return definition
-    return None
-
-
-def _static_load_addresses(expression, ssa):
-    pending = [expression]
-    seen = set()
-    addresses = set()
-    while pending and len(seen) <= _STRING_EXECUTION_LIMIT:
-        current = pending.pop()
-        operation = _operation_name(current)
-        if operation is None:
-            continue
-        key = _expression_identity(current)
-        if key in seen:
-            continue
-        seen.add(key)
-        if operation in _MLIL_LOAD_OPERATIONS:
-            address = _static_pointer_address(getattr(current, "src", None))
-            if address is not None:
-                addresses.add(address)
-                continue
-        if operation in {"MLIL_VAR_SSA", "MLIL_VAR_SSA_FIELD"}:
-            definition = _ssa_definition(ssa, getattr(current, "src", None))
-            if definition is not None:
-                pending.append(definition)
-            continue
-        pending.extend(_expression_children(current))
-    return tuple(sorted(addresses))
-
-
-def _recover_static_store_strings(query, policy):
-    ssa = getattr(query.mlil, "ssa_form", None)
-    stores = {}
-    for store in _instructions(query.mlil):
-        if (
-            _operation_name(store) not in _MLIL_STORE_OPERATIONS
-            or getattr(store, "size", None) != 1
-        ):
-            continue
-        destination = _static_pointer_address(getattr(store, "dest", None))
-        source = getattr(getattr(store, "ssa_form", None), "src", None)
-        result = _evaluate(query.view, ssa, source, policy)
-        values = getattr(result, "values", None)
-        if (
-            destination is None
-            or type(result) is not CompleteValues
-            or type(values) is not tuple
-            or len(values) != 1
-            or type(values[0]) is not int
-            or not 0 <= values[0] <= 0xFF
-        ):
-            continue
-        if destination in stores:
-            stores[destination] = None
-            continue
-        stores[destination] = (store, values[0], _static_load_addresses(source, ssa))
-
-    facts = []
-    for destination in sorted(stores):
-        if destination - 1 in stores:
-            continue
-        data = bytearray()
-        sources = []
-        current = destination
-        final_store = None
-        while current in stores and stores[current] is not None:
-            store, value, addresses = stores[current]
-            final_store = store
-            sources.extend(addresses)
-            if value == 0:
-                break
-            data.append(value)
-            current += 1
-        else:
-            continue
-        plaintext = bytes(data)
-        consumer = _consumer_call(
-            query.mlil,
-            getattr(final_store, "il_basic_block", None),
-            destination,
-        )
-        if not plaintext or not sources or consumer is None:
-            continue
-        try:
-            text = plaintext.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        if any(not character.isprintable() and character not in "\t\n\r" for character in text):
-            continue
-        call_address = getattr(consumer, "address", None)
-        if type(call_address) is int and call_address >= 0:
-            facts.append(
-                StringRecoveryFact(
-                    call_address,
-                    min(sources),
-                    destination,
-                    plaintext,
-                )
-            )
+        facts.append(StringRecoveryFact(call_address, source, destination, plaintext))
     return tuple(facts)
 
 
@@ -2118,6 +2168,7 @@ def _static_consumer_destinations(mlil):
 
 def _recover_static_initializer_strings(query):
     destinations = _static_consumer_destinations(query.mlil)
+    machine = None
     facts = []
     seen = set()
     for store in _instructions(query.mlil):
@@ -2141,7 +2192,12 @@ def _recover_static_initializer_strings(query):
         start = _instruction_index(start_instructions[0]) if start_instructions else None
         if not sources or start is None:
             continue
-        machine = _ConcreteMLIL(query.view, query.mlil)
+        if machine is None:
+            machine = _ConcreteMLIL(query.view, query.mlil)
+            if not machine.valid:
+                return tuple(facts)
+        if not machine.reset():
+            continue
         completed, call_index = machine.run(
             start,
             stop_call_destination=destination,
@@ -2156,13 +2212,235 @@ def _recover_static_initializer_strings(query):
     return tuple(facts)
 
 
+def _static_load_address(expression):
+    current = expression
+    while _operation_name(current) in _STRING_CAST_OPERATIONS:
+        current = getattr(current, "src", None)
+    operation = _operation_name(current)
+    if operation not in _MLIL_LOAD_OPERATIONS:
+        return None
+    address = _static_pointer_address(getattr(current, "src", None))
+    if address is None:
+        return None
+    if operation in {"MLIL_LOAD_STRUCT", "MLIL_LOAD_STRUCT_SSA"}:
+        offset = getattr(current, "offset", None)
+        if type(offset) is not int:
+            return None
+        address += offset
+    return address
+
+
+def _guard_flag_address(instruction):
+    if _operation_name(instruction) != "MLIL_IF":
+        return None
+    block = getattr(instruction, "il_basic_block", None)
+    instruction_index = _instruction_index(instruction)
+    if block is None or instruction_index is None:
+        return None
+    flags = set()
+    for variable in _expression_variables(getattr(instruction, "condition", None)):
+        definitions = [
+            candidate
+            for candidate in _block_instructions(block)
+            if (
+                _instruction_index(candidate) is not None
+                and _instruction_index(candidate) < instruction_index
+                and _operation_name(candidate) in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"}
+                and _same_entity(getattr(candidate, "dest", None), variable)
+            )
+        ]
+        if definitions:
+            address = _static_load_address(getattr(definitions[-1], "src", None))
+            if address is not None:
+                flags.add(address)
+    return next(iter(flags)) if len(flags) == 1 else None
+
+
+def _reachable_blocks(start, stops=(), limit=_STRING_BYTES_LIMIT):
+    pending = [start]
+    blocks = {}
+    stop_keys = {_entity_identity(block) for block in stops}
+    while pending:
+        block = pending.pop()
+        key = _entity_identity(block)
+        if key in blocks:
+            continue
+        if len(blocks) >= limit:
+            return None
+        blocks[key] = block
+        if key in stop_keys:
+            continue
+        pending.extend(
+            target
+            for edge in _edges(block, "outgoing_edges")
+            for target in (getattr(edge, "target", None),)
+            if target is not None
+        )
+    return blocks
+
+
+def _path_blocks(start, stop, reachable):
+    pending = [stop]
+    blocks = {}
+    start_key = _entity_identity(start)
+    while pending:
+        block = pending.pop()
+        key = _entity_identity(block)
+        if key in blocks or key not in reachable:
+            continue
+        if len(blocks) >= _STRING_BYTES_LIMIT:
+            return None
+        blocks[key] = block
+        pending.extend(
+            source
+            for edge in _edges(block, "incoming_edges")
+            for source in (getattr(edge, "source", None),)
+            if source is not None
+        )
+    return blocks if start_key in blocks else None
+
+
+def _guard_done_stores(instructions):
+    stores = {}
+    for instruction in instructions:
+        if (
+            _operation_name(instruction) not in _MLIL_STORE_OPERATIONS
+            or getattr(instruction, "size", None) != 1
+        ):
+            continue
+        address = _static_pointer_address(getattr(instruction, "dest", None))
+        if address is None or _constant_value(getattr(instruction, "src", None)) != 1:
+            continue
+        stores.setdefault(address, []).append(instruction)
+    return stores
+
+
+def _guarded_initializer_candidates(layout):
+    instructions, _blocks, block_by_index, _instruction_by_index = layout
+    done_stores = _guard_done_stores(instructions)
+    seen = set()
+    for instruction in instructions:
+        flag = _guard_flag_address(instruction)
+        if flag is None or flag not in done_stores:
+            continue
+        for arm in ("true", "false"):
+            start_index = getattr(instruction, arm, None)
+            if type(start_index) is not int or start_index < 0:
+                continue
+            start = block_by_index.get(start_index)
+            if start is None:
+                continue
+            stop_blocks = tuple(
+                block
+                for store in done_stores[flag]
+                for block in (getattr(store, "il_basic_block", None),)
+                if block is not None
+            )
+            reachable = _reachable_blocks(start, stop_blocks)
+            if reachable is None:
+                continue
+            stops = [
+                store
+                for store in done_stores[flag]
+                if _entity_identity(getattr(store, "il_basic_block", None)) in reachable
+            ]
+            if len(stops) != 1:
+                continue
+            stop = stops[0]
+            stop_index = _instruction_index(stop)
+            stop_block = getattr(stop, "il_basic_block", None)
+            if stop_index is None or stop_block is None:
+                continue
+            blocks = _path_blocks(start, stop_block, reachable)
+            if blocks is None:
+                continue
+            allowed = frozenset(
+                index
+                for block in blocks.values()
+                for candidate in _block_instructions(block)
+                for index in (_instruction_index(candidate),)
+                if index is not None
+            )
+            key = flag, start_index, stop_index
+            if not allowed or key in seen:
+                continue
+            seen.add(key)
+            yield flag, start_index, stop_index, tuple(blocks.values()), allowed
+
+
+def _static_write_sites(blocks):
+    sites = {}
+    for block in blocks:
+        for instruction in _block_instructions(block):
+            if (
+                _operation_name(instruction) not in _MLIL_STORE_OPERATIONS
+                or getattr(instruction, "size", None) != 1
+            ):
+                continue
+            address = _static_pointer_address(getattr(instruction, "dest", None))
+            if address is None:
+                continue
+            sites[address] = None if address in sites else instruction
+    return sites
+
+
+def _guarded_static_plaintexts(machine, sites, flag):
+    for destination in sorted(sites):
+        site = sites[destination]
+        if site is None or destination == flag or destination - 1 in sites:
+            continue
+        for offset in range(_STRING_BYTES_LIMIT):
+            address = destination + offset
+            if address == flag or sites.get(address) is None:
+                break
+            value = machine.memory.writes.get(address)
+            if type(value) is not int:
+                break
+            if value == 0:
+                plaintext = _textual_plaintext(machine.memory, destination)
+                if plaintext is not None:
+                    yield site, destination, plaintext
+                break
+
+
+def _recover_guarded_static_strings(query):
+    layout = _loop_layout(query.mlil)
+    if layout is None:
+        return ()
+    machine = None
+    facts = []
+    for flag, start, stop, blocks, allowed in _guarded_initializer_candidates(layout):
+        if machine is None:
+            machine = _ConcreteMLIL(query.view, query.mlil)
+            if not machine.valid:
+                return tuple(facts)
+        if not machine.reset():
+            continue
+        completed, exit_index = machine.run(start, allowed, stop)
+        if not completed or exit_index is not None:
+            continue
+        sites = _static_write_sites(blocks)
+        for site, destination, plaintext in _guarded_static_plaintexts(
+            machine,
+            sites,
+            flag,
+        ):
+            address = getattr(site, "address", None)
+            if type(address) is not int or address < 0:
+                continue
+            sources = tuple(sorted(machine.memory.view_reads))
+            if not sources:
+                sources = _llil_block_static_loads(query.function, address)
+            if sources:
+                facts.append(StringRecoveryFact(address, sources[0], destination, plaintext))
+    return tuple(facts)
+
+
 def string_recovery(query):
     facts = list(_recover_direct_call_strings(query))
     facts.extend(_recover_inline_loop_strings(query))
-    policy = _static_data_policy(query.view)
-    if policy is not None:
-        facts.extend(_recover_static_store_strings(query, policy))
     facts.extend(_recover_static_initializer_strings(query))
+    facts.extend(_recover_guarded_static_strings(query))
     by_call = {}
     for fact in facts:
         existing = by_call.get(fact.call_addr)

@@ -533,7 +533,7 @@ def _loop_blocks(store, increment, branch, preheader, exit_block, before=()):
     return loop
 
 
-def test_string_recovery_executes_a_direct_two_pointer_decoder_loop():
+def test_string_recovery_reuses_a_fixed_direct_decoder_program(monkeypatch):
     sample, semantics, _values, _registered = _load_sample()
     source = 0x1040
     destination = 0x2000
@@ -620,12 +620,31 @@ def test_string_recovery_executes_a_direct_two_pointer_decoder_loop():
         dest=_const_pointer(target, 20),
         params=(_const_pointer(destination, 21), _const_pointer(source, 22)),
     )
+    second_call = Instruction(
+        0x7014,
+        "MLIL_CALL",
+        instr_index=1,
+        dest=_const_pointer(target, 23),
+        params=(_const_pointer(destination, 24), _const_pointer(source, 25)),
+    )
+    original_machine = sample._ConcreteMLIL
+    constructed = []
+
+    class CountingMachine:
+        def __init__(self, *args, **kwargs):
+            constructed.append(args)
+            self._inner = original_machine(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(sample, "_ConcreteMLIL", CountingMachine)
 
     result = sample.string_recovery(
         semantics.StringRecoveryQuery(
             view,
             _main(),
-            types.SimpleNamespace(instructions=(call,)),
+            types.SimpleNamespace(instructions=(call, second_call)),
             frozenset(),
         )
     )
@@ -634,7 +653,58 @@ def test_string_recovery_executes_a_direct_two_pointer_decoder_loop():
     assert [
         (fact.call_addr, fact.source_addr, fact.destination_addr, fact.plaintext)
         for fact in result.facts
-    ] == [(0x7010, source, destination, b"A")]
+    ] == [
+        (0x7010, source, destination, b"A"),
+        (0x7014, source, destination, b"A"),
+    ]
+    assert len(constructed) == 1
+
+
+def test_concrete_mlil_indexes_each_block_once(monkeypatch):
+    sample, _semantics, _values, _registered = _load_sample()
+    block = Block(
+        0,
+        (
+            Instruction(0x7100, "MLIL_SET_VAR", instr_index=0),
+            Instruction(0x7104, "MLIL_RET", instr_index=1),
+        ),
+    )
+    calls = []
+    original = sample._block_instructions
+
+    def count_block_instructions(current):
+        calls.append(current)
+        return original(current)
+
+    monkeypatch.setattr(sample, "_block_instructions", count_block_instructions)
+
+    machine = sample._ConcreteMLIL(
+        View(), types.SimpleNamespace(instructions=block.instructions)
+    )
+
+    assert machine.valid
+    assert calls == [block]
+
+
+def test_string_recovery_does_not_use_ssa_to_locate_static_store_strings(monkeypatch):
+    sample, semantics, _values, _registered = _load_sample()
+
+    def fail_static_ssa(_view):
+        raise AssertionError("string recovery must not request an SSA static-store policy")
+
+    monkeypatch.setattr(sample, "_static_data_policy", fail_static_ssa)
+
+    result = sample.string_recovery(
+        semantics.StringRecoveryQuery(
+            View(),
+            _main(),
+            types.SimpleNamespace(instructions=()),
+            frozenset(),
+        )
+    )
+
+    assert type(result) is semantics.CompleteBatch
+    assert result.facts == ()
 
 
 def test_string_recovery_executes_a_current_function_inline_loop():
@@ -782,68 +852,396 @@ def test_string_recovery_executes_a_current_function_inline_loop():
     ] == [(0x7118, source, destination, b"A")]
 
 
-def test_string_recovery_groups_proven_static_byte_stores_at_their_consumer(monkeypatch):
-    sample, semantics, values, _registered = _load_sample()
+def test_inline_loop_uses_the_decrypt_store_when_no_consumer_call_exists(monkeypatch):
+    sample, semantics, _values, _registered = _load_sample()
     source = 0x1040
     destination = 0x2000
-    view = _string_view(source, b"A\0")
-    first_source = Instruction(
-        0,
-        "MLIL_LOAD_SSA",
-        expr_index=50,
-        size=1,
-        src=_const_pointer(source, 51),
+    index_variable = object()
+    state_variable = object()
+    store = Instruction(0x7400, "MLIL_STORE", instr_index=5, size=1)
+    layout = ((store,), {}, {}, {})
+
+    class Machine:
+        valid = True
+
+        def __init__(self, *_args):
+            self.memory = types.SimpleNamespace(writes={}, view_reads=set())
+            self.values = {}
+
+        def reset(self, values):
+            self.values = dict(values)
+            self.memory.writes.clear()
+            self.memory.view_reads.clear()
+            return True
+
+        def run(self, *_args):
+            index = self.values[index_variable]
+            self.memory.writes[destination + index] = b"A\0"[index]
+            self.memory.view_reads.update({source, source + 1})
+            return True, None
+
+        def _variable_value(self, variable):
+            return self.values.get(variable, 0)
+
+    monkeypatch.setattr(sample, "_loop_layout", lambda _mlil: layout)
+    monkeypatch.setattr(
+        sample,
+        "_inline_feedback_pattern",
+        lambda _store, _layout: (
+            destination,
+            index_variable,
+            state_variable,
+            0,
+            0,
+            2,
+            1,
+            0,
+            frozenset(),
+            5,
+            object(),
+        ),
     )
-    second_source = Instruction(
-        0,
-        "MLIL_LOAD_SSA",
-        expr_index=52,
-        size=1,
-        src=_const_pointer(source + 1, 53),
+    monkeypatch.setattr(sample, "_ConcreteMLIL", Machine)
+    monkeypatch.setattr(sample, "_consumer_call", lambda *_args: None)
+
+    facts = sample._recover_inline_loop_strings(
+        semantics.StringRecoveryQuery(
+            View(),
+            _main(),
+            types.SimpleNamespace(instructions=(store,)),
+            frozenset(),
+        )
+    )
+
+    assert [
+        (fact.call_addr, fact.source_addr, fact.destination_addr, fact.plaintext)
+        for fact in facts
+    ] == [(0x7400, source, destination, b"A")]
+
+
+def test_string_recovery_executes_a_guarded_static_xor_initializer(monkeypatch):
+    sample, semantics, _values, _registered = _load_sample()
+    source = 0x1040
+    destination = 0x2000
+    flag = destination + 2
+    view = View()
+    flag_variable = object()
+    value_variable = object()
+    load_flag = Instruction(
+        0x7500,
+        "MLIL_SET_VAR",
+        instr_index=0,
+        dest=flag_variable,
+        src=Instruction(
+            0,
+            "MLIL_LOAD",
+            expr_index=110,
+            size=1,
+            src=_const_pointer(flag, 111),
+        ),
+    )
+    guard = Instruction(
+        0x7504,
+        "MLIL_IF",
+        instr_index=1,
+        condition=Instruction(
+            0,
+            "MLIL_CMP_NE",
+            expr_index=112,
+            left=Instruction(
+                0,
+                "MLIL_AND",
+                expr_index=113,
+                left=_variable(flag_variable, 114),
+                right=Instruction(0, "MLIL_CONST", expr_index=115, constant=1),
+            ),
+            right=Instruction(0, "MLIL_CONST", expr_index=116, constant=0),
+        ),
+        true=10,
+        false=2,
+    )
+    decode = Instruction(
+        0x7508,
+        "MLIL_SET_VAR",
+        instr_index=2,
+        dest=value_variable,
+        src=Instruction(
+            0,
+            "MLIL_XOR",
+            expr_index=117,
+            size=1,
+            left=Instruction(0, "MLIL_CONST", expr_index=118, size=1, constant=0x1B),
+            right=Instruction(0, "MLIL_CONST", expr_index=119, size=1, constant=0x5A),
+        ),
     )
     first = Instruction(
-        0x7200,
+        0x750C,
         "MLIL_STORE",
-        instr_index=0,
+        instr_index=3,
         size=1,
-        dest=_const_pointer(destination, 54),
-        ssa_form=types.SimpleNamespace(src=first_source),
+        dest=_const_pointer(destination, 121),
+        src=_variable(value_variable, 122),
     )
-    second = Instruction(
-        0x7204,
+    terminator = Instruction(
+        0x7510,
         "MLIL_STORE",
-        instr_index=1,
+        instr_index=4,
         size=1,
-        dest=_const_pointer(destination + 1, 55),
-        ssa_form=types.SimpleNamespace(src=second_source),
+        dest=_const_pointer(destination + 1, 123),
+        src=Instruction(0, "MLIL_CONST", expr_index=124, constant=0),
     )
-    consumer = Instruction(
-        0x7208,
-        "MLIL_CALL",
-        instr_index=2,
-        dest=_const_pointer(0x6000, 56),
-        params=(_const_pointer(destination, 57),),
+    mark_done = Instruction(
+        0x7514,
+        "MLIL_STORE",
+        instr_index=5,
+        size=1,
+        dest=_const_pointer(flag, 125),
+        src=Instruction(0, "MLIL_CONST", expr_index=126, constant=1),
     )
-    block = Block(0, (first, second, consumer, Instruction(0x720C, "MLIL_RET", instr_index=3)))
+    leave = Instruction(0x7518, "MLIL_GOTO", instr_index=6, dest=10)
+    skip = Instruction(0x751C, "MLIL_RET", instr_index=10)
+    guard_block = Block(0, (load_flag, guard))
+    init_block = Block(1, (decode, first, terminator, mark_done, leave))
+    skip_block = Block(2, (skip,))
+    to_skip = Edge(guard_block, skip_block, "TrueBranch")
+    to_init = Edge(guard_block, init_block, "FalseBranch")
+    init_to_skip = Edge(init_block, skip_block, "UnconditionalBranch")
+    guard_block.outgoing_edges = (to_skip, to_init)
+    init_block.incoming_edges = (to_init,)
+    init_block.outgoing_edges = (init_to_skip,)
+    skip_block.incoming_edges = (to_skip, init_to_skip)
     mlil = types.SimpleNamespace(
-        instructions=block.instructions,
-        ssa_form=types.SimpleNamespace(),
+        instructions=guard_block.instructions + init_block.instructions + skip_block.instructions
     )
+    monkeypatch.setattr(sample, "_llil_block_static_loads", lambda *_args: (source,))
 
-    def evaluate(_view, _ssa, expression, _policy):
-        value = 0x41 if expression is first_source else 0
-        return _complete(values, (value,))
-
-    monkeypatch.setattr(sample, "_evaluate", evaluate)
     result = sample.string_recovery(
         semantics.StringRecoveryQuery(view, _main(), mlil, frozenset())
     )
 
-    assert type(result) is semantics.CompleteBatch
     assert [
         (fact.call_addr, fact.source_addr, fact.destination_addr, fact.plaintext)
         for fact in result.facts
-    ] == [(0x7208, source, destination, b"A")]
+    ] == [(0x750C, source, destination, b"A")]
+
+
+def test_inline_loop_replays_an_outer_constant_counter(monkeypatch):
+    sample, semantics, _values, _registered = _load_sample()
+    source = 0x1040
+    key = 0x1050
+    destination = 0x2000
+    view = _string_view(source, b"A\x01")
+    image = bytearray(view.data)
+    image[key - view.start : key - view.start + 2] = b"\0\0"
+    view.data = bytes(image)
+    index_variable = object()
+    state_variable = object()
+    outer_counter = object()
+    outer = Block(
+        0,
+        (
+            Instruction(
+                0x7600,
+                "MLIL_SET_VAR",
+                instr_index=0,
+                dest=outer_counter,
+                src=Instruction(0, "MLIL_CONST", expr_index=130, constant=0),
+            ),
+            Instruction(0x7604, "MLIL_GOTO", instr_index=9, dest=1),
+        ),
+    )
+    preheader = Block(
+        1,
+        (
+            Instruction(
+                0x7608,
+                "MLIL_SET_VAR",
+                instr_index=1,
+                dest=index_variable,
+                src=Instruction(0, "MLIL_CONST", expr_index=131, constant=0),
+            ),
+            Instruction(
+                0x760C,
+                "MLIL_SET_VAR",
+                instr_index=2,
+                dest=state_variable,
+                src=Instruction(0, "MLIL_CONST", expr_index=132, constant=0),
+            ),
+            Instruction(0x7610, "MLIL_GOTO", instr_index=10, dest=3),
+        ),
+    )
+    source_pointer = Instruction(
+        0,
+        "MLIL_ADD",
+        expr_index=133,
+        left=_const_pointer(source, 134),
+        right=_variable(index_variable, 135),
+    )
+    key_pointer = Instruction(
+        0,
+        "MLIL_ADD",
+        expr_index=136,
+        left=_const_pointer(key, 137),
+        right=_variable(index_variable, 138),
+    )
+    state_update = Instruction(
+        0x7614,
+        "MLIL_SET_VAR",
+        instr_index=3,
+        dest=state_variable,
+        src=Instruction(
+            0,
+            "MLIL_XOR",
+            expr_index=139,
+            left=Instruction(
+                0,
+                "MLIL_XOR",
+                expr_index=140,
+                left=Instruction(0, "MLIL_LOAD", expr_index=141, size=1, src=source_pointer),
+                right=Instruction(0, "MLIL_LOAD", expr_index=142, size=1, src=key_pointer),
+            ),
+            right=_variable(outer_counter, 143),
+        ),
+    )
+    outer_increment = Instruction(
+        0x7618,
+        "MLIL_SET_VAR",
+        instr_index=4,
+        dest=outer_counter,
+        src=Instruction(
+            0,
+            "MLIL_ADD",
+            expr_index=144,
+            left=_variable(outer_counter, 145),
+            right=Instruction(0, "MLIL_CONST", expr_index=146, constant=1),
+        ),
+    )
+    store = Instruction(
+        0x761C,
+        "MLIL_STORE",
+        instr_index=5,
+        size=1,
+        dest=Instruction(
+            0,
+            "MLIL_ADD",
+            expr_index=147,
+            left=_const_pointer(destination, 148),
+            right=_variable(index_variable, 149),
+        ),
+        src=Instruction(
+            0,
+            "MLIL_VAR_FIELD",
+            expr_index=150,
+            size=1,
+            src=state_variable,
+            offset=0,
+        ),
+    )
+    increment = Instruction(
+        0x7620,
+        "MLIL_SET_VAR",
+        instr_index=6,
+        dest=index_variable,
+        src=Instruction(
+            0,
+            "MLIL_ADD",
+            expr_index=151,
+            left=_variable(index_variable, 152),
+            right=Instruction(0, "MLIL_CONST", expr_index=153, constant=1),
+        ),
+    )
+    branch = Instruction(
+        0x7624,
+        "MLIL_IF",
+        instr_index=7,
+        condition=Instruction(
+            0,
+            "MLIL_CMP_NE",
+            expr_index=154,
+            left=_variable(index_variable, 155),
+            right=Instruction(0, "MLIL_CONST", expr_index=156, constant=2),
+        ),
+        true=3,
+        false=8,
+    )
+    exit_block = Block(3, (Instruction(0x7628, "MLIL_RET", instr_index=8),))
+    loop = Block(2, (state_update, outer_increment, store, increment, branch))
+    outer_to_preheader = Edge(outer, preheader, "UnconditionalBranch")
+    preheader_to_loop = Edge(preheader, loop, "UnconditionalBranch")
+    back_edge = Edge(loop, loop, "TrueBranch")
+    exit_edge = Edge(loop, exit_block, "FalseBranch")
+    outer.outgoing_edges = (outer_to_preheader,)
+    preheader.incoming_edges = (outer_to_preheader,)
+    preheader.outgoing_edges = (preheader_to_loop,)
+    loop.incoming_edges = (preheader_to_loop, back_edge)
+    loop.outgoing_edges = (back_edge, exit_edge)
+    loop.dominators = (outer, preheader, loop)
+    exit_block.incoming_edges = (exit_edge,)
+    mlil = types.SimpleNamespace(
+        instructions=outer.instructions
+        + preheader.instructions
+        + loop.instructions
+        + exit_block.instructions
+    )
+    monkeypatch.setattr(sample, "_consumer_call", lambda *_args: None)
+
+    result = sample.string_recovery(
+        semantics.StringRecoveryQuery(view, _main(), mlil, frozenset())
+    )
+
+    assert [
+        (fact.call_addr, fact.source_addr, fact.destination_addr, fact.plaintext)
+        for fact in result.facts
+    ] == [(0x761C, source, destination, b"A")]
+
+
+def test_inline_loop_scan_indexes_mlil_once_for_multiple_candidates(monkeypatch):
+    sample, semantics, _values, _registered = _load_sample()
+    index_variable = object()
+    state_variable = object()
+
+    def candidate(address, instruction_index, expression_index):
+        return Instruction(
+            address,
+            "MLIL_STORE",
+            instr_index=instruction_index,
+            size=1,
+            dest=Instruction(
+                0,
+                "MLIL_ADD",
+                expr_index=expression_index,
+                left=_const_pointer(0x2000, expression_index + 1),
+                right=_variable(index_variable, expression_index + 2),
+            ),
+            src=Instruction(
+                0,
+                "MLIL_VAR_FIELD",
+                expr_index=expression_index + 3,
+                src=state_variable,
+            ),
+        )
+
+    first = candidate(0x7300, 0, 70)
+    second = candidate(0x7304, 1, 80)
+    block = Block(0, (first, second))
+    calls = []
+    original = sample._instructions
+
+    def count_instructions(mlil):
+        calls.append(mlil)
+        return original(mlil)
+
+    monkeypatch.setattr(sample, "_instructions", count_instructions)
+
+    assert sample._recover_inline_loop_strings(
+        semantics.StringRecoveryQuery(
+            View(),
+            _main(),
+            types.SimpleNamespace(instructions=block.instructions),
+            frozenset(),
+        )
+    ) == ()
+    assert len(calls) == 1
 
 
 def test_string_recovery_replays_a_static_initializer_pattern_from_its_llil_loads():
