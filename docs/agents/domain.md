@@ -7,8 +7,8 @@
 - 仓库根目录的 **`CONTEXT.md`**；或
 - 若根目录存在 **`CONTEXT-MAP.md`**，先阅读它。它指向每个上下文的
   `CONTEXT.md`，只读取与当前主题相关的文件。
-- **`docs/adr/`**：阅读与即将处理区域有关的 ADR。在多上下文仓库中，还应检查
-  `src/<context>/docs/adr/` 内的上下文级决策。
+- **`docs/adr/README.md`**：先用索引定位、再阅读与即将处理区域有关的 ADR。在多上下文仓库中，
+  还应检查 `src/<context>/docs/adr/` 内的上下文级决策。
 
 这些文件缺失时，**静默继续**。不要报告缺失，也不要预先建议创建它们。通过
 `/grill-with-docs` 或 `/improve-codebase-architecture` 进入的

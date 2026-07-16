@@ -1,80 +1,51 @@
-# 混淆形态
+# 混淆诊断
 
-> [!NOTE]
-> 本页保留当前样本及旧 profile 所处理形态的技术说明。目标架构不把这些公式提升为核心规则：
-> 跳转/调用目标算法、加解密算法和平坦化具体结构由每个外部单样本 provider 负责；核心只提供
-> 完整证明所需的通用 BNIL、SSA、PHI、CFG 和改写后端能力。
+先把当前函数归类，再决定 provider 是否需要新规则。这里描述的是证据形态，不是可复制到新样本的公式。
 
-本文说明 DispatchThis 当前面向的 ARM64 ELF 混淆形态。具体二进制差异属于解析 profile；
-这里只说明共享恢复模型。
+## 控制流
 
-## 高层结构
+### 间接跳转
 
-控制流被平坦化：原始基本块不再直接彼此跳转。调度器将状态变量与不透明状态令牌比较，
-并路由到下一个原始基本块。
+在 LLIL 找到 `jump(reg)`，沿当前定义和静态内存读取证明所有具体目标。目标集合可以是单个或多个；只有原始语义条件和 true/false 方向也被证明时，才向 `BranchTargetFact` 提供条件。
 
-一次转移的运行时流程：
+Binary Ninja 应用 user-informed branch dataflow 后，MLIL/HLIL 可能显示 switch 或 `JUMP_TO`。这是 CFG 恢复后的正常形态，不自动意味着条件翻译缺失。
 
-```text
-原始块 -> 设置 state = <下一个令牌> -> 解码 gadget -> 跳转调度器
-       -> 比较树调度器 -> 下一个原始块
-```
+### 平坦化 dispatcher
 
-DispatchThis 在 IL 层重建该结构：恢复状态令牌目标，将受调度器控制的出口改为直接 MLIL
-边，不触碰底层字节。
+平坦化通常表现为状态写入、返回 dispatcher、比较状态 token、再进入原始块。deflatten 需要完整 state-token 路由、私有区域和当前 IL witness；无法证明的状态写入或多入口路径必须保留。
 
-## 状态变量与调度器
+## 数据与调用
 
-调度器是围绕一个状态变量的比较树。每次比较将一个状态令牌映射到该令牌选择的原始基本
-块。状态令牌可能宽于 32 位，因此宽度是令牌身份的一部分。
+### 间接调用
 
-去平坦化器识别主导调度器比较簇，将 `(state_token, width)` 映射为目标块，再跟踪各原始
-基本块的状态写入来恢复直接后继。
+在 MLIL 检查 call destination 的完整值。多 callee 仍是有价值的事实，但当前后端不会把它猜成一个 direct call。
 
-## 解码片段（gadget）间接跳转
+### 全局数据
 
-原始基本块不是直接跳回调度器，而是通过解码 gadget。ARM64 解析 profile 解析计算分支
-目标的 LLIL 数据流，并向工作流返回分支恢复事实。
+全局 load 可能嵌在算术、字段或条件表达式中。递归遍历表达式，并拒绝有重叠本地 STORE 的槽位；只有初始化、映射范围和精确类型都成立时才提交全局数据事实。
 
-当前内置分支公式为：
+## 字符串
 
-```text
-table_base = (*slot + table_base_key) mod 2^48
-entry      = *(table_base + entry_offset)
-target     = (entry + key) mod 2^48
-```
+同一个样本可并存多种解密形态：
 
-`slot`、`table_base_key`、`entry_offset` 和 `key` 从 LLIL 定义与镜像内存恢复。profile
-可以识别不同指令形态，但仍返回标准分支事实；工作流负责 Binary Ninja 分支元数据和重新
-分析回执。
+| 形态 | 可证明的模式 |
+| --- | --- |
+| decoder 调用 | 静态 source/destination 参数、固定调用约束、受限 callee 回放、文本输出。 |
+| 内联循环 | 私有 preheader、递增计数器、明确 latch、反馈 state、字节 STORE 与直接 consumer。 |
+| 简单 XOR/初始化 | 静态 byte STORE、短的可解释局部路径、同地址 LLIL 块中的源 load、零终止文本。 |
 
-## 间接调用片段（gadget）
+模式匹配应明确拒绝未知 operation、未知内存效果、非确定路径、缺失终止符和非文本数据。不要把大函数的整个 SCC、特定地址或特定 key 当作模式。
 
-间接调用恢复在分支解析稳定后于 MLIL 运行。当前形态将编码后的 callee 值与一个 key
-折叠：
+## “还剩 switch” 的判断
 
-```text
-target = (encoded + key) mod 2^48
-```
+确认下面三点后再认为是 bug：
 
-结果是有效 callee 时，pass 会将当前 MLIL 调用目标改写为常量指针。工作流负责调用类型
-调整与回执门控，避免反复分析形成循环。
+1. 核心为该 branch fact 维护的 receipt 中确有该源；
+2. provider 为该源返回了当前、有方向、不同的 true/false 目标和条件；
+3. translator 的当前 MLIL 重绑定失败日志能归因到该站点。
 
-## 全局常量槽位
+缺少任一点时，保留 switch。多入口 dispatcher/state-routing 站点通常属于 deflatten 候选，而不是 IF 还原候选。
 
-部分样本将类似指针的常量放在可写全局槽位。全局常量阶段识别狭窄的只读槽位使用形态，
-并请求工作流把槽位类型设为 `uint8_t const* const`。这使后续 MLIL 数据流可将该槽位
-视为稳定，而不必把 BinaryView 修改放入解析 profile。
+## 输出
 
-## 字符串解密调用
-
-字符串解密恢复为可选项。它扫描当前函数的直接 MLIL 调用，要求解密 callee 已完成去
-平坦化且稳定，然后由活动 profile 返回明文恢复事实。后端写入函数级注释并保留已有手工
-注释行。
-
-## 条件转移
-
-多数转移在回到调度器前写入一个状态令牌；少数根据程序控制流写入两个令牌之一。
-DispatchThis 处理每个纯分支臂都恰好写入一个已知状态令牌的狭窄 MLIL 形态；不支持或
-不纯的形态保持不变。见
-[`conditional-deflattening.md`](conditional-deflattening.md)。
+每次诊断应记录函数地址、LLIL/MLIL 片段、provider 返回类型、日志和最终 GUI 效果。这样才能把“未识别”区分为样本模式缺失、核心通用缺口或安全拒绝。

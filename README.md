@@ -1,117 +1,58 @@
 # DispatchThis
 
-DispatchThis 是用于 ARM64 ELF 反混淆的 Binary Ninja 工作流插件。它在 IL
-层恢复间接跳转目标、间接调用目标、部分全局常量、解密字符串注释和控制流
-平坦化调度器边；不会修改二进制字节。
+DispatchThis 是面向单个 ARM64 ELF 样本的 Binary Ninja 工作流核心。它恢复已证明的控制流和语义信息，不修改二进制字节。
 
-> [!IMPORTANT]
-> 当前源码仍处于从 bundled resolver profile 向外部样本 provider 迁移的阶段。目标架构由
-> [`CONTEXT.md`](CONTEXT.md) 与 ADR-0014 至 ADR-0039 定义：DispatchThis 核心只拥有工作流、
-> 时序和通用功能型 API；每个具体样本由一个独立外部插件实现，不再新增内置 profile 或
-> 样本家族抽象。现有 profile 相关页面只描述尚未迁移的实现，不代表后续扩展方向。
+核心负责阶段、重新分析和 IL 改写；每个样本由独立 provider 提供识别规则。新样本从 `sample/` 中的独立插件开始，而不是向核心增加 profile。
 
-![license: MIT](https://img.shields.io/badge/license-MIT-green)
-![Binary Ninja 5.3+](https://img.shields.io/badge/Binary%20Ninja-5.3%2B-black)
+## 使用
 
-## 功能
+1. 将 `plugins/DispatchThis` 和目标样本插件放入 Binary Ninja 插件目录。开发时可将样本目录软链接到该目录。
+2. 完整重启 Binary Ninja，打开二进制并在函数菜单中选择 **DispatchThis ▸ Select Provider…**。
+3. 从 **DispatchThis** 菜单启用所需阶段；启用下游阶段会自动启用其前置阶段。
+4. 用 LLIL/MLIL、日志和最终 HLIL 验证结果，不要只以 switch 或注释数量判断成功。
 
-目标混淆器以状态变量为键，用比较树调度器平坦化控制流。原始基本块写入不透明
-状态令牌，经解码 gadget 回到调度器。
+代码变更后应重启 GUI。`bn py exec` 适合验证纯 Python 逻辑，但不能证明已注册 workflow callback 已重新绑定。
 
-当前 ARM64 混淆形态（间接跳转、控制流平坦化、全局常量和间接调用 gadget）见
-[`docs/obfuscation.md`](docs/obfuscation.md)。
+## 阶段
 
-## 安装
+| 阶段 | IL | 结果 |
+| --- | --- | --- |
+| Indirect Branch Targets | LLIL | 提交已证明的间接跳转目标，重建 CFG |
+| Indirect Call Targets | MLIL | 改写已证明的单目标调用 |
+| Global Data Semantics | MLIL | 标注已证明的全局数据类型 |
+| Branch Condition Translation | MLIL | 将有方向证据的二目标跳转还原为 IF |
+| Correlated STORE Recovery | MLIL | 恢复已证明的路径关联 STORE |
+| String Recovery | MLIL | 写入已证明的字符串调用点注释 |
+| Deflatten | MLIL | 原子恢复已证明的 dispatcher 后继 |
 
-### 前提条件
+精确顺序、稳定性和修改所有权见 [workflow](docs/pipeline.md)。
 
-- Binary Ninja（见[兼容性](#兼容性)）。
+## 开发文档
 
-### 安装插件
+- [架构与术语](CONTEXT.md)：唯一的核心/provider 边界。
+- [样本 provider 指南](docs/sample-providers.md)：从分析、模式匹配到 GUI 验证的标准流程。
+- [公开 API](docs/API.md)：六个 provider 槽位及结果契约。
+- [混淆诊断](docs/obfuscation.md)：如何识别跳转、全局、字符串和残留 switch。
+- [条件去平坦化](docs/conditional-deflattening.md)：严格的 deflatten 接受条件。
+- [源码地图](docs/files.md)：应修改哪个模块。
+- [限制与调试](docs/known-issues.md)：失败时应保留什么、检查什么。
+- [ADR 索引](docs/adr/README.md)：历史架构决定；它们是背景，不是重复的使用手册。
 
-将 `plugins/DispatchThis` 复制到 Binary Ninja 用户插件目录后，重启 Binary
-Ninja。
+## 验证
 
-例如：`~/.binaryninja/plugins/DispatchThis`
-
-| 操作系统 | 插件目录 |
-| --- | --- |
-| **macOS** | `~/Library/Application Support/Binary Ninja/plugins/` |
-| **Linux** | `~/.binaryninja/plugins/` |
-| **Windows** | `%APPDATA%\Binary Ninja\plugins` |
-
-## 使用方法
-
-测试单个函数最快的方法是函数右键菜单。打开目标函数后，在函数内右键并选择：
-
-- **DispatchThis ▸ Select Provider…**：为当前 BinaryView 选择已注册的样本语义 provider。
-  菜单显示 provider 名称，但保存稳定的 provider ID；核心不会自动选择样本。
-- **DispatchThis ▸ Toggle Indirect Branch Targets**、**Indirect Call Targets**、
-  **Global Data Semantics**、**Branch Conditions**、**Correlated STOREs**、
-  **String Recovery** 或 **Deflatten**：独立切换当前函数的相应阶段。启用一个阶段会自动启用
-  它的前置阶段；关闭前置阶段会同时关闭依赖它的阶段。
-- **DispatchThis ▸ Disable All**：关闭当前函数的全部 DispatchThis 开关。
-
-默认快捷键：Indirect Branch Targets 为 `Alt+Q`，Deflatten 为 `Alt+W`，String
-Recovery 为 `Alt+E`，Disable All 为 `Alt+R`。其余 pass 可从函数菜单切换。
-
-相同开关也在 **Function Settings** 右键菜单中。若改设置后 Binary Ninja 没有
-自动重新分析，执行 *Analysis ▸ Reanalyze All Functions*。
-
-> [!WARNING]
-> 切换 provider 前请等待当前分析完成，并在切换后重新分析目标函数。provider 选择不会取消已在
-> 运行的 Binary Ninja workflow callback；在分析进行中切换可能让该轮输出仍反映先前选择。遇到
-> 此情况时，等待分析空闲后重新分析即可。
-
-**去平坦化依赖间接跳转解析。** Deflatten 设置也会启用间接跳转和间接调用解析，
-以便在重建调度器边前获得完整 CFG。已严格证明过时的状态写入会与边改写在同一次
-原子替换中 NOP；未解析的间接跳转通常会使去平坦化阶段保持空闲。
-
-## 流水线概览
-
-每个恢复阶段都有独立的 Function ResourceScope 开关和 workflow callback；callback 按以下
-顺序运行：
-
-1. **间接跳转解析器**（LLIL）：将每个解码 gadget `jump(reg)` 改写为当前 IL 中的
-   `jump(const)`。工作流回调负责用户跳转元数据和分析完成后的标签清理调度；随着
-   函数扩展会反复运行直至不再变化。
-2. **间接调用解析器**（MLIL）：折叠每个导入调用的解码，并将调用目标改写为常量
-   指针。工作流回调负责调用类型调整和调用目标阶段清理。
-3. **全局常量解析器**（MLIL）：将只读全局指针槽位标注为常量。
-4. **分支条件翻译器**（MLIL）：将已解析的双目标间接跳转 switch 还原为 `if`
-   表达式，然后执行分支目标阶段清理。
-5. **关联存储恢复**（MLIL）：当合并丢失同级 PHI 值之间的对应关系时，恢复按路径
-   区分的全局存储。
-6. **字符串解密**（MLIL，*可选*）：等待当前函数的分支、调用和全局阶段稳定后，
-   为已识别的直接解密调用添加注释。
-7. **去平坦化器**（MLIL，*可选*）：恢复调度器比较簇，并构造原子替换 MLIL，
-   将每个原始基本块的调度器跳转改为真实后继的直接 `goto`。条件转移会改写私有臂
-   出口、私有共享语义尾部出口，或只在被跳过的状态通道已证明私有时捷径化原始条件。
-   相等、不等及有符号/无符号有序调度器均通过重放具体状态令牌路由。所有私有调度器
-   出口和每一条被精确证明过时的状态写入，都在同一全有或全无的 copy-transform 中
-   改写。比较别名必须是其各自调度器行内建立的整变量、等宽复制；未解决的字段、
-   split、aliased、地址逃逸或指针状态修改会保留受影响的转移。改写前会拒绝过期的
-   当前 MLIL 计划对象。
-
-完整细节、排序原因及 `session_data` 契约见
-[`docs/pipeline.md`](docs/pipeline.md)；工作流阶段协调规则见
-[`docs/adr/0003-function-phase-state-for-workflow.md`](docs/adr/0003-function-phase-state-for-workflow.md)。
-条件去平坦化另见 [`docs/conditional-deflattening.md`](docs/conditional-deflattening.md)。
-源码逐文件说明见 [`docs/files.md`](docs/files.md)。
+```powershell
+pytest -q
+ruff check .
+```
 
 ## 范围
 
-DispatchThis 面向由显式样本语义 provider 处理的 ARM64 ELF 样本。旧版非 ARM64 样本不在
-范围内；应为新二进制提供独立 provider，而不是扩大 legacy adapter 的适用范围。
+DispatchThis 不自动识别样本，也不把“相似二进制”当作已支持。provider 只能提交完整证明；无法证明时保持原 IL，而不是猜测目标、条件或字符串。
 
 ## 兼容性
 
-设计目标为 **Binary Ninja 5.3 或更高版本**，已在 **5.3.9757 (a99f2380)** 上测试。
-不强制具体 patch/build 版本；5.3 以前不受支持。控制流改写使用 Binary Ninja 的
-copy-transform API 和 `AnalysisContext.set_mlil_function`，不支持旧式 MLIL 赋值回退。
-每个启用函数最早的解析回调都会在 Function 作用域检查 DispatchThis 所需的分析环境；
-这些覆盖设置在插件禁用后仍会保留。
+目标为 Binary Ninja 5.3+ 的 ARM64 ELF 分析。旧 bundled profiles 仅为兼容路径；新工作应使用外部样本 provider。
 
 ## 许可证
 
-按 [MIT License](LICENSE) 发布。
+[MIT](LICENSE)

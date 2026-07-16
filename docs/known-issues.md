@@ -1,44 +1,26 @@
-# 已知问题与限制
+# 限制与调试
 
-DispatchThis 专用于 ARM64 ELF 解析 profile 和基于 Binary Ninja 工作流的 IL 改写。以下
-列表并不完整；遇到异常输出时，务必先对照反汇编再决定是否相信结果。
+## 正确但不完整的输出
 
-## 范围
+- 只有整轮扫描本身不可信时才返回 `Inconclusive`；完整扫描可省略未支持/未证明站点，完全没有匹配时返回 `CompleteBatch(())`，不能返回裸空结果。核心不会猜测。
+- 多目标 call、无方向 branch、残留 switch、未清理的纯解码和仍可观察的状态写都可能是正确的保守结果。
+- MLIL 是 overlay；真正的重新分析可能抹掉此前的 NOP/IF/call-destination 改写。每轮都从当前 IL 重算。
 
-- **仅 ARM64 ELF profile。** DispatchThis 专用于 ARM64 ELF 解析 profile。gadget 形态、
-  解码变体和谓词形式仍由 profile 决定；其他二进制可能使用当前 profile 无法识别的形态。
+## GUI 与重载
 
-## 清理残留
+修改已加载的核心 workflow、provider 或样本代码后，默认完整重启 Binary Ninja。workflow 注册不可变，provider registry 不会安全地覆盖同 ID。`bn py exec` 能验证函数逻辑，不等于 GUI activity 已加载新代码。
 
-- **可能保留残留。** 阶段清理刻意很窄：仅 NOP 以已解析分支或调用站点为根的、死亡且纯
-  的目标解码赋值。去平坦化仅 NOP 被恢复转移证明过时的精确状态写入指令索引。若所选
-  改写保留状态执行，不确定的清理会保留这些写入，同时仍恢复 CFG；会绕过这些写入的
-  条件捷径则被拒绝。其他无害的解码 gadget 残留或全局槽位伪影可能仍出现在 MLIL/HLIL。
+不要为确认 cleanup 主动安排重新分析，不要未经用户许可保存/覆盖 BNDB。
 
-## 条件重建
+## 首先收集什么
 
-- **条件去平坦化范围窄。** 每条分支必须建立一个已知调度器令牌。私有的臂与合并区域在
-  两臂共用最终调度器出口时可以保留其他已建模语义；会绕过分支工作的改写仍要求纯状态
-  选择依赖。更复杂的状态选择链保持不变。见
-  [`conditional-deflattening.md`](conditional-deflattening.md)。
-- **有序调度器需要具体令牌。** 相等、不等以及有符号/无符号 `LT`、`LE`、`GT`、`GE`
-  比较通过在调度器 CFG 中重放已恢复的具体令牌来支持。符号状态区间、变量/变量比较、
-  混合宽度令牌和歧义路径保持平坦化。
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+bn target list
+bn workflow state --target active --function <function>
+bn il --target active --view llil <function>
+bn il --target active --view mlil <function>
+bn log --target active --limit 100
+```
 
-## 运行时注意事项
-
-- **不能热重载插件。** Binary Ninja 在启动时运行 Python；编辑任意文件后都需要**完整
-  重启**，仅重新分析不够。
-- **日志详细。** pass 为暴露漏识别会输出大量日志（逐 jump/link 细节）。调试时有用，
-  但会很吵；请按需设置 Binary Ninja 日志级别。
-- **大函数较慢。** 处理大函数需要一定时间。
-- **去平坦化前置条件。** 去平坦化会等待间接跳转解析稳定，使平坦化 CFG 可见。有些函数
-  虽然平坦化，却不使用此解析器所识别的解码 gadget 间接跳转；目前不支持。许多此类函数
-  由 Binary Ninja 自动生成，常作为具名函数（例如 `chromium_extract`）引用的解码 gadget
-  跳转目标。具名函数的 CFG 扩展后，许多自动生成函数会通过 `bv.remove_user_function`
-  自动移除。
-
-## 报告问题
-
-异常输出通常意味着活动解析 profile 与该二进制形态不匹配。改代码前先采集相关
-LLIL/MLIL 片段。
+报告应包含：二进制/函数地址、当前 provider ID、启用的 pass、LLIL/MLIL 片段、日志、期望与实际 GUI 效果。先确认属于样本模式、通用 API 缺口还是安全拒绝，再改代码。
