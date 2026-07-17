@@ -99,6 +99,20 @@ def walk_expr(expr):
     return list(expr.traverse(lambda node: node))
 
 
+def iter_expressions(mlil):
+    """Yield every expression in current MLIL once, in instruction order."""
+
+    seen = set()
+    for instruction in getattr(mlil, "instructions", ()) or ():
+        for expression in walk_expr(instruction):
+            index = getattr(expression, "expr_index", None)
+            key = ("index", index) if type(index) is int and index >= 0 else ("id", id(expression))
+            if key in seen:
+                continue
+            seen.add(key)
+            yield expression
+
+
 def _operation_selectors(ops):
     return (ops,) if isinstance(ops, (str, M)) else tuple(ops)
 
@@ -1194,6 +1208,7 @@ __all__ = (
     "direct_var_from_expr",
     "iter_calls",
     "iter_direct_calls",
+    "iter_expressions",
     "iter_load_slot_offsets",
     "iter_indirect_calls",
     "instruction_writes_variable",

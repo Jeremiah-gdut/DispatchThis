@@ -239,7 +239,7 @@ def test_global_batch_outcomes_do_not_share_stability(monkeypatch):
     assert state.global_stable() is True
 
 
-def test_unstable_call_phase_prevents_global_mutation(monkeypatch):
+def test_global_phase_runs_without_call_stability(monkeypatch):
     data_type = NativeType(("pointer",), 8)
     state, view = run_global_provider(
         monkeypatch,
@@ -247,5 +247,5 @@ def test_unstable_call_phase_prevents_global_mutation(monkeypatch):
         call_stable=False,
     )
 
-    assert view.definitions == []
-    assert state.global_receipts == {}
+    assert view.definitions == [(0x1000, data_type)]
+    assert state.global_receipts == {0x1000: data_type}

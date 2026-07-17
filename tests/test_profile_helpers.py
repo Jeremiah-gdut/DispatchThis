@@ -1,7 +1,10 @@
 from importlib import import_module
+import types
 
 import pytest
 from binaryninja import SymbolType
+
+from conftest import load_plugin_module
 
 
 class Section:
@@ -83,6 +86,42 @@ def test_memory_helpers_return_none_for_short_or_invalid_reads():
 
     with pytest.raises(ValueError, match="width"):
         memory.read_uint_le(bv, 0x1000, 0)
+
+
+def test_initialized_data_policy_snapshots_only_initialized_data_and_resolves_loads():
+    values = load_plugin_module("plugins.DispatchThis.helpers.values")
+    memory = load_plugin_module("plugins.DispatchThis.helpers.memory")
+    bv = FakeBv()
+    bv.endianness = types.SimpleNamespace(name="LittleEndian")
+    bv.sections = {
+        ".data": types.SimpleNamespace(
+            start=0x1000,
+            end=0x1004,
+            semantics=types.SimpleNamespace(name="ReadWriteDataSectionSemantics"),
+            type="PROGBITS",
+        ),
+        ".bss": types.SimpleNamespace(
+            start=0x2000,
+            end=0x2004,
+            semantics=types.SimpleNamespace(name="ReadWriteDataSectionSemantics"),
+            type="NOBITS",
+        ),
+    }
+    bv.memory[0x1000] = b"\x34\x12\x00\x00"
+    load = types.SimpleNamespace(
+        operation=types.SimpleNamespace(name="MLIL_LOAD"),
+        size=2,
+    )
+
+    policy = memory.initialized_data_policy(bv)
+
+    assert memory.byte_order(bv) == "little"
+    assert policy is not None
+    assert policy.bytes_at(0x1000, 2) == b"\x34\x12"
+    result = policy(load, ((0x1000,),))
+    assert type(result) is values.Handled
+    assert result.values == (0x1234,)
+    assert type(policy(load, ((0x2000,),))) is not values.Handled
 
 
 def test_memory_helpers_validate_addresses_targets_and_sections():

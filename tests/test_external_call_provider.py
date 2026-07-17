@@ -86,11 +86,10 @@ def run_call_provider(monkeypatch, call_targets, callee_type=None):
         ret=Type.int(8),
         params=[Type.int(8)],
     )
+    callee = types.SimpleNamespace(start=0x5000, type=callee_type)
     view = types.SimpleNamespace(
         arch=types.SimpleNamespace(address_size=8),
-        get_function_at=lambda address: (
-            types.SimpleNamespace(type=callee_type) if address == 0x5000 else None
-        ),
+        get_function_at=lambda address, _platform=None: callee if address == 0x5000 else None,
     )
     provider = semantics.SampleSemantics(
         provider_id="singleton-call",

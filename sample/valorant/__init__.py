@@ -17,6 +17,7 @@ from DispatchThis import (
     evaluate_values,
     register_provider,
 )
+from DispatchThis.helpers import memory, mlil as mlil_helpers
 
 
 _VALUE_BUDGET = AnalysisBudget(node_limit=4096, edge_limit=8192)
@@ -61,9 +62,6 @@ _MLIL_STORE_OPERATIONS = frozenset(
         "MLIL_STORE_STRUCT",
         "MLIL_STORE_STRUCT_SSA",
     )
-)
-_STATIC_DATA_SEMANTICS = frozenset(
-    ("ReadOnlyDataSectionSemantics", "ReadWriteDataSectionSemantics")
 )
 _OUTCOMES = frozenset(("TrueBranch", "FalseBranch"))
 _SUPPORTED_LOAD_WIDTHS = frozenset((1, 2, 4, 8))
@@ -150,80 +148,11 @@ def _same_entity(left, right):
         return False
 
 
-def _byte_order(view):
-    endian = getattr(view, "endianness", None)
-    name = getattr(endian, "name", None)
-    if name is None:
-        name = getattr(getattr(view, "arch", None), "endianness", None)
-        name = getattr(name, "name", None)
-    return {"LittleEndian": "little", "BigEndian": "big"}.get(name)
+class _StackValuePolicy:
+    """Add provider-proven private-stack loads to the core static-data policy."""
 
-
-def _static_data_snapshot(view):
-    """Copy mapped initialized data once so the policy itself is read-only."""
-
-    byte_order = _byte_order(view)
-    if byte_order is None:
-        return None
-    try:
-        sections = tuple(getattr(view, "sections", {}).values())
-    except Exception:  # noqa: BLE001 - Binary Ninja wrapper boundary.
-        return None
-
-    regions = []
-    for section in sections:
-        semantics = getattr(getattr(section, "semantics", None), "name", None)
-        if semantics not in _STATIC_DATA_SEMANTICS:
-            continue
-        if getattr(section, "type", None) == "NOBITS":
-            continue
-        start = getattr(section, "start", None)
-        end = getattr(section, "end", None)
-        if type(start) is not int or type(end) is not int or start < 0 or end <= start:
-            continue
-        try:
-            raw = view.read(start, end - start)
-        except Exception:  # noqa: BLE001 - unreadable sections cannot prove a load.
-            continue
-        if raw is None:
-            continue
-        data = bytes(raw)
-        if len(data) != end - start:
-            continue
-        regions.append((start, end, data))
-
-    regions.sort(key=lambda region: region[0])
-    if not regions:
-        return None
-    if any(next_region[0] < region[1] for region, next_region in zip(regions, regions[1:])):
-        return None
-    return byte_order, tuple(regions)
-
-
-def _static_bytes(regions, address, width):
-    if (
-        type(address) is not int
-        or type(width) is not int
-        or address < 0
-        or width <= 0
-    ):
-        return None
-    end = address + width
-    if end <= address:
-        return None
-    for start, region_end, data in regions:
-        if start <= address and end <= region_end:
-            offset = address - start
-            return data[offset : offset + width]
-    return None
-
-
-class _ValuePolicy:
-    """Read-only static-data and provider-proven stack-load values."""
-
-    def __init__(self, byte_order, regions, stack_load_values=()):
-        self.byte_order = byte_order
-        self.regions = regions
+    def __init__(self, static_data, stack_load_values=()):
+        self.static_data = static_data
         self.stack_load_values = dict(stack_load_values)
 
     def resolve_load(self, expression):
@@ -233,28 +162,7 @@ class _ValuePolicy:
         return Handled((self.stack_load_values[index],))
 
     def __call__(self, expression, operands):
-        if _operation_name(expression) not in _STATIC_LOAD_OPERATIONS:
-            return NotHandled()
-        if (
-            len(operands) != 1
-            or len(operands[0]) != 1
-            or type(operands[0][0]) is not int
-        ):
-            return Inconclusive("static data load has an unexpected operand shape")
-        width = getattr(expression, "size", None)
-        if type(width) is not int or width not in _SUPPORTED_LOAD_WIDTHS:
-            return Inconclusive("static data load has an unsupported width")
-        data = _static_bytes(self.regions, operands[0][0], width)
-        if data is None:
-            return Inconclusive("static data load is outside the initialized-data snapshot")
-        return Handled((int.from_bytes(data, self.byte_order),))
-
-
-def _static_data_policy(view):
-    snapshot = _static_data_snapshot(view)
-    if snapshot is None:
-        return None
-    return _ValuePolicy(*snapshot)
+        return self.static_data(expression, operands)
 
 
 def _expression_index(expression):
@@ -587,34 +495,13 @@ def _private_stack_load_values(view, ssa, policy):
 
 
 def _branch_policy(view, llil):
-    policy = _static_data_policy(view)
+    policy = memory.initialized_data_policy(view)
     if policy is None:
         return None
     ssa = getattr(llil, "ssa_form", None)
     if ssa is None:
         return policy
-    return _ValuePolicy(
-        policy.byte_order,
-        policy.regions,
-        _private_stack_load_values(view, ssa, policy),
-    )
-
-
-def _is_executable_target(view, target):
-    if type(target) is not int or target < 0:
-        return False
-    try:
-        checker = getattr(view, "is_offset_executable", None)
-        if callable(checker):
-            return bool(checker(target))
-        sections = tuple(view.get_sections_at(target) or ())
-    except Exception:  # noqa: BLE001 - Binary Ninja wrapper boundary.
-        return False
-    return any(
-        getattr(getattr(section, "semantics", None), "name", None)
-        == "ReadOnlyCodeSectionSemantics"
-        for section in sections
-    )
+    return _StackValuePolicy(policy, _private_stack_load_values(view, ssa, policy))
 
 
 def _targets_from_values(view, result):
@@ -626,7 +513,7 @@ def _targets_from_values(view, result):
     if any(type(target) is not int or target < 0 for target in raw_targets):
         return Inconclusive("value evaluation produced a malformed target")
     targets = tuple(sorted(set(raw_targets)))
-    if any(not _is_executable_target(view, target) for target in targets):
+    if any(not memory.is_executable_target(view, target) for target in targets):
         return Inconclusive("value evaluation produced a non-executable target")
     return targets
 
@@ -654,14 +541,6 @@ def _branch_values(view, llil, jump, policy):
 def _iter_indirect_jumps(llil):
     for instruction in _instructions(llil):
         if _operation_name(instruction) not in _BRANCH_OPERATIONS:
-            continue
-        if _operation_name(getattr(instruction, "dest", None)) not in _CONSTANT_OPERATIONS:
-            yield instruction
-
-
-def _iter_indirect_calls(mlil):
-    for instruction in _instructions(mlil):
-        if _operation_name(instruction) not in _CALL_OPERATIONS:
             continue
         if _operation_name(getattr(instruction, "dest", None)) not in _CONSTANT_OPERATIONS:
             yield instruction
@@ -735,6 +614,11 @@ def _same_arm_match(left, right):
 
 
 def _case_arm(case):
+    matches = _case_arms(case)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _case_arms(case):
     matches = []
     for source in getattr(case, "sources", ()) or ():
         for edge in getattr(source, "edges", ()) or ():
@@ -743,7 +627,7 @@ def _case_arm(case):
                 _same_arm_match(match, previous) for previous in matches
             ):
                 matches.append(match)
-    return matches[0] if len(matches) == 1 else None
+    return tuple(matches)
 
 
 def _case_outcomes(values):
@@ -772,7 +656,34 @@ def _case_outcomes(values):
     return parent, arms, {kind: value for value, kind in outcomes.items()}
 
 
-def _llil_condition(parent):
+def _flag_definition_reaches_branch(definition, branch, parent):
+    definition_block = getattr(definition, "il_basic_block", None)
+    branch_block = getattr(branch, "il_basic_block", None)
+    if definition_block is None:
+        definition_block = parent
+    if branch_block is None:
+        branch_block = parent
+    if _same_entity(definition_block, branch_block):
+        instructions = _block_instructions(parent)
+        definition_indices = [
+            index
+            for index, instruction in enumerate(instructions)
+            if _same_entity(instruction, definition)
+        ]
+        branch_indices = [
+            index
+            for index, instruction in enumerate(instructions)
+            if _same_entity(instruction, branch)
+        ]
+        return (
+            len(definition_indices) == 1
+            and len(branch_indices) == 1
+            and definition_indices[0] < branch_indices[0]
+        )
+    return _block_dominates(definition_block, branch_block)
+
+
+def _llil_condition(parent, llil=None):
     branch = _terminal(parent)
     if _operation_name(branch) != "LLIL_IF":
         return None
@@ -782,15 +693,19 @@ def _llil_condition(parent):
     flag_ref = getattr(flag, "src", None)
     if flag_ref is None:
         return None
+    instructions = _instructions(llil) if llil is not None else _block_instructions(parent)
     definitions = [
         instruction
-        for instruction in _block_instructions(parent)
+        for instruction in instructions
         if _operation_name(instruction) == "LLIL_SET_FLAG"
         and _same_entity(getattr(instruction, "dest", None), flag_ref)
     ]
     if len(definitions) != 1:
         return None
-    condition = getattr(definitions[0], "src", None)
+    definition = definitions[0]
+    if not _flag_definition_reaches_branch(definition, branch, parent):
+        return None
+    condition = getattr(definition, "src", None)
     operation = _operation_name(condition)
     return condition if operation is not None and operation.startswith("LLIL_CMP_") else None
 
@@ -820,7 +735,7 @@ def _matching_llil_condition(llil, proof_parent, proof_arms):
             continue
         parent = getattr(instruction, "il_basic_block", None)
         arms = _parent_arms(parent)
-        condition = _llil_condition(parent)
+        condition = _llil_condition(parent, llil)
         if arms is None or condition is None:
             continue
         if any(_block_span(arms[kind]) != _block_span(proof_arms[kind]) for kind in _OUTCOMES):
@@ -829,15 +744,131 @@ def _matching_llil_condition(llil, proof_parent, proof_arms):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _directed_targets(values, llil):
-    recovered = _case_outcomes(values)
-    if recovered is None:
-        return None
-    parent, arms, targets = recovered
+def _condition_for_arms(llil, parent, arms):
     operation = _operation_name(_terminal(parent))
     condition = _llil_condition(parent) if operation == "LLIL_IF" else None
     if condition is None and operation in {"LLIL_IF", "MLIL_IF"}:
         condition = _matching_llil_condition(llil, parent, arms)
+    return condition
+
+
+def _same_direct_llil_operand(left, right):
+    operation = _operation_name(left)
+    if operation != _operation_name(right):
+        return False
+    left_width = getattr(left, "size", None)
+    right_width = getattr(right, "size", None)
+    if (
+        type(left_width) is not int
+        or left_width < 0
+        or left_width != right_width
+    ):
+        return False
+    if operation in {"LLIL_REG", "LLIL_REG_SSA"}:
+        left_source = getattr(left, "src", None)
+        right_source = getattr(right, "src", None)
+        return left_source is not None and _same_entity(left_source, right_source)
+    if operation in {"LLIL_CONST", "LLIL_CONST_PTR"}:
+        left_value = getattr(left, "constant", None)
+        right_value = getattr(right, "constant", None)
+        return type(left_value) is int and left_value == right_value
+    return False
+
+
+def _same_direct_llil_comparison(left, right):
+    operation = _operation_name(left)
+    left_width = getattr(left, "size", None)
+    right_width = getattr(right, "size", None)
+    if (
+        operation is None
+        or not operation.startswith("LLIL_CMP_")
+        or operation != _operation_name(right)
+        or type(left_width) is not int
+        or left_width < 0
+        or left_width != right_width
+    ):
+        return False
+    return _same_direct_llil_operand(getattr(left, "left", None), getattr(right, "left", None)) and _same_direct_llil_operand(
+        getattr(left, "right", None), getattr(right, "right", None)
+    )
+
+
+def _equivalent_case_targets(values, llil):
+    targets = getattr(values, "values", None)
+    cases = getattr(values, "cases", None)
+    if type(targets) is not tuple or len(targets) != 2 or type(cases) is not tuple:
+        return None
+
+    matches_by_value = {}
+    for case in cases:
+        value = getattr(case, "value", None)
+        matches = _case_arms(case)
+        if (
+            type(value) is not int
+            or value not in targets
+            or value in matches_by_value
+            or len(matches) < 2
+        ):
+            return None
+        matches_by_value[value] = matches
+    if set(matches_by_value) != set(targets):
+        return None
+
+    parent_groups = []
+    for value, matches in matches_by_value.items():
+        for match in matches:
+            parent = match[1]
+            for group_parent, entries in parent_groups:
+                if _same_entity(parent, group_parent):
+                    entries.append((value, match))
+                    break
+            else:
+                parent_groups.append((parent, [(value, match)]))
+    if len(parent_groups) < 2:
+        return None
+
+    reference = None
+    for parent, entries in parent_groups:
+        arm_by_value = {}
+        for value, match in entries:
+            if value in arm_by_value:
+                return None
+            arm_by_value[value] = match
+        if set(arm_by_value) != set(targets):
+            return None
+
+        arms = {}
+        directed = {}
+        for value in targets:
+            kind, _candidate_parent, arm = arm_by_value[value]
+            if kind in arms:
+                return None
+            arms[kind] = arm
+            directed[kind] = value
+        if set(arms) != _OUTCOMES:
+            return None
+        condition = _condition_for_arms(llil, parent, arms)
+        if condition is None:
+            return None
+        if reference is None:
+            reference = condition, directed
+            continue
+        if directed != reference[1] or not _same_direct_llil_comparison(
+            reference[0], condition
+        ):
+            return None
+
+    if reference is None:
+        return None
+    return reference[0], reference[1]["TrueBranch"], reference[1]["FalseBranch"]
+
+
+def _directed_targets(values, llil):
+    recovered = _case_outcomes(values)
+    if recovered is None:
+        return _equivalent_case_targets(values, llil)
+    parent, arms, targets = recovered
+    condition = _condition_for_arms(llil, parent, arms)
     if condition is None:
         return None
     return condition, targets["TrueBranch"], targets["FalseBranch"]
@@ -896,10 +927,10 @@ def branch_targets(query):
 
 
 def call_targets(query):
-    calls = tuple(_iter_indirect_calls(query.mlil))
+    calls = tuple(mlil_helpers.iter_indirect_calls(query.mlil))
     if not calls:
         return CompleteBatch(())
-    policy = _static_data_policy(query.view)
+    policy = memory.initialized_data_policy(query.view)
     if policy is None:
         return Inconclusive("could not snapshot initialized static data")
     ssa = getattr(query.mlil, "ssa_form", None)
@@ -921,7 +952,7 @@ def call_targets(query):
 
 
 def _direct_static_loads(mlil):
-    for expression in _walk_mlil_expressions(mlil):
+    for expression in mlil_helpers.iter_expressions(mlil):
         if _operation_name(expression) not in _MLIL_LOAD_OPERATIONS:
             continue
         address = _static_pointer_address(getattr(expression, "src", None))
@@ -965,21 +996,6 @@ def _expression_children(expression):
     return tuple(children)
 
 
-def _walk_mlil_expressions(mlil):
-    pending = list(reversed(_instructions(mlil)))
-    seen = set()
-    while pending:
-        expression = pending.pop()
-        if _operation_name(expression) is None:
-            continue
-        key = _expression_identity(expression)
-        if key in seen:
-            continue
-        seen.add(key)
-        yield expression
-        pending.extend(reversed(_expression_children(expression)))
-
-
 def _static_pointer_address(expression):
     if _operation_name(expression) not in _CONSTANT_OPERATIONS:
         return None
@@ -988,7 +1004,7 @@ def _static_pointer_address(expression):
 
 
 def _direct_static_writes(mlil):
-    for expression in _walk_mlil_expressions(mlil):
+    for expression in mlil_helpers.iter_expressions(mlil):
         operation = _operation_name(expression)
         if operation not in _MLIL_STORE_OPERATIONS:
             continue
@@ -1006,10 +1022,9 @@ def _direct_static_writes(mlil):
 
 
 def global_data(query):
-    snapshot = _static_data_snapshot(query.view)
-    if snapshot is None:
+    policy = memory.initialized_data_policy(query.view)
+    if policy is None:
         return Inconclusive("could not snapshot initialized static data")
-    _byte_order, regions = snapshot
 
     widths = {}
     writes = tuple(_direct_static_writes(query.mlil))
@@ -1018,7 +1033,7 @@ def global_data(query):
             continue
         if any(_overlaps(address, width, written_address, written_width) for written_address, written_width in writes):
             continue
-        if _static_bytes(regions, address, width) is None:
+        if policy.bytes_at(address, width) is None:
             continue
         previous = widths.get(address)
         if previous is not None and previous != width:
@@ -1168,7 +1183,7 @@ class _ConcreteMLIL:
         self.next_index = {}
         self.values = {}
         self._program_valid = True
-        self.memory = _ConcreteMemory(view, _byte_order(view) or "little")
+        self.memory = _ConcreteMemory(view, memory.byte_order(view) or "little")
 
         for instruction in self.instructions:
             index = _instruction_index(instruction)
@@ -1470,14 +1485,6 @@ def _direct_call_arguments(call):
     return addresses if all(address is not None for address in addresses) else None
 
 
-def _direct_calls(mlil):
-    for instruction in _instructions(mlil):
-        if _operation_name(instruction) not in _CALL_OPERATIONS:
-            continue
-        if _static_pointer_address(getattr(instruction, "dest", None)) is not None:
-            yield instruction
-
-
 def _textual_plaintext(memory, destination):
     if destination not in memory.writes:
         return None
@@ -1516,7 +1523,7 @@ def _recover_direct_call_strings(query):
     facts = []
     seen = set()
     decoders = {}
-    for call in _direct_calls(query.mlil):
+    for call in mlil_helpers.iter_calls(query.mlil):
         call_address = getattr(call, "address", None)
         target = _static_pointer_address(getattr(call, "dest", None))
         arguments = _direct_call_arguments(call)
@@ -2157,9 +2164,11 @@ def _llil_block_static_loads(function, address):
     return tuple(sorted(addresses))
 
 
-def _static_consumer_destinations(mlil):
+def _static_consumer_destinations(current_mlil):
     destinations = set()
-    for call in _direct_calls(mlil):
+    for call in mlil_helpers.iter_calls(current_mlil):
+        if _static_pointer_address(getattr(call, "dest", None)) is None:
+            continue
         arguments = _direct_call_arguments(call)
         if arguments:
             destinations.add(arguments[0])
@@ -2230,7 +2239,46 @@ def _static_load_address(expression):
     return address
 
 
-def _guard_flag_address(instruction):
+def _last_variable_definition(block, variable, before_index=None):
+    definitions = [
+        candidate
+        for candidate in _block_instructions(block)
+        if (
+            (candidate_index := _instruction_index(candidate)) is not None
+            and (before_index is None or candidate_index < before_index)
+            and _operation_name(candidate) in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"}
+            and _same_entity(getattr(candidate, "dest", None), variable)
+        )
+    ]
+    return definitions[-1] if definitions else None
+
+
+def _unique_static_flag_definitions(instructions, done_stores):
+    definitions = {}
+    for instruction in instructions:
+        operation = _operation_name(instruction)
+        if operation not in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA", *_SET_FIELD_OPERATIONS}:
+            continue
+        variable = getattr(instruction, "dest", None)
+        if variable is None:
+            continue
+        key = _variable_identity(variable)
+        definitions[key] = (
+            instruction
+            if operation in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"} and key not in definitions
+            else None
+        )
+    return {
+        key: definition
+        for key, definition in definitions.items()
+        if (
+            definition is not None
+            and _static_load_address(getattr(definition, "src", None)) in done_stores
+        )
+    }
+
+
+def _guard_flag_address(instruction, static_definitions=None):
     if _operation_name(instruction) != "MLIL_IF":
         return None
     block = getattr(instruction, "il_basic_block", None)
@@ -2239,20 +2287,24 @@ def _guard_flag_address(instruction):
         return None
     flags = set()
     for variable in _expression_variables(getattr(instruction, "condition", None)):
-        definitions = [
-            candidate
-            for candidate in _block_instructions(block)
+        definition = _last_variable_definition(block, variable, instruction_index)
+        if definition is None and static_definitions is not None:
+            candidate = static_definitions.get(_variable_identity(variable))
+            candidate_block = getattr(candidate, "il_basic_block", None)
+            candidate_index = _instruction_index(candidate)
             if (
-                _instruction_index(candidate) is not None
-                and _instruction_index(candidate) < instruction_index
-                and _operation_name(candidate) in {"MLIL_SET_VAR", "MLIL_SET_VAR_SSA"}
-                and _same_entity(getattr(candidate, "dest", None), variable)
-            )
-        ]
-        if definitions:
-            address = _static_load_address(getattr(definitions[-1], "src", None))
-            if address is not None:
-                flags.add(address)
+                candidate_block is not None
+                and candidate_index is not None
+                and (
+                    candidate_index < instruction_index
+                    if _same_entity(candidate_block, block)
+                    else _block_dominates(candidate_block, block)
+                )
+            ):
+                definition = candidate
+        address = _static_load_address(getattr(definition, "src", None))
+        if address is not None:
+            flags.add(address)
     return next(iter(flags)) if len(flags) == 1 else None
 
 
@@ -2319,8 +2371,9 @@ def _guarded_initializer_candidates(layout):
     instructions, _blocks, block_by_index, _instruction_by_index = layout
     done_stores = _guard_done_stores(instructions)
     seen = set()
+    static_definitions = _unique_static_flag_definitions(instructions, done_stores)
     for instruction in instructions:
-        flag = _guard_flag_address(instruction)
+        flag = _guard_flag_address(instruction, static_definitions)
         if flag is None or flag not in done_stores:
             continue
         for arm in ("true", "false"):
@@ -2384,6 +2437,29 @@ def _static_write_sites(blocks):
     return sites
 
 
+def _guarded_initializer_tail_stop(blocks, marker_index):
+    for block in blocks:
+        instructions = _block_instructions(block)
+        if not any(_instruction_index(instruction) == marker_index for instruction in instructions):
+            continue
+        return max(
+            (
+                instruction_index
+                for instruction in instructions
+                for instruction_index in (_instruction_index(instruction),)
+                if (
+                    instruction_index is not None
+                    and instruction_index >= marker_index
+                    and _operation_name(instruction) in _MLIL_STORE_OPERATIONS
+                    and getattr(instruction, "size", None) == 1
+                    and _static_pointer_address(getattr(instruction, "dest", None)) is not None
+                )
+            ),
+            default=marker_index,
+        )
+    return marker_index
+
+
 def _guarded_static_plaintexts(machine, sites, flag):
     for destination in sorted(sites):
         site = sites[destination]
@@ -2416,7 +2492,11 @@ def _recover_guarded_static_strings(query):
                 return tuple(facts)
         if not machine.reset():
             continue
-        completed, exit_index = machine.run(start, allowed, stop)
+        completed, exit_index = machine.run(
+            start,
+            allowed,
+            _guarded_initializer_tail_stop(blocks, stop),
+        )
         if not completed or exit_index is not None:
             continue
         sites = _static_write_sites(blocks)

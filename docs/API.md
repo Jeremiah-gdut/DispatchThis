@@ -61,6 +61,8 @@ from DispatchThis.helpers import llil, memory, mlil, values
 
 这些模块提供操作查询、表达式/SSA 遍历、内存边界检查和完整值求解。它们不包含样本规则，也不修改 Binary Ninja。`values.evaluate_values(...)` 要么返回完整值证据，要么返回 `Inconclusive`；可选 `ValuePolicy` 只处理样本特有运算或受控 load，且必须保持纯函数。
 
+对已初始化静态数据的纯 load，可用 `memory.initialized_data_policy(view)` 创建不可变快照并直接作为 `ValuePolicy`；`memory.byte_order(view)` 只提供视图字节序，不能推断样本的 pointer 模型。需要按当前 MLIL 指令顺序、去重遍历表达式时，使用 `mlil.iter_expressions(mlil)`。
+
 函数名和参数以对应模块的 docstring/`__all__` 为准；不要为文档复制一份会过期的长函数清单。最小真实用法见 [sample-providers.md](sample-providers.md) 和 `sample/valorant/__init__.py`。
 
 ## 禁止行为

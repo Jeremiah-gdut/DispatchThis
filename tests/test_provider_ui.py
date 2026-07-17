@@ -70,6 +70,80 @@ def test_enabling_deflatten_enables_only_its_transitive_prerequisites():
     assert settings.STRING_RECOVERY_SETTING not in enabled_keys
 
 
+def test_enabling_call_targets_has_no_prerequisites():
+    ui = load_plugin_module("plugins.DispatchThis.ui")
+    settings = load_plugin_module("plugins.DispatchThis.settings")
+    func = FakeFunction(0x1000)
+    bv = FakeView([func])
+    configured = FakeSettings()
+
+    assert ui.set_function_pass(
+        bv,
+        func,
+        settings.CALL_TARGETS_SETTING,
+        True,
+        configured,
+        reanalyze=False,
+    )
+
+    assert [
+        key
+        for kind, key, value, resource, _scope in configured.writes
+        if kind == "bool" and value and resource is func
+    ] == [settings.CALL_TARGETS_SETTING]
+
+
+def test_enabling_global_data_has_no_prerequisites():
+    ui = load_plugin_module("plugins.DispatchThis.ui")
+    settings = load_plugin_module("plugins.DispatchThis.settings")
+    func = FakeFunction(0x1000)
+    bv = FakeView([func])
+    configured = FakeSettings()
+
+    assert ui.set_function_pass(
+        bv,
+        func,
+        settings.GLOBAL_DATA_SETTING,
+        True,
+        configured,
+        reanalyze=False,
+    )
+
+    assert [
+        key
+        for kind, key, value, resource, _scope in configured.writes
+        if kind == "bool" and value and resource is func
+    ] == [settings.GLOBAL_DATA_SETTING]
+
+
+def test_enabling_correlated_stores_preserves_its_required_recovery_passes():
+    ui = load_plugin_module("plugins.DispatchThis.ui")
+    settings = load_plugin_module("plugins.DispatchThis.settings")
+    func = FakeFunction(0x1000)
+    bv = FakeView([func])
+    configured = FakeSettings()
+
+    assert ui.set_function_pass(
+        bv,
+        func,
+        settings.CORRELATED_STORES_SETTING,
+        True,
+        configured,
+        reanalyze=False,
+    )
+
+    assert [
+        key
+        for kind, key, value, resource, _scope in configured.writes
+        if kind == "bool" and value and resource is func
+    ] == [
+        settings.BRANCH_TARGETS_SETTING,
+        settings.CALL_TARGETS_SETTING,
+        settings.GLOBAL_DATA_SETTING,
+        settings.CORRELATED_STORES_SETTING,
+    ]
+
+
 def test_disabling_global_data_leaves_string_recovery_enabled():
     ui = load_plugin_module("plugins.DispatchThis.ui")
     settings = load_plugin_module("plugins.DispatchThis.settings")
@@ -88,13 +162,45 @@ def test_disabling_global_data_leaves_string_recovery_enabled():
     ]
     assert disabled_keys == [
         settings.GLOBAL_DATA_SETTING,
-        settings.BRANCH_CONDITIONS_SETTING,
         settings.CORRELATED_STORES_SETTING,
         settings.DEFLATTEN_SETTING,
     ]
     assert configured.get_bool(settings.BRANCH_TARGETS_SETTING, func)
     assert configured.get_bool(settings.CALL_TARGETS_SETTING, func)
     assert configured.get_bool(settings.STRING_RECOVERY_SETTING, func)
+
+
+def test_disabling_branch_leaves_independent_call_and_global_passes_enabled():
+    ui = load_plugin_module("plugins.DispatchThis.ui")
+    settings = load_plugin_module("plugins.DispatchThis.settings")
+    func = FakeFunction(0x1000)
+    bv = FakeView([func])
+    configured = FakeSettings()
+    for key in settings.PASS_SETTING_IDS:
+        configured.bools[(key, func)] = True
+
+    assert ui.set_function_pass(
+        bv,
+        func,
+        settings.BRANCH_TARGETS_SETTING,
+        False,
+        configured,
+        reanalyze=False,
+    )
+
+    disabled_keys = [
+        key
+        for kind, key, value, resource, _scope in configured.writes
+        if kind == "bool" and not value and resource is func
+    ]
+    assert disabled_keys == [
+        settings.BRANCH_TARGETS_SETTING,
+        settings.BRANCH_CONDITIONS_SETTING,
+        settings.CORRELATED_STORES_SETTING,
+        settings.DEFLATTEN_SETTING,
+    ]
+    assert configured.get_bool(settings.CALL_TARGETS_SETTING, func)
+    assert configured.get_bool(settings.GLOBAL_DATA_SETTING, func)
 
 
 def test_enabling_string_recovery_has_no_prerequisites():

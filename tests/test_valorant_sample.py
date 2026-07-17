@@ -1,6 +1,8 @@
 import importlib.util
 import types
 
+from binaryninja import MediumLevelILOperation
+
 from conftest import ROOT, load_plugin_module, temporary_modules
 
 
@@ -15,10 +17,24 @@ class Operation:
 class Instruction:
     def __init__(self, address, operation, size=8, **attrs):
         self.address = address
-        self.operation = Operation(operation)
+        self.operation = (
+            MediumLevelILOperation[operation]
+            if operation.startswith("MLIL_")
+            else Operation(operation)
+        )
         self.size = size
         for name, value in attrs.items():
             setattr(self, name, value)
+
+    def traverse(self, visit):
+        nodes = [visit(self)]
+        for name in ("src", "left", "right", "condition", "dest", "params"):
+            value = getattr(self, name, None)
+            children = value if type(value) in (tuple, list) else (value,)
+            for child in children:
+                if isinstance(child, Instruction):
+                    nodes.extend(child.traverse(visit))
+        return nodes
 
 
 class Section:
@@ -89,8 +105,15 @@ class Block:
 def _load_sample():
     semantics = load_plugin_module("plugins.DispatchThis.semantics")
     values = load_plugin_module("plugins.DispatchThis.helpers.values")
+    memory = load_plugin_module("plugins.DispatchThis.helpers.memory")
+    mlil = load_plugin_module("plugins.DispatchThis.helpers.mlil")
+    helpers = __import__("plugins.DispatchThis.helpers", fromlist=("helpers",))
+    helpers.memory = memory
+    helpers.mlil = mlil
+    helpers.values = values
     registered = []
     core = types.ModuleType("DispatchThis")
+    core.__path__ = []
     for name in (
         "AnalysisBudget",
         "BranchTargetFact",
@@ -107,10 +130,19 @@ def _load_sample():
         "evaluate_values",
     ):
         setattr(core, name, getattr(values if hasattr(values, name) else semantics, name))
+    core.helpers = helpers
     core.register_provider = lambda provider: registered.append(provider) or True
     spec = importlib.util.spec_from_file_location("valorant_sample_test", SAMPLE_PATH)
     sample = importlib.util.module_from_spec(spec)
-    with temporary_modules({"DispatchThis": core}, clear=("valorant_sample_test",)):
+    with temporary_modules(
+        {
+            "DispatchThis": core,
+            "DispatchThis.helpers": helpers,
+            "DispatchThis.helpers.memory": memory,
+            "DispatchThis.helpers.mlil": mlil,
+        },
+        clear=("valorant_sample_test",),
+    ):
         spec.loader.exec_module(sample)
     return sample, semantics, values, registered
 
@@ -422,7 +454,7 @@ def test_call_scan_omits_sites_without_a_complete_executable_target(monkeypatch)
 def test_static_snapshot_policy_and_global_scan_use_section_data_not_a_slot_list():
     sample, semantics, values, _registered = _load_sample()
     view = View()
-    policy = sample._static_data_policy(view)
+    policy = sample.memory.initialized_data_policy(view)
     address = view.start + 0x10
     load = Instruction(0, "MLIL_LOAD_SSA", size=8)
 
@@ -692,7 +724,7 @@ def test_string_recovery_does_not_use_ssa_to_locate_static_store_strings(monkeyp
     def fail_static_ssa(_view):
         raise AssertionError("string recovery must not request an SSA static-store policy")
 
-    monkeypatch.setattr(sample, "_static_data_policy", fail_static_ssa)
+    monkeypatch.setattr(sample.memory, "initialized_data_policy", fail_static_ssa)
 
     result = sample.string_recovery(
         semantics.StringRecoveryQuery(
@@ -919,7 +951,7 @@ def test_inline_loop_uses_the_decrypt_store_when_no_consumer_call_exists(monkeyp
     ] == [(0x7400, source, destination, b"A")]
 
 
-def test_string_recovery_executes_a_guarded_static_xor_initializer(monkeypatch):
+def test_string_recovery_executes_a_guarded_static_xor_initializer_when_marker_precedes_terminator(monkeypatch):
     sample, semantics, _values, _registered = _load_sample()
     source = 0x1040
     destination = 0x2000
@@ -983,17 +1015,17 @@ def test_string_recovery_executes_a_guarded_static_xor_initializer(monkeypatch):
         src=_variable(value_variable, 122),
     )
     terminator = Instruction(
-        0x7510,
+        0x7514,
         "MLIL_STORE",
-        instr_index=4,
+        instr_index=5,
         size=1,
         dest=_const_pointer(destination + 1, 123),
         src=Instruction(0, "MLIL_CONST", expr_index=124, constant=0),
     )
     mark_done = Instruction(
-        0x7514,
+        0x7510,
         "MLIL_STORE",
-        instr_index=5,
+        instr_index=4,
         size=1,
         dest=_const_pointer(flag, 125),
         src=Instruction(0, "MLIL_CONST", expr_index=126, constant=1),
@@ -1001,7 +1033,7 @@ def test_string_recovery_executes_a_guarded_static_xor_initializer(monkeypatch):
     leave = Instruction(0x7518, "MLIL_GOTO", instr_index=6, dest=10)
     skip = Instruction(0x751C, "MLIL_RET", instr_index=10)
     guard_block = Block(0, (load_flag, guard))
-    init_block = Block(1, (decode, first, terminator, mark_done, leave))
+    init_block = Block(1, (decode, first, mark_done, terminator, leave))
     skip_block = Block(2, (skip,))
     to_skip = Edge(guard_block, skip_block, "TrueBranch")
     to_init = Edge(guard_block, init_block, "FalseBranch")
@@ -1023,6 +1055,71 @@ def test_string_recovery_executes_a_guarded_static_xor_initializer(monkeypatch):
         (fact.call_addr, fact.source_addr, fact.destination_addr, fact.plaintext)
         for fact in result.facts
     ] == [(0x750C, source, destination, b"A")]
+
+
+def test_guard_flag_address_follows_a_unique_static_load_across_a_merge():
+    sample, _semantics, _values, _registered = _load_sample()
+    flag = 0x2010
+    flag_variable = object()
+    load_flag = Instruction(
+        0x7600,
+        "MLIL_SET_VAR",
+        instr_index=0,
+        dest=flag_variable,
+        src=Instruction(
+            0,
+            "MLIL_LOAD",
+            expr_index=130,
+            size=1,
+            src=_const_pointer(flag, 131),
+        ),
+    )
+    split = Instruction(
+        0x7604,
+        "MLIL_IF",
+        instr_index=1,
+        condition=Instruction(0, "MLIL_CONST", expr_index=132, constant=1),
+        true=2,
+        false=3,
+    )
+    left_leave = Instruction(0x7608, "MLIL_GOTO", instr_index=2, dest=4)
+    right_leave = Instruction(0x760C, "MLIL_GOTO", instr_index=3, dest=4)
+    guard = Instruction(
+        0x7610,
+        "MLIL_IF",
+        instr_index=4,
+        condition=Instruction(
+            0,
+            "MLIL_CMP_NE",
+            expr_index=133,
+            left=_variable(flag_variable, 134),
+            right=Instruction(0, "MLIL_CONST", expr_index=135, constant=0),
+        ),
+        true=5,
+        false=6,
+    )
+    entry = Block(0, (load_flag, split))
+    left = Block(1, (left_leave,))
+    right = Block(2, (right_leave,))
+    merge = Block(3, (guard,))
+    entry_to_left = Edge(entry, left, "TrueBranch")
+    entry_to_right = Edge(entry, right, "FalseBranch")
+    left_to_merge = Edge(left, merge, "UnconditionalBranch")
+    right_to_merge = Edge(right, merge, "UnconditionalBranch")
+    entry.outgoing_edges = (entry_to_left, entry_to_right)
+    left.incoming_edges = (entry_to_left,)
+    left.outgoing_edges = (left_to_merge,)
+    right.incoming_edges = (entry_to_right,)
+    right.outgoing_edges = (right_to_merge,)
+    merge.incoming_edges = (left_to_merge, right_to_merge)
+    merge.dominators = (entry, merge)
+
+    static_definitions = sample._unique_static_flag_definitions(
+        (load_flag, split, left_leave, right_leave, guard),
+        {flag: ()},
+    )
+
+    assert sample._guard_flag_address(guard, static_definitions) == flag
 
 
 def test_inline_loop_replays_an_outer_constant_counter(monkeypatch):
@@ -1307,11 +1404,11 @@ def test_string_recovery_replays_a_static_initializer_pattern_from_its_llil_load
 def test_branch_stack_spills_are_resolved_only_when_the_slot_has_not_escaped():
     sample, _semantics, values, _registered = _load_sample()
     view = View()
-    policy = sample._static_data_policy(view)
+    policy = sample.memory.initialized_data_policy(view)
     ssa, load = _private_stack_spill()
 
     spill_values = sample._private_stack_load_values(view, ssa, policy)
-    stack_policy = sample._ValuePolicy(policy.byte_order, policy.regions, spill_values)
+    stack_policy = sample._StackValuePolicy(policy, spill_values)
 
     assert spill_values == ((load.expr_index, 0x59),)
     resolved = stack_policy.resolve_load(load)
@@ -1332,7 +1429,7 @@ def test_branch_stack_spills_are_resolved_only_when_the_slot_has_not_escaped():
 def test_branch_stack_spills_follow_a_proven_ssa_stack_pointer_chain_without_vsa():
     sample, _semantics, _values, _registered = _load_sample()
     view = View()
-    policy = sample._static_data_policy(view)
+    policy = sample.memory.initialized_data_policy(view)
     ssa, load = _syntactic_private_stack_spill()
 
     assert sample._vsa_stack_offset(load.src) is None
@@ -1386,3 +1483,160 @@ def test_branch_scan_recovers_a_directed_condition_from_core_edge_evidence(monke
     assert fact.condition is comparison
     assert fact.true_target == 0xB000
     assert fact.false_target == 0xC000
+
+
+def test_branch_scan_recovers_a_unique_predecessor_flag_definition(monkeypatch):
+    sample, semantics, values, _registered = _load_sample()
+    flag_token = object()
+    comparison = Instruction(0xA000, "LLIL_CMP_NE")
+    set_flag = Instruction(0xA000, "LLIL_SET_FLAG", size=0, dest=flag_token, src=comparison)
+    condition = Instruction(0xA004, "LLIL_FLAG", size=0, src=flag_token)
+    branch = Instruction(0xA004, "LLIL_IF", size=0, condition=condition)
+    predecessor = Block(0, (set_flag,))
+    parent = Block(1, (branch,))
+    true_arm = Block(2, (Instruction(0xA008, "LLIL_GOTO", size=0),))
+    false_arm = Block(3, (Instruction(0xA00C, "LLIL_GOTO", size=0),))
+    jump_dest = object()
+    jump = _jump(0xA020, jump_dest)
+    join = Block(4, (jump,))
+    to_parent = Edge(predecessor, parent, "UnconditionalBranch")
+    true_from_parent = Edge(parent, true_arm, "TrueBranch")
+    false_from_parent = Edge(parent, false_arm, "FalseBranch")
+    true_to_join = Edge(true_arm, join, "UnconditionalBranch")
+    false_to_join = Edge(false_arm, join, "UnconditionalBranch")
+    predecessor.outgoing_edges = (to_parent,)
+    parent.incoming_edges = (to_parent,)
+    parent.dominators = (predecessor, parent)
+    parent.outgoing_edges = (true_from_parent, false_from_parent)
+    true_arm.incoming_edges = (true_from_parent,)
+    false_arm.incoming_edges = (false_from_parent,)
+    true_arm.outgoing_edges = (true_to_join,)
+    false_arm.outgoing_edges = (false_to_join,)
+    join.incoming_edges = (true_to_join, false_to_join)
+    llil = types.SimpleNamespace(
+        instructions=(set_flag, branch, jump),
+        ssa_form=types.SimpleNamespace(),
+    )
+    cases = (
+        values.ValueCase(0xB000, (values.PathSource((true_to_join,)),)),
+        values.ValueCase(0xC000, (values.PathSource((false_to_join,)),)),
+    )
+    monkeypatch.setattr(
+        sample,
+        "evaluate_values",
+        lambda *_args: _complete(values, (0xB000, 0xC000), cases),
+    )
+
+    result = sample.branch_targets(
+        semantics.BranchTargetQuery(View((0xB000, 0xC000)), _main(), llil)
+    )
+
+    fact = result.facts[0]
+    assert fact.condition is comparison
+    assert fact.true_target == 0xB000
+    assert fact.false_target == 0xC000
+
+
+def test_llil_condition_rejects_a_non_dominating_flag_definition():
+    sample, _semantics, _values, _registered = _load_sample()
+    flag_token = object()
+    comparison = Instruction(0xA000, "LLIL_CMP_NE")
+    definition = Instruction(
+        0xA000,
+        "LLIL_SET_FLAG",
+        size=0,
+        dest=flag_token,
+        src=comparison,
+    )
+    branch = Instruction(
+        0xA004,
+        "LLIL_IF",
+        size=0,
+        condition=Instruction(0xA004, "LLIL_FLAG", size=0, src=flag_token),
+    )
+    Block(0, (definition,))
+    branch_block = Block(1, (branch,))
+    branch_block.dominators = (branch_block,)
+    llil = types.SimpleNamespace(instructions=(definition, branch))
+
+    assert sample._llil_condition(branch_block, llil) is None
+
+
+def test_branch_scan_groups_only_duplicate_equivalent_condition_arms(monkeypatch):
+    sample, semantics, values, _registered = _load_sample()
+    predicate = object()
+
+    def comparison(address):
+        return Instruction(
+            address,
+            "LLIL_CMP_NE",
+            left=Instruction(address, "LLIL_REG", src=predicate),
+            right=Instruction(address, "LLIL_CONST", constant=0),
+        )
+
+    first_flag, second_flag = object(), object()
+    first_comparison, second_comparison = comparison(0xA000), comparison(0xA004)
+    first_set = Instruction(0xA000, "LLIL_SET_FLAG", size=0, dest=first_flag, src=first_comparison)
+    second_set = Instruction(0xA004, "LLIL_SET_FLAG", size=0, dest=second_flag, src=second_comparison)
+    first_branch = Instruction(0xA008, "LLIL_IF", size=0, condition=Instruction(0xA008, "LLIL_FLAG", size=0, src=first_flag))
+    second_branch = Instruction(0xA00C, "LLIL_IF", size=0, condition=Instruction(0xA00C, "LLIL_FLAG", size=0, src=second_flag))
+    first_true, first_false = Block(1, (Instruction(0xA010, "LLIL_GOTO", size=0),)), Block(2, (Instruction(0xA014, "LLIL_GOTO", size=0),))
+    second_true, second_false = Block(3, (Instruction(0xA018, "LLIL_GOTO", size=0),)), Block(4, (Instruction(0xA01C, "LLIL_GOTO", size=0),))
+    first_parent = Block(0, (first_set, first_branch))
+    second_parent = Block(5, (second_set, second_branch))
+    jump_dest = object()
+    jump = _jump(0xA030, jump_dest)
+    join = Block(6, (jump,))
+    first_true_from_parent = Edge(first_parent, first_true, "TrueBranch")
+    first_false_from_parent = Edge(first_parent, first_false, "FalseBranch")
+    second_true_from_parent = Edge(second_parent, second_true, "TrueBranch")
+    second_false_from_parent = Edge(second_parent, second_false, "FalseBranch")
+    first_true_to_join = Edge(first_true, join, "UnconditionalBranch")
+    first_false_to_join = Edge(first_false, join, "UnconditionalBranch")
+    second_true_to_join = Edge(second_true, join, "UnconditionalBranch")
+    second_false_to_join = Edge(second_false, join, "UnconditionalBranch")
+    for arm, incoming, outgoing in (
+        (first_true, first_true_from_parent, first_true_to_join),
+        (first_false, first_false_from_parent, first_false_to_join),
+        (second_true, second_true_from_parent, second_true_to_join),
+        (second_false, second_false_from_parent, second_false_to_join),
+    ):
+        arm.incoming_edges = (incoming,)
+        arm.outgoing_edges = (outgoing,)
+    first_parent.outgoing_edges = (first_true_from_parent, first_false_from_parent)
+    second_parent.outgoing_edges = (second_true_from_parent, second_false_from_parent)
+    join.incoming_edges = (
+        first_true_to_join,
+        first_false_to_join,
+        second_true_to_join,
+        second_false_to_join,
+    )
+    llil = types.SimpleNamespace(
+        instructions=(first_set, first_branch, second_set, second_branch, jump),
+        ssa_form=types.SimpleNamespace(),
+    )
+    cases = (
+        values.ValueCase(0xB000, (values.PathSource((first_true_to_join, second_true_to_join)),)),
+        values.ValueCase(0xC000, (values.PathSource((first_false_to_join, second_false_to_join)),)),
+    )
+    monkeypatch.setattr(
+        sample,
+        "evaluate_values",
+        lambda *_args: _complete(values, (0xB000, 0xC000), cases),
+    )
+
+    result = sample.branch_targets(
+        semantics.BranchTargetQuery(View((0xB000, 0xC000)), _main(), llil)
+    )
+
+    fact = result.facts[0]
+    assert fact.condition in (first_comparison, second_comparison)
+    assert fact.true_target == 0xB000
+    assert fact.false_target == 0xC000
+
+    second_comparison.right.constant = 1
+    distinct = sample.branch_targets(
+        semantics.BranchTargetQuery(View((0xB000, 0xC000)), _main(), llil)
+    )
+
+    assert distinct.facts[0].condition is None

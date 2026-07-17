@@ -61,6 +61,7 @@ bn log --target active --limit 100
 ### 嵌套全局 load
 
 MLIL 中的静态 load 常嵌在算术或字段表达式下。遍历完整表达式树，并排除当前函数直接写入的重叠槽位，之后才产生 `GlobalDataFact`。provider 应返回完整的原生 `Type`，而不是类型字符串。
+该事实只恢复槽位类型；不能仅因文件初始字节可读就把运行时 LOAD 折叠成立即数。
 
 ### SSA 字段读取
 
@@ -73,6 +74,8 @@ MLIL 中的静态 load 常嵌在算术或字段表达式下。遍历完整表达
 ### 剩余 switch
 
 只有 provider 同时证明恢复点条件和两个不同、有方向的目标时，才填写 `BranchTargetFact.condition`、`true_target`、`false_target`。多入口 dispatcher 或只有无方向目标集的站点必须返回 `condition=None`。保留 switch 是正确结果，不是条件翻译器的失败。
+
+多个 arm 见证只能在每个 parent 都完整覆盖同一 true/false 目标、并且恢复出的条件是同一直接 LLIL 寄存器/常量比较时合并；不能按 CFG 或列表顺序挑一个候选。
 
 ## 5. 何时修改核心
 
@@ -93,7 +96,7 @@ MLIL 中的静态 load 常嵌在算术或字段表达式下。遍历完整表达
 4. 用 `bn log` 确认 workflow 实际应用事实；再读取 GUI 注释、data-var 类型或最终 HLIL。
 5. 执行 `pytest -q` 与 `ruff check .`。
 
-完整重启是默认验证方式：workflow 已注册后不可变，provider registry 也不会安全地用同 ID 覆盖已加载对象。不要保存或覆盖用户的 BNDB，除非用户明确要求。
+修改 workflow 注册或回调后必须完整重启：已注册 workflow 不可变。仅改 provider 或其纯辅助函数时可以在开发中热重载，但必须读回实际 registry/bound callback 并用 `bn log` 验证 GUI workflow；无法证明绑定已更新时仍应完整重启。不要保存或覆盖用户的 BNDB，除非用户明确要求。
 
 ## 7. 完成标准
 

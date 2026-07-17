@@ -531,7 +531,7 @@ class FakeContext:
         self.view = types.SimpleNamespace(
             arch=types.SimpleNamespace(name="aarch64"),
             session_data={},
-            get_function_at=lambda _target: None,
+            get_function_at=lambda _target, _platform=None: None,
         )
         self.typed_globals = []
 
@@ -693,11 +693,13 @@ def test_branch_resolver_stops_before_profile_when_setting_write_fails(monkeypat
     assert FakeWorkflowState.marked_stable is False
 
 
-def test_call_phase_requires_branch_stability_before_settings_or_branch_work(monkeypatch):
-    settings = FakeAnalysisSettings(ignore_key="analysis.limits.maxFunctionSize")
+def test_call_phase_runs_without_branch_stability(monkeypatch):
+    settings = FakeAnalysisSettings()
     ctx = _branch_settings_context()
-    ctx.function.low_level_il = "function-llil"
-    branch_plan_results["function-llil"] = [{"source": 0x3000, "targets": (0x4000,)}]
+    call_plan_calls.clear()
+    call_plan_results.clear()
+    FakeWorkflowState.call_stable_marked = False
+    FakeWorkflowState.call_cleanup = True
     monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
     monkeypatch.setattr(
         workflow,
@@ -708,9 +710,29 @@ def test_call_phase_requires_branch_stability_before_settings_or_branch_work(mon
 
     workflow.resolve_calls_mlil(ctx)
 
-    assert active_profile_calls == [ctx.view]
+    assert call_plan_calls == [(ctx.view, ctx.mlil)]
     assert branch_plan_calls == []
     assert FakeWorkflowState.marked_stable is False
+    assert FakeWorkflowState.call_stable_marked is True
+    FakeWorkflowState.call_cleanup = True
+
+
+def test_global_phase_runs_without_branch_or_call_stability():
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.global_receipts = {}
+    FakeWorkflowState.global_slots = []
+    FakeWorkflowState.global_stable_marked = False
+    FakeWorkflowState.globals_stable = False
+    global_plan_calls.clear()
+    global_plan_results.clear()
+    ctx = FakeContext()
+
+    workflow.resolve_globals_mlil(ctx)
+
+    assert global_plan_calls == [(ctx.view, ctx.mlil)]
+    assert FakeWorkflowState.global_stable_marked is True
+    FakeWorkflowState.globals_stable = False
 
 
 def test_deflatten_workflow_runs_without_branch_mirror_state():
@@ -1159,7 +1181,7 @@ def test_branch_resolver_schedules_tag_cleanup_once_while_pending():
         arch=types.SimpleNamespace(name="aarch64"),
         session_data={},
         add_analysis_completion_event=events.append,
-        get_function_at=lambda start: ctx.function if start == ctx.function.start else None,
+        get_function_at=lambda start, _platform=None: ctx.function if start == ctx.function.start else None,
     )
 
     workflow.resolve_jumps_llil(ctx)
@@ -1229,12 +1251,13 @@ def test_call_resolver_uses_active_provider_without_workflow_state():
     FakeWorkflowState.call_target_receipts = {}
     FakeWorkflowState.call_stable_marked = False
     FakeWorkflowState.call_cleanup_marked = False
+    FakeWorkflowState.call_cleanup = True
     active_profile_calls.clear()
     call_plan_calls.clear()
     call_rewrite_calls.clear()
     ctx = FakeContext()
     callee_type = _function_type(1)
-    ctx.view.get_function_at = lambda target: (
+    ctx.view.get_function_at = lambda target, _platform=None: (
         types.SimpleNamespace(type=callee_type, name="sub_5000")
         if target == 0x5000
         else None
@@ -1264,6 +1287,72 @@ def test_call_resolver_uses_active_provider_without_workflow_state():
     assert FakeWorkflowState.call_cleanup_marked is True
     FakeWorkflowState.stable = False
     call_plan_results.clear()
+
+
+def test_call_phase_creates_user_function_for_a_proven_uncovered_target():
+    # Given: a current provider fact whose callee is not already covered.
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_targets = []
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
+    FakeWorkflowState.call_stable_marked = False
+    call_plan_results[:] = [{
+        "call_il": types.SimpleNamespace(address=0x4000, params=[]),
+        "call_addr": 0x4000,
+        "target": 0x5000,
+        "cleanup_roots": set(),
+    }]
+    ctx = FakeContext()
+    ctx.function.platform = "aarch64-platform"
+    created = []
+    ctx.view.create_user_function = lambda target, platform: (
+        created.append((target, platform)),
+        types.SimpleNamespace(start=target),
+    )[1]
+
+    # When: the core deincall workflow consumes that fact.
+    workflow.resolve_calls_mlil(ctx)
+
+    # Then: it creates a user function and leaves the caller for reanalysis.
+    assert created == [(0x5000, "aarch64-platform")]
+    assert FakeWorkflowState.call_targets == []
+    assert FakeWorkflowState.call_stable_marked is False
+    call_plan_results.clear()
+    FakeWorkflowState.stable = False
+
+
+def test_call_phase_creates_a_target_inside_an_existing_function():
+    # Given: a proven call target inside an auto-discovered function.
+    FakeWorkflowState.stable = True
+    FakeWorkflowState.call_targets = []
+    FakeWorkflowState.call_receipts = {}
+    FakeWorkflowState.call_target_receipts = {}
+    FakeWorkflowState.call_stable_marked = False
+    call_plan_results[:] = [{
+        "call_il": types.SimpleNamespace(address=0x4000, params=[]),
+        "call_addr": 0x4000,
+        "target": 0x5000,
+        "cleanup_roots": set(),
+    }]
+    ctx = FakeContext()
+    ctx.view.get_functions_containing = lambda _target: [
+        types.SimpleNamespace(start=0x4F00),
+    ]
+    created = []
+    ctx.view.create_user_function = lambda target, platform: (
+        created.append((target, platform)),
+        types.SimpleNamespace(start=target),
+    )[1]
+
+    # When: the core deincall workflow consumes the target.
+    workflow.resolve_calls_mlil(ctx)
+
+    # Then: it adds the proven entry instead of trusting the enclosing function.
+    assert created == [(0x5000, None)]
+    assert FakeWorkflowState.call_targets == []
+    assert FakeWorkflowState.call_stable_marked is False
+    call_plan_results.clear()
+    FakeWorkflowState.stable = False
 
 
 def test_call_adjustment_uses_call_site_parameters_over_narrow_callee():
@@ -1303,7 +1392,7 @@ def test_call_phase_leaves_auto_type_alone_when_no_safe_override(monkeypatch):
         "cleanup_roots": set(),
     }]
     ctx = FakeContext()
-    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=_function_type(1))
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(type=_function_type(1))
     mutations = []
     ctx.function.set_call_type_adjustment = lambda *args: mutations.append(args)
     monkeypatch.setattr(
@@ -1335,6 +1424,9 @@ def test_call_phase_in_place_rewrite_does_not_install_an_mlil_copy():
         "cleanup_roots": set(),
     }]
     ctx = FakeContext()
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(
+        type=_function_type(0),
+    )
     ctx.set_mlil_function = lambda _mlil: (_ for _ in ()).throw(RuntimeError("no commit"))
 
     workflow.resolve_calls_mlil(ctx)
@@ -1361,7 +1453,7 @@ def test_call_phase_uses_call_site_type_for_narrow_callee():
         "cleanup_roots": set(),
     }]
     ctx = FakeContext()
-    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=_function_type(0))
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(type=_function_type(0))
 
     workflow.resolve_calls_mlil(ctx)
 
@@ -1442,7 +1534,7 @@ def test_call_cleanup_does_not_infer_ownership_from_a_call_receipt_location():
     call_plan_results.clear()
     ctx = FakeContext()
     callee_type = _function_type(0)
-    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=callee_type)
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(type=callee_type)
 
     workflow.resolve_calls_mlil(ctx)
 
@@ -1462,7 +1554,7 @@ def test_call_cleanup_keeps_its_receipt_open_after_current_mlil_nops():
     cleanup_decode_results[:] = [1]
     ctx = FakeContext()
     callee_type = _function_type(0)
-    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=callee_type)
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(type=callee_type)
     plan = {
         "call_il": types.SimpleNamespace(address=0x8FB744, params=[]),
         "call_addr": 0x8FB744,
@@ -1492,7 +1584,7 @@ def test_call_cleanup_stays_open_when_the_current_ssa_slice_is_unproven():
     cleanup_decode_calls.clear()
     ctx = FakeContext()
     callee_type = _function_type(0)
-    ctx.view.get_function_at = lambda _target: types.SimpleNamespace(type=callee_type)
+    ctx.view.get_function_at = lambda _target, _platform=None: types.SimpleNamespace(type=callee_type)
     call_plan_results[:] = [{
         "call_il": types.SimpleNamespace(address=0x8FB744, params=[]),
         "call_addr": 0x8FB744,
@@ -1511,9 +1603,9 @@ def test_call_cleanup_stays_open_when_the_current_ssa_slice_is_unproven():
     call_plan_results.clear()
 
 
-def test_branch_translation_waits_for_global_stability(monkeypatch):
-    FakeWorkflowState.stable = True
-    FakeWorkflowState.calls_stable = True
+def test_branch_translation_waits_for_branch_stability(monkeypatch):
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.calls_stable = False
     FakeWorkflowState.globals_stable = False
     translated = []
     monkeypatch.setattr(
@@ -1525,8 +1617,26 @@ def test_branch_translation_waits_for_global_stability(monkeypatch):
     workflow.translate_branches_mlil(FakeContext())
 
     assert translated == []
-    FakeWorkflowState.stable = False
+
+
+def test_branch_translation_runs_without_call_or_global_stability(monkeypatch):
+    FakeWorkflowState.stable = True
     FakeWorkflowState.calls_stable = False
+    FakeWorkflowState.globals_stable = False
+    translated = []
+
+    def translate(_ctx, _llil, mlil, _receipts):
+        translated.append(mlil)
+        return _condition_batch(mlil)
+
+    monkeypatch.setattr(workflow, "translate_indirect_branch_conditions", translate)
+    ctx = FakeContext()
+
+    workflow.translate_branches_mlil(ctx)
+
+    assert translated == [ctx.mlil]
+    FakeWorkflowState.stable = False
+    FakeWorkflowState.branch_cleanup = True
 
 
 def test_branch_cleanup_respects_one_shot_receipt():

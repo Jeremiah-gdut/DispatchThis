@@ -395,6 +395,44 @@ def _clear_unsupported_call_adjustments(func, state, call_addresses):
     return mutated
 
 
+def _create_missing_call_target_functions(bv, func, calls):
+    """Create user functions for current, proven callees missing at their entry."""
+    created = 0
+    platform = getattr(func, "platform", None)
+    for target in sorted({plan["target"] for plan in calls}):
+        try:
+            if bv.get_function_at(target, platform) is not None:
+                continue
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja function lookup boundary.
+            log_warn(
+                f"[workflow] {func.name}: failed to inspect call target "
+                f"{hex(target)}: {error}"
+            )
+            return None
+        try:
+            created_function = bv.create_user_function(
+                target,
+                platform,
+            )
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja user-function mutation boundary.
+            log_warn(
+                f"[workflow] {func.name}: failed to create call target function "
+                f"{hex(target)}: {error}"
+            )
+            return None
+        if (
+            created_function is None
+            or getattr(created_function, "start", None) != target
+        ):
+            log_warn(
+                f"[workflow] {func.name}: failed to verify call target function "
+                f"{hex(target)}"
+            )
+            return None
+        created += 1
+    return created
+
+
 def _provider_global_plans(bv, func, mlil, provider):
     """Validate one complete external global-data scan before mutation."""
     slot = getattr(provider, "global_data", None)
@@ -788,9 +826,6 @@ def resolve_calls_mlil(ctx: AnalysisContext):
     if state is None:
         return
 
-    if not state.branch_stable(func):
-        return
-
     if not _ensure_analysis_settings(func):
         return
 
@@ -854,6 +889,18 @@ def resolve_calls_mlil(ctx: AnalysisContext):
         state.invalidate_call_stable()
         return
     calls = [*plans, *receipt_plans]
+
+    created_functions = _create_missing_call_target_functions(bv, func, calls)
+    if created_functions is None:
+        state.invalidate_call_stable()
+        return
+    if created_functions:
+        state.invalidate_call_stable()
+        log_info(
+            f"[workflow] {func.name}: created {created_functions} recovered "
+            "call target function(s)"
+        )
+        return
 
     adjustments = 0
     adjusted_types = {}
@@ -966,10 +1013,6 @@ def translate_branches_mlil(ctx: AnalysisContext):
     state.clear_branch_cleanup_overlay_ready()
     if not state.branch_stable(func):
         return
-    if not state.call_stable():
-        return
-    if not state.global_stable():
-        return
 
     mlil = ctx.mlil
     if mlil is None:
@@ -1065,10 +1108,6 @@ def resolve_globals_mlil(ctx: AnalysisContext):
     if state is None:
         return
     if not _ensure_analysis_settings(func):
-        return
-    if not state.branch_stable(func):
-        return
-    if not state.call_stable():
         return
 
     mlil = ctx.mlil

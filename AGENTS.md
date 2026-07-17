@@ -42,10 +42,10 @@ receipt 放在 `BinaryView.session_data` 中。
 
 当前 phase 顺序约束：
 
-- 间接分支解析必须先于间接调用解析收敛。
-- 全局常量解析位于间接调用解析之后、分支条件翻译之前。分支、调用和全局 phase
-  都稳定后才能进行分支翻译，以免全局类型编辑在下一次重新分析时抹掉昂贵的 MLIL
-  overlay。
+- 间接调用和全局常量解析可独立于间接分支解析收敛；它们保留在固定的 MLIL
+  activity 位置，但 branch 不得作为其 callback 的前置 gate。
+- 分支条件翻译只等待间接分支恢复；它不等待调用或全局 phase。关联 STORE 仍等待
+  branch/call/global，deflatten 仍等待 branch/call/global、分支条件及其 cleanup 证明。
 - 分支目标清理在分支条件翻译之后运行；分支和调用清理都必须在当前 MLIL 上按精确根反复
   规划到空计划，才可标记 `cleanup_done`。计划重复、应用失败、未证明的 fresh call slice 或
   direct-call receipt 都会阻止 deflatten。分支 receipt 仅因本轮 translator 在已安装的当前

@@ -574,6 +574,21 @@ def test_walk_expr_and_cleanup_roots_return_instruction_indices():
     assert mlil_helpers.cleanup_roots_for_expr(mlil, expr) == {11, 12}
 
 
+def test_iter_expressions_visits_each_current_expression_once():
+    shared = const(1)
+    first = add(shared, const(2))
+    second = load(shared)
+
+    expressions = list(mlil_helpers.iter_expressions(FakeMlil((first, second))))
+
+    assert [node.operation.name for node in expressions] == [
+        "MLIL_ADD",
+        "MLIL_CONST_PTR",
+        "MLIL_CONST_PTR",
+        "MLIL_LOAD",
+    ]
+
+
 def test_walk_expr_with_defs_expands_variable_definitions():
     definition = set_var("tmp", add(const(1), const(2)), instr_index=11)
     mlil = FakeMlil(defs={"tmp": [definition]})
@@ -733,6 +748,7 @@ if __name__ == "__main__":
     test_peel_var_definitions_tracks_set_var_trail()
     test_fold_constant_value_folds_load_arithmetic_and_value_sets()
     test_walk_expr_and_cleanup_roots_return_instruction_indices()
+    test_iter_expressions_visits_each_current_expression_once()
     test_walk_expr_with_defs_expands_variable_definitions()
     test_const_address_and_slot_loads_support_global_slot_analysis()
     test_load_slot_offsets_follows_variable_offsets()
