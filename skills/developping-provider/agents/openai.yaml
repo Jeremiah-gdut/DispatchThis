@@ -1,0 +1,6 @@
+interface:
+  display_name: "Developping Provider"
+  short_description: "Develop DispatchThis providers from live IL"
+  default_prompt: "Use $developping-provider to develop a provider for the active DispatchThis sample."
+policy:
+  allow_implicit_invocation: false
