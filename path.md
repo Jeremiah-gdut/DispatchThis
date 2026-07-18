@@ -4,15 +4,17 @@
 
 ## 1. 当前结论与范围
 
-`sample/ppsp` 现在包含只读的 `ppsp-c0714` provider、对应的模式记录和回归测试。它只实现 `branch_targets`，不修改 `plugins/DispatchThis` 核心工作流，不自行调用会触发重分析的 API。
+`sample/ppsp` 现在包含只读的 `ppsp-c0714` provider、对应的模式记录和回归测试。`__init__.py` 是与其他外部样本一致的薄加载器，实际恢复逻辑位于 `_recovery.py`。它只实现 `branch_targets`，不修改 `plugins/DispatchThis` 核心工作流，不自行调用会触发重分析的 API。
 
 已由单元测试和对当前 Binary Ninja 数据库的只读 LLIL 探针证明的内容：
 
 - 入口单目标 trampoline、局部字面量表 trampoline、布尔两项表和五个冻结 frame 表尾部都可以构造出受限的目标事实。
 - 五个原先未恢复的 raw jump 都被当前源码的冻结 frame matcher 解析到 `0x9858c4`。
+- 冻结前缀布尔 selector 支持本样本实测的 `LLIL_CMP_SLE` 与 `LLIL_CMP_E`；在标准唯一路由证明不存在时，它以独立稳定 frame-base、精确 selector slot 和静态表 pointer 证明完整目标集合。
+- 同一 selector 表的两个 slot 指向同一可执行地址时，事实安全地保留为一个去重后的 target，而不是虚构两个不同后继。
 - 路由重放已避免对每个候选都从 LLIL 指令 0 重放；它使用本次查询的指令快照、CFG 索引、反向可达缓存和首个路由跳转前的状态快照。
 
-尚未完成的内容：新的源码尚未经过一次完整 Binary Ninja GUI 重启加载，因此没有把“新 provider 在真实 workflow 中已收敛”作为结论。GUI 中最后观察到的是旧 provider 版本：`branch.stable=False`，并留下五个未恢复跳转。下一台设备的首要动作是完整重启 GUI 后重新运行 Branch Targets；不要把源码的只读探针结果误当作已经提交给 UIDF 的 GUI 结果。
+真实 GUI 验证已完成：完整重启后，`main` 的 Branch Targets 以自然 UIDF 重分析提交 `1, 1, 2, 4, 8, 16, 32, 57, 65, 128, 256, 512, 452, 0` 批次，并记录 `All of main's indirect jumps have been resolved`。最终 state 为 `branch.stable=True`、1534 个 receipt、1534 个用户分支目标、1534 个 unresolved source、0 个 unmapped source。Branch Condition Translation 与 Deflatten 保持关闭；没有强制推进任何下游改写。
 
 ## 2. 文件、路径和安装形态
 
@@ -20,7 +22,8 @@
 | --- | --- |
 | 仓库 | `C:\\Users\\magnusjiang\\AppData\\Roaming\\Binary Ninja\\plugins\\DispatchThis` |
 | 当前分支 | `feature/extern_plugin`，上游为 `origin/feature/extern_plugin` |
-| provider 源码 | `sample/ppsp/__init__.py` |
+| provider 加载器 | `sample/ppsp/__init__.py` |
+| provider 恢复逻辑 | `sample/ppsp/_recovery.py` |
 | 样本模式 | `sample/ppsp/patterns.md` |
 | 回归测试 | `sample/ppsp/tests/test_branch_targets.py` |
 | 交接记录 | 根目录 `path.md`（本文件） |
@@ -37,7 +40,7 @@ New-Item -ItemType SymbolicLink `
   -Target 'C:\Users\magnusjiang\AppData\Roaming\Binary Ninja\plugins\DispatchThis\sample\ppsp'
 ```
 
-这里的 provider 是 Binary Ninja 进程启动时注册的外部插件。修改 `sample/ppsp/__init__.py` 后，不能依赖热重载：注册表会拒绝重复 provider ID，已绑定 workflow activity callback 也不保证被替换。必须退出所有 Binary Ninja GUI 进程后再启动验证。
+这里的 provider 是 Binary Ninja 进程启动时注册的外部插件。修改 `sample/ppsp/__init__.py` 或 `_recovery.py` 后，不能依赖热重载：注册表会拒绝重复 provider ID，已绑定 workflow activity callback 也不保证被替换。必须退出所有 Binary Ninja GUI 进程后再启动验证。
 
 ## 3. 适配时必须保持的架构边界
 
@@ -132,7 +135,33 @@ ssa=0.050153s/50 literal=0.105644s/50 selector=29.233043s/50
 
 这不是跨 analysis 的缓存，也不放入 `Function.session_data`；它仅降低同一 `branch_targets(query)` 内部的重复工作。关于模式和拒绝边界见 `sample/ppsp/patterns.md` 的 “Route-normalized dispatcher prefix”。
 
-### 5.6 五个残余跳转：冻结 frame 表尾部
+### 5.6 冻结前缀布尔 selector：歧义路由不是猜测许可证
+
+在此前 186 个 receipt 已安装的 current LLIL 中，仍有 128 个 raw jump 共享如下十条连续 tail（代表审计点 `0x980f74`）：
+
+```text
+w9 = BOOL_TO_INT(w8 s<= 0xb)
+w9 = w9 & 1
+[x19 + selector_offset].d = w9
+x9 = [x25 + table_pointer_offset].q
+w10 = [x19 + selector_offset].d
+x10 = sx.q(w10)
+x11 = 8
+x9 = x9 + x10 * x11
+x9 = [x9].q
+jump(x9)
+```
+
+旧 `_path_state_before` 正确拒绝它：第一个 current `LLIL_JUMP_TO` 的两个 target 都可达该 tail，因此不存在唯一 route。新 matcher 没有放宽该函数，也不从歧义路径挑一条；仅当它返回 `None` 时才使用以下独立证明：
+
+1. 当前 tail 必须完全位于同一个 basic block，且是 `BOOL_TO_INT(CMP_E|CMP_SLE) → AND 1 → STORE → LOAD → SX → pointer stride/load → JUMP`；
+2. selector store/load 是同一直接稳定 frame base 的同一精确 `_StackOffset`，且 prefix 后只有这一个精确宽度的 selector store；
+3. table pointer load 是另一个可相同也可不同的直接稳定 frame base；它从第一次 routing jump 前的 current literal prefix 读出，之后不能有重叠写、未知 call、未知 intrinsic 或 base 改写；
+4. 两个 pointer-sized 静态 table slot 必须都来自 initialized-data snapshot 且为可执行地址。返回值是完整去重 target 集合：不同 slot 返回两个 targets，相同 slot 只返回一个 target；从不填写 condition/true/false arm。
+
+这条规则的 direct current-source probe 先恢复 128 个双目标 `CMP_SLE` sites；自然重新分析后又恢复 56 个双目标 `CMP_E` sites；再后续前沿中恢复 896 个同表项单目标 `CMP_E` sites。所有数字都来自当前 LLIL，源码未匹配任何地址。
+
+### 5.7 五个残余跳转：冻结 frame 表尾部
 
 旧 runtime 在 branch phase 还剩以下 raw jump：
 
@@ -173,15 +202,15 @@ target       = 0x9858c4
 
 这避免把 SIMD/XOR decoy 当 selector，也避免“看到一个 32 项表就全提交”的不安全行为。只要未证明具体 index，该 matcher 就不返回目标。
 
-对 live 当前 LLIL 的只读 probe，五个 source site 都返回十进制 `9984196`，即 `0x9858c4`。这仍只是 read-only provider 调用的证据；需要 GUI 重启后让 workflow 真实提交它们。
+对 live 当前 LLIL 的只读 probe，五个 source site 都返回十进制 `9984196`，即 `0x9858c4`。后续完整 GUI restart 已让 workflow 真实消费这些事实，并最终令 branch phase 收敛。
 
 ## 6. Branch Translation 与 Deflatten 的状态
 
-曾专门检查过用户提出的“是否已经到 deflatten”问题，结论是：当时没有执行 Branch Condition Translation，也没有实际执行 Deflatten。
+曾专门检查过用户提出的“是否已经到 deflatten”问题，结论是：当前没有执行 Branch Condition Translation，也没有实际执行 Deflatten。
 
-- 最后观察的旧 runtime state：`branch.stable=False`、`branch.cleanup_done=False`、`conditions={}`，正是上面的五个 raw jump 让 branch phase 未收敛。
-- 调用和全局常量 phase 当时已稳定，但这不会绕过 branch gate。
-- `workflow.py` 的 Branch Condition Translation 只等待 `branch_stable`，所以该值为 false 时它会返回。
+- 最新 runtime state：`branch.stable=True`，1534 个 receipt 与用户目标精确对应，`conditions={}`；所有 unresolved source 都已映射。
+- 调用和全局常量 phase 的状态不绕过 branch gate。
+- `workflow.py` 的 Branch Condition Translation 只等待 `branch_stable`；现在它的前置条件已满足，但用户开关仍为 disabled，因而没有被强行触发。
 - Deflatten 需要 branch/call/global、condition 翻译和 cleanup 证据全都成立；它从未应被当作 branch recovery 的下一步捷径。
 
 排查 activity 顺序时 Deflatten 曾被临时启用以查看依赖，但没有产生 deflatten 改写，并已在 GUI 中关闭；最后已知日志为 `12:31:54 [ui] main: disabled Deflatten`。换机后的验证应继续保持 Deflatten 关闭，直到新的 Branch Targets 运行收敛、条件翻译确实出现、并且 cleanup receipt 在同一 current MLIL 上被重新证明。不要为确认 cleanup 主动调度重分析。
@@ -193,7 +222,7 @@ target       = 0x9858c4
 - 唯一 SSA 目标、multi-target 与非可执行值拒绝；
 - 缺少初始化数据快照时返回 `Inconclusive`；
 - 线性局部字面量表；
-- 布尔 selector 的两项表（返回两项而非猜 direction）；
+- 布尔 selector 的两项表、`CMP_E`/`CMP_SLE` 白名单、歧义路由上的冻结 prefix proof、额外 selector-slot 写入拒绝，以及重复 table entry 的安全去重；
 - CFG target index 的 block-start normalization；
 - 指令 snapshot、共享不可达 DAG 的反向可达缓存、prefix state 复用；
 - `vdupq_laneq_s32` 仅保留 stack proof，其他 intrinsic 清空它；
@@ -207,24 +236,24 @@ AssertionError: _CompleteBatch(facts=()) != _CompleteBatch(... targets=(0x4200,)
 1 failed in 0.19s
 ```
 
-实现后用 monkeypatch 做了 toggle proof：启用 `_frozen_frame_table_target` 时 fixture 返回 `0x4200`；临时令 matcher 返回 `None` 时 batch 为空；恢复 matcher 后再次返回 `0x4200`。最终代码验证结果：
+实现后用 monkeypatch 做了 toggle proof：启用 `_frozen_frame_table_target` 时 fixture 返回 `0x4200`；临时令 matcher 返回 `None` 时 batch 为空；恢复 matcher 后再次返回 `0x4200`。冻结布尔 selector 的新正向测试先在 matcher 缺失时返回空 batch，重复 table entry 的测试也先以空 batch 失败；实现后两者分别返回完整双目标和精确单目标集合。最终代码验证结果：
 
 ```text
 uv run --with ruff ruff format sample/ppsp
-2 files left unchanged
+3 files already formatted
 
 uv run --with ruff ruff check sample/ppsp
 All checks passed!
 
 uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib -q sample/ppsp/tests/test_branch_targets.py
-15 passed in 0.06s
+20 passed in 0.28s
 ```
 
 `basedpyright` 在本机未安装，且已明确不安装；这不是一个隐藏的失败结果。推送前应再运行上面的 ruff/pytest 命令，并可运行 `git diff --check`。
 
 ## 8. 换机后的准确验证步骤
 
-1. 拉取并 checkout 本提交所在的 `feature/extern_plugin`；确认 `sample/ppsp/__init__.py`、`patterns.md`、测试和本交接文件均存在。
+1. 拉取并 checkout 本提交所在的 `feature/extern_plugin`；确认 `sample/ppsp/__init__.py`、`sample/ppsp/_recovery.py`、`patterns.md`、测试和本交接文件均存在。
 2. 准备原始样本和 Binary Ninja 数据库。GUI 的临时分析状态、日志和未保存的 `.bndb` 不会随着本仓库提交移动，需单独迁移或重新打开样本。
 3. 确认 `plugins/ppsp` 到本仓库 `sample/ppsp` 的软链接正确；若不是，按第 2 节重建。
 4. 完全退出所有 Binary Ninja GUI 进程，再启动 GUI，重新打开样本。这一步是 provider 注册/工作流 callback 刷新的必需条件。
@@ -239,7 +268,7 @@ uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib 
 
    如需查看 phase state，在已有 Binary Ninja CLI session 中读取 `main` 的 `Function.session_data["dispatchthis_workflow_state"]`；不要手动修改它。
 
-8. 成功的最低证据是：五个尾部不再保持 raw unresolved、branch receipt 经过自然重分析后达到 stable、随后 Branch Condition Translation 被调度。记录运行前后的 Activity duration，验证新的 prefix/cache 实现是否显著降低 provider 部分耗时。
+8. 已完成的成功证据是：完整 GUI restart 后日志记录 `All of main's indirect jumps have been resolved`；`branch.stable=True`；1534 个 receipt 与用户目标精确对应；unmapped unresolved source 为 0；代表 `0x980f74` 在 HLIL 中展示为保留谓词的 `switch (*(&data_1763ad8 + sx.q(x8_1371 s<= 0xb ? 1 : 0) * 8))`。不要仅为继续下一 phase 而强制启用 Branch Condition Translation 或 Deflatten。
 9. 只有在上述条件成立、翻译及 cleanup 证据都正确时，才考虑打开 Deflatten。Deflatten 的测试目标不是“能运行”，而是 current MLIL 上的精确 cleanup proof 和原子改写都成立。
 
 ## 9. 如仍未收敛，按此顺序定位
@@ -252,7 +281,7 @@ uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib 
 
 ## 10. 当前限制与不可放宽的安全规则
 
-- 不枚举未知跳转表的所有可能项；selector 只有在被证明为一 bit 时才返回恰好两个 entry，冻结 frame 只有在精确 index 被证明时才返回一个 entry。
+- 不枚举未知跳转表的所有可能项；selector 只有在被证明为一 bit 时才读取恰好两个 entry，并返回其完整去重 target 集合；冻结 frame 只有在精确 index 被证明时才返回一个 entry。
 - 不根据表地址、source address、函数名或样本版本字符串选择模式。地址在此文件中只用于复核。
 - 不将任何未知 memory effect、非精确 `STORE`、带参数/间接 call 或未知 intrinsic 解释为“无副作用”。它们应清空或拒绝 frame/stack proof。
 - 允许的 `vdupq_laneq_s32(reg, const)` 只是本样本的狭窄 register-only 例外；任何不同 intrinsic 或不同参数形状都不是等价模式。
@@ -264,6 +293,7 @@ uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib 
 应提交：
 
 - `sample/ppsp/__init__.py`
+- `sample/ppsp/_recovery.py`
 - `sample/ppsp/patterns.md`
 - `sample/ppsp/tests/test_branch_targets.py`
 - 根目录 `path.md`
@@ -274,4 +304,4 @@ uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib 
 - Python `__pycache__`、pytest cache、Binary Ninja log 或 `.bndb` 临时状态；
 - 对 `plugins/DispatchThis/workflow.py` 的猜测性改动。
 
-本文件的作用是让下一台设备从“新源码已完成、GUI 尚未重启验证”的准确状态继续，而不是重新做一轮模式猜测。
+本文件的作用是让下一台设备从“Branch Targets 已在 GUI 中收敛、下游 pass 仍保持关闭”的准确状态继续，而不是重新做一轮模式猜测。

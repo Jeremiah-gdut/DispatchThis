@@ -399,8 +399,11 @@ def _literal_table_query() -> tuple[_Query, _Jump]:
     )
 
 
-def _selector_table_query() -> tuple[_Query, _Jump]:
+def _selector_table_query(
+    comparison_operation: str = "LLIL_CMP_SLE",
+) -> tuple[_Query, _Jump]:
     sp = _Register("sp", 1)
+    w8 = _Register("w8", 108)
     x9 = _Register("x9", 9)
     w9 = _Register("w9", 109)
     x10 = _Register("x10", 10)
@@ -436,7 +439,15 @@ def _selector_table_query() -> tuple[_Query, _Jump]:
             _Operation("LLIL_SET_REG"),
             w9,
             _Expression(
-                _Operation("LLIL_BOOL_TO_INT"), operands=(register(w9, 4),), size=4
+                _Operation("LLIL_BOOL_TO_INT"),
+                operands=(
+                    _Expression(
+                        _Operation(comparison_operation),
+                        operands=(register(w8, 4), constant(0xB, 4)),
+                        size=4,
+                    ),
+                ),
+                size=4,
             ),
             4,
             size=4,
@@ -489,6 +500,99 @@ def _selector_table_query() -> tuple[_Query, _Jump]:
             view=_View(_Architecture()),
             llil=_Llil(
                 instructions, _SsaIl("ssa"), (_BasicBlock(0, len(instructions)),)
+            ),
+        ),
+        jump,
+    )
+
+
+def _frozen_selector_table_query(
+    duplicate_selector_store: bool = False,
+) -> tuple[_Query, _Jump]:
+    query, jump = _selector_table_query()
+    instructions = query.llil.instructions
+    stack_pointer = instructions[0].dest
+    selector_base = instructions[1].dest
+    table_value = instructions[2].dest
+    assert isinstance(stack_pointer, _Register)
+    assert isinstance(selector_base, _Register)
+    assert isinstance(table_value, _Register)
+    table_base = _Register("x23", 23)
+    selector_slot = instructions[6].dest
+    selector_register = instructions[4].dest
+    assert isinstance(selector_slot, _Expression)
+    assert isinstance(selector_register, _Register)
+
+    def register(register_value: _Register, size: int = 8) -> _Expression:
+        return _Expression(_Operation("LLIL_REG"), src=register_value, size=size)
+
+    def constant(value: int, size: int = 8) -> _Expression:
+        return _Expression(_Operation("LLIL_CONST_PTR"), constant=value, size=size)
+
+    def add(left: _Expression, right: _Expression, size: int = 8) -> _Expression:
+        return _Expression(_Operation("LLIL_ADD"), operands=(left, right), size=size)
+
+    def load(address: _Expression, size: int) -> _Expression:
+        return _Expression(_Operation("LLIL_LOAD"), src=address, size=size)
+
+    table_slot = add(register(table_base), constant(0x20))
+    prefix = (
+        replace(instructions[0], instr_index=0),
+        replace(instructions[1], instr_index=1),
+        _Instruction(
+            _Operation("LLIL_SET_REG"),
+            table_base,
+            add(register(stack_pointer), constant(0x40)),
+            2,
+        ),
+        replace(instructions[2], instr_index=3),
+        replace(instructions[3], dest=table_slot, instr_index=4),
+        _Instruction(
+            _Operation("LLIL_JUMP_TO"),
+            None,
+            None,
+            5,
+            targets={0x1018: 6, 0x101C: 7},
+        ),
+        _Instruction(_Operation("LLIL_JUMP_TO"), None, None, 6, targets={0x1020: 8}),
+        _Instruction(_Operation("LLIL_JUMP_TO"), None, None, 7, targets={0x1020: 8}),
+    )
+    duplicate_store = ()
+    if duplicate_selector_store:
+        duplicate_store = (
+            _Instruction(
+                _Operation("LLIL_STORE"),
+                selector_slot,
+                register(selector_register, 4),
+                8,
+                size=4,
+            ),
+        )
+    tail_offset = 5 if duplicate_selector_store else 4
+    tail = []
+    for instruction in instructions[4:]:
+        updated = replace(
+            instruction, instr_index=instruction.instr_index + tail_offset
+        )
+        if instruction.instr_index == 7:
+            assert isinstance(updated, _Instruction)
+            updated = replace(updated, src=load(table_slot, 8))
+        tail.append(updated)
+    jump = tail[-1]
+    assert isinstance(jump, _Jump)
+    recovered_instructions = (*prefix, *duplicate_store, *tail)
+    return (
+        _Query(
+            view=query.view,
+            llil=_Llil(
+                recovered_instructions,
+                query.llil.ssa_form,
+                (
+                    _BasicBlock(0, 6),
+                    _BasicBlock(6, 7),
+                    _BasicBlock(7, 8),
+                    _BasicBlock(8, len(recovered_instructions)),
+                ),
             ),
         ),
         jump,
@@ -757,6 +861,102 @@ def test_branch_targets_recovers_both_boolean_selector_table_targets_without_ssa
 
     # Then: it returns both table arms rather than selecting an unproven direction.
     assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4100, 0x4200)),))
+
+
+def test_branch_targets_recovers_an_equality_boolean_selector_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _selector_table_query("LLIL_CMP_E")
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200)),)
+    )
+
+
+def test_branch_targets_recovers_a_frozen_boolean_selector_after_ambiguous_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _frozen_selector_table_query()
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    result = provider.branch_targets(query)
+
+    assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4100, 0x4200)),))
+
+
+def test_branch_targets_rejects_an_unsupported_boolean_selector_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, _jump = _selector_table_query("LLIL_CMP_ULT")
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(())
+
+
+def test_branch_targets_rejects_a_frozen_selector_with_an_extra_slot_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, _jump = _frozen_selector_table_query(duplicate_selector_store=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(())
+
+
+def test_branch_targets_collapses_duplicate_boolean_selector_table_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _selector_table_query()
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target == 0x4100,
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4100,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100,)),)
+    )
 
 
 def test_branch_targets_recovers_a_frozen_frame_table_after_the_first_route_jump(

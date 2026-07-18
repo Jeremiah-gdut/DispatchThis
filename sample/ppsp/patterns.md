@@ -29,18 +29,27 @@ The provider does not match a table address or source address. The observed addr
 ## Boolean selector table
 
 - Slot: `branch_targets`
-- Observed: subsequent `main` dispatch blocks use `BOOL_TO_INT`, `AND 1`, a stack-local selector store/load, sign extension, pointer-sized table stride, static pointer load, and an indirect jump.
-- Meaning: restores both static table successors. It deliberately does not infer the boolean direction.
-- Required proof: the current LLIL tail has that exact data-flow shape; the table-base prefix is replayed only along a unique chain of current `LLIL_JUMP_TO` CFG edges to the table-load block; both contiguous pointer-sized entries are initialized executable targets; and the fact retains the current raw jump as its witness. A complete literal-only prefix before the first routing jump is snapshotted only for that current query and copied into each route proof.
-- Safe rejection: an ambiguous route, invalid target-map index, non-current block, unknown prefix effect, non-executable table entry, or any shape mismatch emits no fact.
+- Observed: subsequent `main` dispatch blocks use `BOOL_TO_INT(CMP_E|CMP_SLE)`, `AND 1`, a stack-local selector store/load, sign extension, pointer-sized table stride, static pointer load, and an indirect jump.
+- Meaning: restores the complete static target set. It deliberately does not infer the boolean direction; two table slots that contain the same executable pointer produce one exact target, not a fabricated two-arm result.
+- Required proof: the ten current tail instructions are contiguous in one basic block and have the exact data-flow shape; the selector store/load evaluate to the same direct stack offset; both contiguous pointer-sized entries are initialized executable targets; and the fact retains the current raw jump as its witness. A normal table-base prefix is replayed only along one unique current `LLIL_JUMP_TO` route. A complete literal-only prefix before the first routing jump is snapshotted only for that current query and copied into each route proof.
+- Safe rejection: an unsupported comparison, malformed tail, invalid target-map index, non-current block, unknown prefix effect, non-executable table entry, pointer overflow, or any shape mismatch emits no fact. If unique route replay has a non-empty but incomplete state, the frozen fallback is not used.
 
 ## Route-normalized dispatcher prefix
 
-- Slot: proof support for `Boolean selector table` and `Frozen frame table tail`; it does not itself emit a target fact.
+- Slot: proof support for `Boolean selector table`, `Frozen-prefix boolean selector table`, and `Frozen frame table tail`; it does not itself emit a target fact.
 - Observed: `main` has a fully modeled literal setup prefix before its first current `LLIL_JUMP_TO` (current LLIL index `5871` during the captured analysis). Later dispatch blocks are connected by user-informed `LLIL_JUMP_TO` target maps rather than by a single linear instruction stream.
-- Meaning: the prefix establishes a current frame/register snapshot that may be replayed into a later table-load block only when exactly one current routing path reaches that block.
+- Meaning: the prefix establishes a current frame/register snapshot that may be replayed into a later table-load block only when exactly one current routing path reaches that block. Its literal snapshot can also support the separate frozen selector proof below; route ambiguity never changes the unique-route replay rule.
 - Required proof: every target-map entry names an exact current basic-block start, even when Binary Ninja maps the basic-block machine address before its first visible LLIL instruction; reverse reachability leaves exactly one route to the stop block; and every traversed instruction preserves the literal/stack model.
 - Safe rejection: a non-current index, malformed target map, zero or multiple candidate routes, backward route, or unmodeled instruction abandons the proof. The snapshot is invocation-local and is never reused after reanalysis.
+
+## Frozen-prefix boolean selector table
+
+- Slot: `branch_targets`
+- Observed: after UIDF has exposed later flattened CFG, 128 `CMP_SLE`, 56 `CMP_E`, and 896 duplicate-entry `CMP_E` selector tails have multiple current `LLIL_JUMP_TO` routes to their table-load block. Their prefix is complete before the first route jump, so normal unique-route replay correctly returns no state.
+- Meaning: this is not an ambiguous-CFG choice. It restores the current table target set only from frozen prefix values plus independently stable direct frame bases; no route is selected and no condition direction is inferred.
+- Required proof: exact current one-block boolean selector tail; selector store/load share a stable direct base and exact offset; exactly the modeled selector STORE overlaps that slot after the prefix; table-pointer load has a stable direct base; prefix evaluation gives its pointer-sized value; all later STOREs are statically addressed and disjoint from the table slot; later calls/intrinsics meet the frozen-prefix safety policy; both static entries are initialized executable pointers. The result is sorted and de-duplicated.
+- Safe rejection: an available but incomplete unique route state, changed base, extra selector-slot write, table-slot overlap, unknown effect, pointer overflow, malformed tail, unsupported predicate, or non-executable entry emits no fact.
+- Test: `tests/test_branch_targets.py::test_branch_targets_recovers_a_frozen_boolean_selector_after_ambiguous_routes`, plus the comparison, extra-store, and duplicate-entry regressions.
 
 ## SIMD opaque-predicate decoy
 
