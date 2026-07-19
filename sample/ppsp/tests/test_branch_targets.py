@@ -131,6 +131,9 @@ class _CompleteValues:
 class _BranchTargetFact:
     jump_il: _Jump
     targets: tuple[int, ...]
+    condition: _Expression | None = None
+    true_target: int | None = None
+    false_target: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +305,7 @@ def test_jump_targets_accepts_a_block_start_normalized_before_its_first_llil_ins
     # When the recovered target map still names that basic-block start index.
     # Then the provider retains the current CFG edge for path replay.
     assert module._jump_targets(llil, jump_to) == (1,)
+    assert module._indirect_jumps(llil) == ()
 
 
 def _literal_table_query() -> tuple[_Query, _Jump]:
@@ -859,27 +863,36 @@ def test_branch_targets_recovers_both_boolean_selector_table_targets_without_ssa
     # When: the selector's value is runtime-dependent but structurally one bit.
     result = provider.branch_targets(query)
 
-    # Then: it returns both table arms rather than selecting an unproven direction.
-    assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4100, 0x4200)),))
+    # Then: table slot zero and one preserve the false and true arms respectively.
+    condition = query.llil.instructions[4].src
+    assert result == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
+    )
 
 
 def test_branch_targets_recovers_an_equality_boolean_selector_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     query, jump = _selector_table_query("LLIL_CMP_E")
+    jump = replace(jump, operation=_Operation("LLIL_JUMP_TO"))
+    query = replace(
+        query,
+        llil=replace(query.llil, instructions=(*query.llil.instructions[:-1], jump)),
+    )
     provider, _registered = _load_provider(
         monkeypatch,
         None,
         lambda target: target in (0x4100, 0x4200),
         policy=_InitializedDataPolicy(
             table_slot=0x3000,
-            target=0x4100,
-            extra_targets=(0x4200,),
+            target=0x4200,
+            extra_targets=(0x4100,),
         ),
     )
 
+    condition = query.llil.instructions[4].src
     assert provider.branch_targets(query) == _CompleteBatch(
-        (_BranchTargetFact(jump, (0x4100, 0x4200)),)
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4100, 0x4200),)
     )
 
 
@@ -900,7 +913,10 @@ def test_branch_targets_recovers_a_frozen_boolean_selector_after_ambiguous_route
 
     result = provider.branch_targets(query)
 
-    assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4100, 0x4200)),))
+    condition = query.llil.instructions[8].src
+    assert result == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
+    )
 
 
 def test_branch_targets_rejects_an_unsupported_boolean_selector_comparison(
@@ -1019,7 +1035,10 @@ def test_branch_targets_reuses_a_current_instruction_snapshot_for_selector_proof
     result = provider.branch_targets(query)
 
     # Then it returns the same facts without invoking the IL index accessor repeatedly.
-    assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4100, 0x4200)),))
+    condition = query.llil.instructions[4].src
+    assert result == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
+    )
     assert query.llil.read_count == [0]
 
 

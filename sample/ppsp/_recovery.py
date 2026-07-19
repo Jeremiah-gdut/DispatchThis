@@ -43,7 +43,8 @@ def _indirect_jumps(llil):
     return tuple(
         instruction
         for instruction in llil.instructions
-        if _operation_name(instruction) == "LLIL_JUMP"
+        if _operation_name(instruction) in ("LLIL_JUMP", "LLIL_JUMP_TO")
+        and getattr(instruction, "dest", None) is not None
         and _operation_name(instruction.dest) not in _CONSTANT_DESTINATIONS
     )
 
@@ -1015,7 +1016,7 @@ def _selector_table_entries(view, policy, table_base: int) -> tuple[int, ...] | 
     second_target = _read_static_target(view, policy, second_slot)
     if first_target is None or second_target is None:
         return None
-    return tuple(sorted({first_target, second_target}))
+    return first_target, second_target
 
 
 def _frozen_selector_store_is_unique(
@@ -1083,7 +1084,7 @@ def _selector_table_targets(
     prefix_state=None,
     frozen_writes=None,
     frozen_base_cache=None,
-) -> tuple[int, ...] | None:
+):
     jump_index = getattr(jump, "instr_index", None)
     target_register = _register_expression(getattr(jump, "dest", None))
     if type(jump_index) is not int or jump_index < 9 or target_register is None:
@@ -1242,7 +1243,8 @@ def _selector_table_targets(
             or index_address.offset != stored_address.offset
         ):
             return None
-        return _selector_table_entries(view, policy, table_base)
+        entries = _selector_table_entries(view, policy, table_base)
+        return None if entries is None else (selector_expression, *entries)
     if (
         frozen_writes is None
         or not isinstance(frozen_base_cache, list)
@@ -1316,7 +1318,8 @@ def _selector_table_targets(
     )
     if type(table_pointer) is not int:
         return None
-    return _selector_table_entries(view, policy, table_pointer)
+    entries = _selector_table_entries(view, policy, table_pointer)
+    return None if entries is None else (selector_expression, *entries)
 
 
 def branch_targets(
@@ -1370,8 +1373,9 @@ def branch_targets(
                 instructions_by_index,
             )
             targets = None if target is None else (target,)
+        selector = None
         if targets is None:
-            targets = _selector_table_targets(
+            selector = _selector_table_targets(
                 query.view,
                 query.llil,
                 jump,
@@ -1384,6 +1388,21 @@ def branch_targets(
                 frozen_writes,
                 frozen_base_cache,
             )
-        if targets is not None:
+        if selector is not None:
+            condition, false_target, true_target = selector
+            targets = tuple(sorted({false_target, true_target}))
+            if false_target == true_target:
+                facts.append(BranchTargetFact(jump, targets))
+            else:
+                facts.append(
+                    BranchTargetFact(
+                        jump,
+                        targets,
+                        condition=condition,
+                        true_target=true_target,
+                        false_target=false_target,
+                    )
+                )
+        elif targets is not None:
             facts.append(BranchTargetFact(jump, targets))
     return CompleteBatch(tuple(facts))
