@@ -512,6 +512,7 @@ def _selector_table_query(
 
 def _frozen_selector_table_query(
     duplicate_selector_store: bool = False,
+    global_noise: bool = False,
 ) -> tuple[_Query, _Jump]:
     query, jump = _selector_table_query()
     instructions = query.llil.instructions
@@ -584,19 +585,40 @@ def _frozen_selector_table_query(
         tail.append(updated)
     jump = tail[-1]
     assert isinstance(jump, _Jump)
-    recovered_instructions = (*prefix, *duplicate_store, *tail)
+    noise = ()
+    if global_noise:
+        noise = (
+            _Instruction(
+                _Operation("LLIL_SET_REG"),
+                selector_base,
+                register(selector_base),
+                jump.instr_index + 1,
+            ),
+            _Instruction(
+                _Operation("LLIL_STORE"),
+                register(selector_register, 4),
+                register(selector_register, 4),
+                jump.instr_index + 2,
+                size=4,
+            ),
+        )
+    recovered_instructions = (*prefix, *duplicate_store, *tail, *noise)
+    tail_end = jump.instr_index + 1
+    blocks = (
+        _BasicBlock(0, 6),
+        _BasicBlock(6, 7),
+        _BasicBlock(7, 8),
+        _BasicBlock(8, tail_end),
+    )
+    if noise:
+        blocks = (*blocks, _BasicBlock(tail_end, len(recovered_instructions)))
     return (
         _Query(
             view=query.view,
             llil=_Llil(
                 recovered_instructions,
                 query.llil.ssa_form,
-                (
-                    _BasicBlock(0, 6),
-                    _BasicBlock(6, 7),
-                    _BasicBlock(7, 8),
-                    _BasicBlock(8, len(recovered_instructions)),
-                ),
+                blocks,
             ),
         ),
         jump,
@@ -917,6 +939,45 @@ def test_branch_targets_recovers_a_frozen_boolean_selector_after_ambiguous_route
     assert result == _CompleteBatch(
         (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
     )
+
+
+def test_branch_targets_recovers_a_noisy_frozen_selector_from_its_ssa_table_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _frozen_selector_table_query(global_noise=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        (0x3000,),
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    condition = query.llil.instructions[8].src
+    assert provider.branch_targets(query) == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
+    )
+
+
+def test_branch_targets_rejects_a_noisy_selector_with_a_non_singleton_ssa_table_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, _jump = _frozen_selector_table_query(global_noise=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        (0x3000, 0x3008),
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(())
 
 
 def test_branch_targets_rejects_an_unsupported_boolean_selector_comparison(

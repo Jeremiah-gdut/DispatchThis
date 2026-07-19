@@ -709,23 +709,29 @@ def _ranges_overlap(
     return not (left_end <= right_offset or right_end <= left_offset)
 
 
-def _direct_stack_base(expression):
+def _direct_stack_slot(expression):
     operation = _operation_name(expression)
     if operation == "LLIL_REG":
-        return _register_expression(expression)
+        register = _register_expression(expression)
+        return None if register is None else (register, 0)
     operands = _binary_operands(expression)
     if operation == "LLIL_ADD" and operands is not None:
         left_register = _register_expression(operands[0])
         right_register = _register_expression(operands[1])
         if left_register is not None and type(_constant_value(operands[1])) is int:
-            return left_register
+            return left_register, _constant_value(operands[1])
         if right_register is not None and type(_constant_value(operands[0])) is int:
-            return right_register
+            return right_register, _constant_value(operands[0])
     if operation == "LLIL_SUB" and operands is not None:
         left_register = _register_expression(operands[0])
         if left_register is not None and type(_constant_value(operands[1])) is int:
-            return left_register
+            return left_register, -_constant_value(operands[1])
     return None
+
+
+def _direct_stack_base(expression):
+    slot = _direct_stack_slot(expression)
+    return None if slot is None else slot[0]
 
 
 def _frozen_prefix_writes(view, prefix_state, instructions_by_index):
@@ -1245,6 +1251,36 @@ def _selector_table_targets(
             return None
         entries = _selector_table_entries(view, policy, table_base)
         return None if entries is None else (selector_expression, *entries)
+    if (
+        (index_address_expression := getattr(index_load.src, "src", None)) is not None
+        and (stored_address_expression := getattr(index_store, "dest", None)) is not None
+        and (table_address_expression := getattr(table_load.src, "src", None)) is not None
+        and (selector_slot := _direct_stack_slot(index_address_expression)) is not None
+        and (stored_slot := _direct_stack_slot(stored_address_expression)) is not None
+        and _same_register(selector_slot[0], stored_slot[0])
+        and selector_slot[1] == stored_slot[1]
+        and _direct_stack_base(table_address_expression) is not None
+        and _target_is_preserved(
+            view.arch,
+            llil,
+            selector_bool.instr_index,
+            jump_index,
+            selector_slot[0],
+            instructions_by_index,
+        )
+    ):
+        table_load_ssa = getattr(table_load, "ssa_form", table_load)
+        table_pointer_expression = getattr(table_load_ssa, "src", None)
+        if table_pointer_expression is not None:
+            values = evaluate_values(
+                view, llil.ssa_form, table_pointer_expression, _VALUE_BUDGET, policy
+            )
+            if type(values) is CompleteValues and len(values.values) == 1:
+                table_pointer = values.values[0]
+                if type(table_pointer) is int:
+                    entries = _selector_table_entries(view, policy, table_pointer)
+                    if entries is not None:
+                        return selector_expression, *entries
     if (
         frozen_writes is None
         or not isinstance(frozen_base_cache, list)
