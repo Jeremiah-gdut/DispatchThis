@@ -305,3 +305,59 @@ uv run --with pytest pytest --rootdir=sample/ppsp/tests --import-mode=importlib 
 - 对 `plugins/DispatchThis/workflow.py` 的猜测性改动。
 
 本文件的作用是让下一台设备从“Branch Targets 已在 GUI 中收敛、下游 pass 仍保持关闭”的准确状态继续，而不是重新做一轮模式猜测。
+
+## 12. 2026-07-20 续作：current-IL 路由证明
+
+本次最新代码的重分析形态与交接时不同：`main` 起初有 35 个未解析的 raw
+`LLIL_JUMP`，另有 `0x983db0`。后者是 constant-destination 的 `b` 指令，刻意不属于
+这个间接分支 provider；把 36 个点都当成一种混淆是错误前提。
+
+这些 raw site 确实是 flattened table tail，但旧的 frozen-frame guard 扫描函数中所有
+后续 LLIL，因而把已脱离路由的 `x22` epilogue restore 和无关对象 store 都误当成每条
+dispatch 路由上的写入。provider 现从第一个路由 `LLIL_JUMP_TO` 到每个 raw tail 构造
+current CFG slice，要求该 slice 的所有 predecessor 都可从 prefix 到达，只检查这个
+slice。脱离的 block 被排除；存在外部入口仍拒绝事实。
+
+对剩余路由，精确 frame slot 仍受保护：直接 frame 写必须不重叠，frame base 必须稳定，
+任何直接 frame-address copy/store/argument 都会拒绝证明。只有在这个地址未逃逸的条件下，
+non-frame store/call 才不会改写冻结 slot；intrinsic 也只接受精确的 register-only NEON
+形态。scoped selector proof 同样依赖 tail 内紧邻 load 之前的 selector store，而不因已被
+覆盖的早期同槽写入拒绝。
+
+较早的只读 probe 曾给出十个 raw fact：九个 `x22` frozen-frame tail
+（`0x98aa8c`、`0x98454c`、`0x992704`、`0x9905bc`、`0x9832dc`、`0x98a720`、
+`0x9946a0`、`0x994830`、`0x97fe64`）均为 `0x9858c4`，这些事实已在完整重启后的
+current workflow 中重新收据。该 probe 对 `0x988540 -> 0x987664` 的结论则不能保留：
+它只读到了入口 `x19` frame 的初始表项，未证明 `x19` 在完整 route 上仍是该 frame。
+`0x987664` 虽在 R-X segment 内，但 AArch64 decoder 与 Capstone 都无法把该 word 解码为
+指令，因此它也不能作为这条 pattern 的语义验收证据。
+
+完整重启后的早期 current-IL 快照先有 1495 个 `LLIL_JUMP_TO` 和 875 个 receipt；两轮
+workflow re-proof 后，`main` 有 1891 条 user branch map，其中 1883 条具备精确当前 IL
+receipt。剩下的 8 条是 `0x97ea00`、`0x980804`、`0x984d80`、`0x9857e0`、`0x988540`、
+`0x989630`、`0x989e3c`、`0x993930`。`LLIL_JUMP_TO` 只说明此前 UIDF 已安装边，不能替代
+当前 IL 的结构化 re-proof。
+
+其中 `0x989a3c` 是余下未收据的代表 tail：它将一位比较结果写到
+`[x19 + 0x275c]`，随即从同一地址读回作为 `x25 + selector * 8` 的静态目标表索引。
+表基址 `x25` 在完整 dispatcher route 上保持冻结，表项为 `0x987098` 与 `0x9864c8`；
+而 `x19` 在另一条 route 上会被改写。旧 guard 因把后者也要求为 route-wide frozen 而
+拒绝当前 tail。新证明只允许这种局部 selector base：store/load 必须有同一直接 base 与
+offset，且两者之间没有对该 base 的写入；它仍拒绝任意 table-base route 写入、外部入口、
+未知 effect 或 selector 的中间改写。这是精确缩小错误前提，不是把任意 `JUMP_TO` target
+map 当成真值。
+
+余下八条都具有 boolean-selector table 的表面形状，但它们的 selector 和 table pointer
+都用 `x19`。当前 SSA 是
+`x19#2 = phi(x19#1, x19#5)`，其中一个可达 loop 入口为
+`x19#4 = zx.q(x7#1.w7 + (x25#1.w25 << 0x1d))`，且 `x7#1` 的 entry operand 是没有定义的
+`x7#0`。从该赋值处 `0x97fc98` 到 `0x980804` 已有一条完整 current CFG path；因此
+`x19` 的运行时值确实可以到达这些 tail。每个 table slot 只有入口 `x19#1` frame 的静态
+store，动态 `x19` 路由没有可证明的同槽初始化，`evaluate_values` 也因该 PHI 的未知 entry
+operand 返回 `Inconclusive`。这些跳转是混淆相关的动态 table tail，但在当前静态证据下没有
+完整可恢复的 target set，provider 必须保留原 IL，不能把初始 frame 表当成运行时真值。
+
+另有 `0x983db0`：它是直接的 `LLIL_JUMP` / `LLIL_CONST_PTR`，目标确为
+`-0xfffffffffd562ccc`，不在 executable segment。它不属于 provider 的间接跳转 contract，
+却仍被 core 的 `unmapped_unresolved_sources` 计入并阻止 `branch_stable`；详见根目录
+`issue.md`，在得到单独 core 修改授权前不得通过 provider 伪造 branch fact。
