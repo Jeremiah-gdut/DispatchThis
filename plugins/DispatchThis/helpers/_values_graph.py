@@ -50,6 +50,7 @@ class _GraphBuilder:
         self.ssa_definitions = {}
         self.non_ssa_definition_sets = {}
         self.controlled_load_values = {}
+        self.version_reaches_block_exit = {}
 
     def build(self, expression):
         self._visit(expression)
@@ -249,9 +250,11 @@ class _GraphBuilder:
                 )
                 return None
             assigned[edge_key] = (edge, candidates[0])
-        if len(assigned) != len(incoming) or {
-            position for _edge, (position, _definition) in assigned.values()
-        } != source_positions:
+        if (
+            len(assigned) != len(incoming)
+            or {position for _edge, (position, _definition) in assigned.values()}
+            != source_positions
+        ):
             self._reject(
                 "phi operands cannot be uniquely matched to incoming CFG edges"
             )
@@ -305,18 +308,27 @@ class _GraphBuilder:
         direct = self._edge_for_direct_definition(definition, by_source)
         if direct is not None:
             candidates[entity_key(direct)] = direct
-        for edge in by_source.values():
-            if self._definition_reaches_block(operand, definition, edge.source):
+        reached = self._definition_reaches_blocks(
+            operand,
+            definition,
+            {entity_key(edge.source) for edge in by_source.values()},
+        )
+        if reached is None:
+            return tuple(candidates.values())
+        for source_key in reached:
+            edge = by_source.get(source_key)
+            if edge is not None:
                 candidates[entity_key(edge)] = edge
         return tuple(candidates.values())
 
-    def _definition_reaches_block(self, operand, definition, target):
+    def _definition_reaches_blocks(self, operand, definition, target_keys):
         origin = getattr(definition, "il_basic_block", None)
         position = self._instruction_index(definition)
-        if origin is None or target is None or position is None:
-            return False
+        if origin is None or position is None:
+            return None
         pending = [(origin, position)]
         seen = set()
+        reached = set()
         while pending:
             block, after = pending.pop()
             key = (entity_key(block), after)
@@ -324,13 +336,18 @@ class _GraphBuilder:
                 continue
             seen.add(key)
             if not self._version_reaches_block_exit(block, operand, after):
+                if self.failure is not None:
+                    return None
                 continue
-            if same_entity(block, target):
-                return True
+            block_key = entity_key(block)
+            if block_key in target_keys:
+                reached.add(block_key)
+                if reached == target_keys:
+                    return reached
             try:
                 outgoing = tuple(getattr(block, "outgoing_edges", ()) or ())
             except Exception:  # noqa: BLE001 - Binary Ninja CFG boundary.
-                return False
+                return None
             for edge in outgoing:
                 source = getattr(edge, "source", None)
                 successor = getattr(edge, "target", None)
@@ -339,27 +356,36 @@ class _GraphBuilder:
                     or successor is None
                     or not same_entity(source, block)
                 ):
-                    return False
+                    return None
                 pending.append((successor, None))
-        return False
+        return reached
 
     def _version_reaches_block_exit(self, block, operand, after):
+        key = (entity_key(block), variable_key(operand), after)
+        cached = self.version_reaches_block_exit.get(key)
+        if cached is not None:
+            return cached
         try:
             instructions = tuple(block)
         except Exception:  # noqa: BLE001 - Binary Ninja basic-block boundary.
+            self.version_reaches_block_exit[key] = False
             return False
         for instruction in instructions:
             position = self._instruction_index(instruction)
             if after is not None:
                 if position is None:
+                    self.version_reaches_block_exit[key] = False
                     return False
                 if position <= after:
                     continue
             defines = self._defines_other_ssa_storage(instruction, operand)
             if defines is None:
+                self.version_reaches_block_exit[key] = False
                 return False
             if defines:
+                self.version_reaches_block_exit[key] = False
                 return False
+        self.version_reaches_block_exit[key] = True
         return True
 
     @staticmethod

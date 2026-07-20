@@ -58,9 +58,7 @@ def test_sibling_phi_values_follow_exact_raw_cfg_edges_not_operand_order():
 def test_duplicate_ssa_condition_phis_do_not_cross_pair_opposite_arms():
     values = values_module()
     entry, first_true, first_false, first_join = (Block() for _ in range(4))
-    second_branch, second_true, second_false, second_join = (
-        Block() for _ in range(4)
-    )
+    second_branch, second_true, second_false, second_join = (Block() for _ in range(4))
     true = _EdgeType("TrueBranch")
     false = _EdgeType("FalseBranch")
     Edge(entry, first_true, true)
@@ -75,6 +73,7 @@ def test_duplicate_ssa_condition_phis_do_not_cross_pair_opposite_arms():
 
     predicate = Var("w0", 1)
     first_flag, second_flag = Var("cond:0", 1), Var("cond:1", 1)
+
     def comparison():
         return Expr(
             "LLIL_CMP_NE",
@@ -82,6 +81,7 @@ def test_duplicate_ssa_condition_phis_do_not_cross_pair_opposite_arms():
             right=const(0, size=4),
             size=4,
         )
+
     first_definition = Expr("LLIL_SET_FLAG_SSA", src=comparison())
     second_definition = Expr("LLIL_SET_FLAG_SSA", src=comparison())
     entry.instructions.append(
@@ -104,9 +104,7 @@ def test_duplicate_ssa_condition_phis_do_not_cross_pair_opposite_arms():
             first_value: phi(first_true_value, first_false_value, block=first_join),
             second_true_value: set_reg(const(1), second_true),
             second_false_value: set_reg(const(2), second_false),
-            second_value: phi(
-                second_true_value, second_false_value, block=second_join
-            ),
+            second_value: phi(second_true_value, second_false_value, block=second_join),
         },
         {first_flag: first_definition, second_flag: second_definition},
     )
@@ -182,9 +180,7 @@ def test_forwarded_phi_operand_uses_the_only_redefinition_free_predecessor():
     Edge(origin, left)
     Edge(origin, right)
     forwarded, direct, merged = Var("x0", 0), Var("x0", 1), Var("x0", 2)
-    forwarded_definition = set_reg(
-        const(1), origin, dest=forwarded, instr_index=0
-    )
+    forwarded_definition = set_reg(const(1), origin, dest=forwarded, instr_index=0)
     direct_definition = set_reg(const(2), right, dest=direct, instr_index=0)
     origin.instructions.append(forwarded_definition)
     right.instructions.append(direct_definition)
@@ -218,9 +214,7 @@ def test_one_phi_operand_can_prove_multiple_redefinition_free_predecessors():
     forwarded_edge = Edge(forwarded, join)
     Edge(middle, forwarded)
     left_value, forwarded_value, merged = Var("x0", 0), Var("x0", 1), Var("x0", 2)
-    left_definition = set_reg(
-        const(1), left, dest=left_value, instr_index=0
-    )
+    left_definition = set_reg(const(1), left, dest=left_value, instr_index=0)
     forwarded_definition = set_reg(
         const(2), middle, dest=forwarded_value, instr_index=0
     )
@@ -248,6 +242,42 @@ def test_one_phi_operand_can_prove_multiple_redefinition_free_predecessors():
         middle_edge,
         forwarded_edge,
     }
+
+
+def test_phi_edge_witness_search_batches_shared_forwarded_definition_paths():
+    values = values_module()
+
+    class CountingBlock(Block):
+        def __init__(self):
+            super().__init__()
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    origin = CountingBlock()
+    join = CountingBlock()
+    predecessors = tuple(CountingBlock() for _ in range(32))
+    incoming = tuple(Edge(block, join) for block in predecessors)
+    for block in predecessors:
+        Edge(origin, block)
+    forwarded = Var("x0", 0)
+    definition = set_reg(const(1), origin, dest=forwarded, instr_index=0)
+    origin.instructions.append(definition)
+    ssa = FakeSSA({forwarded: definition})
+    builder = values._GraphBuilder(
+        ssa, values.AnalysisBudget(node_limit=80, edge_limit=80), None
+    )
+
+    # One forwarded SSA definition reaches every predecessor of the same PHI join.
+    by_source = builder._incoming_edges_by_source(incoming, join)
+    assert by_source is not None
+    observed = builder._edges_for_definition(forwarded, definition, by_source)
+
+    # The proof traverses the shared CFG once, instead of once per incoming edge.
+    assert set(observed) == set(incoming)
+    assert origin.iterations + sum(block.iterations for block in predecessors) <= 34
 
 
 def test_sibling_phi_ambiguity_is_inconclusive_instead_of_guessing_an_edge():
