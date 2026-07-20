@@ -523,9 +523,21 @@ workflow._provider_global_plans = fake_global_plans
 
 class FakeContext:
     def __init__(self):
+        self.guided_blocks = ()
+        self.guided_block_writes = []
+
+        def has_guided_source_blocks():
+            return bool(self.guided_blocks)
+
+        def set_guided_source_blocks(blocks):
+            self.guided_block_writes.append(tuple(blocks))
+            self.guided_blocks = tuple(blocks)
+
         self.function = types.SimpleNamespace(
             start=0x9556D8,
             name="sub_9556d8",
+            has_guided_source_blocks=has_guided_source_blocks,
+            set_guided_source_blocks=set_guided_source_blocks,
             set_user_indirect_branches=lambda *_args: None,
         )
         self.view = types.SimpleNamespace(
@@ -633,8 +645,9 @@ def test_branch_resolver_configures_function_scoped_analysis_settings(monkeypatc
     expected = [
         ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
         ("integer", "analysis.limits.expressionValueComputeMaxDepth", 99999, ctx.function, "function"),
-        ("integer", "analysis.limits.maxFunctionAnalysisTime", 1800000, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionAnalysisTime", 3600000, ctx.function, "function"),
         ("integer", "analysis.limits.maxFunctionUpdateCount", 1024, ctx.function, "function"),
+        ("bool", "analysis.guided.triggers.invalidInstruction", False, ctx.function, "function"),
         ("bool", "analysis.outlining.builtins", False, ctx.function, "function"),
     ]
     assert settings.writes == expected
@@ -645,6 +658,35 @@ def test_branch_resolver_configures_function_scoped_analysis_settings(monkeypatc
     workflow.resolve_jumps_llil(ctx)
 
     assert settings.writes == []
+
+
+def test_branch_resolver_clears_guided_analysis_before_planning(monkeypatch):
+    # Given: a function retains persistent guided source blocks.
+    settings = FakeAnalysisSettings()
+    ctx = _branch_settings_context()
+    ctx.guided_blocks = (("aarch64", 0x9556D8),)
+    monkeypatch.setattr(workflow, "Settings", lambda: settings, raising=False)
+    monkeypatch.setattr(
+        workflow,
+        "SettingsScope",
+        types.SimpleNamespace(SettingsResourceScope="function"),
+        raising=False,
+    )
+
+    # When: the branch-target workflow begins.
+    workflow.resolve_jumps_llil(ctx)
+
+    # Then: it requests reanalysis before reading stale LLIL or planning targets.
+    assert ctx.guided_block_writes == [()]
+    assert branch_plan_calls == []
+    assert [write[1] for write in settings.writes] == [
+        "analysis.limits.maxFunctionSize",
+        "analysis.limits.expressionValueComputeMaxDepth",
+        "analysis.limits.maxFunctionAnalysisTime",
+        "analysis.limits.maxFunctionUpdateCount",
+        "analysis.guided.triggers.invalidInstruction",
+        "analysis.outlining.builtins",
+    ]
 
 
 def test_branch_resolver_stops_before_profile_when_settings_do_not_verify(monkeypatch):
@@ -663,8 +705,9 @@ def test_branch_resolver_stops_before_profile_when_settings_do_not_verify(monkey
     assert settings.writes == [
         ("integer", "analysis.limits.maxFunctionSize", 0, ctx.function, "function"),
         ("integer", "analysis.limits.expressionValueComputeMaxDepth", 99999, ctx.function, "function"),
-        ("integer", "analysis.limits.maxFunctionAnalysisTime", 1800000, ctx.function, "function"),
+        ("integer", "analysis.limits.maxFunctionAnalysisTime", 3600000, ctx.function, "function"),
         ("integer", "analysis.limits.maxFunctionUpdateCount", 1024, ctx.function, "function"),
+        ("bool", "analysis.guided.triggers.invalidInstruction", False, ctx.function, "function"),
         ("bool", "analysis.outlining.builtins", False, ctx.function, "function"),
     ]
     assert active_profile_calls == [ctx.view]

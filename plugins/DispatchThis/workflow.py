@@ -58,16 +58,27 @@ from .state import FunctionWorkflowState
 _ANALYSIS_SETTINGS = (
     ("analysis.limits.maxFunctionSize", 0),
     ("analysis.limits.expressionValueComputeMaxDepth", 99999),
-    ("analysis.limits.maxFunctionAnalysisTime", 1800000),
+    ("analysis.limits.maxFunctionAnalysisTime", 3600000),
     ("analysis.limits.maxFunctionUpdateCount", 1024),
+    ("analysis.guided.triggers.invalidInstruction", False),
     ("analysis.outlining.builtins", False),
+)
+_ANALYSIS_PARAMETERS = (
+    ("maxFunctionSize", 0),
+    ("maxFunctionAnalysisTime", 3600000),
+    ("maxFunctionUpdateCount", 1024),
 )
 _DEFLATTEN_SETTING = "analysis.plugins.dispatchThis.deflatten"
 
 
-def _ensure_analysis_settings(func):
+def _guided_analysis_active(func):
+    checker = getattr(func, "has_guided_source_blocks", None)
+    return callable(checker) and checker()
+
+
+def _configure_analysis_settings(func, settings=None):
     try:
-        settings = Settings()
+        settings = Settings() if settings is None else settings
         for key, value in _ANALYSIS_SETTINGS:
             getter = settings.get_bool if isinstance(value, bool) else settings.get_integer
             setter = settings.set_bool if isinstance(value, bool) else settings.set_integer
@@ -83,6 +94,40 @@ def _ensure_analysis_settings(func):
                 return False
     except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — Binary Ninja settings boundary.
         log_warn(f"[workflow] {func.name}: failed to configure analysis settings: {e}")
+        return False
+    return True
+
+
+def prepare_analysis_for_reanalysis(bv, func, settings=None):
+    if not _configure_analysis_settings(func, settings):
+        return False
+    try:
+        parameters = bv.parameters_for_analysis
+        changed = False
+        for name, value in _ANALYSIS_PARAMETERS:
+            if getattr(parameters, name) == value:
+                continue
+            setattr(parameters, name, value)
+            changed = True
+        if changed:
+            bv.parameters_for_analysis = parameters
+        verified = bv.parameters_for_analysis
+        for name, value in _ANALYSIS_PARAMETERS:
+            if getattr(verified, name) != value:
+                log_warn(f"[workflow] {func.name}: failed to verify analysis parameter {name}")
+                return False
+    except (AttributeError, RuntimeError, TypeError) as e:
+        log_warn(f"[workflow] {func.name}: failed to stage analysis parameters: {e}")
+        return False
+    return True
+
+
+def _ensure_analysis_settings(func):
+    if not _configure_analysis_settings(func):
+        return False
+    if _guided_analysis_active(func):
+        func.set_guided_source_blocks([])
+        log_info(f"[workflow] {func.name}: cleared guided analysis source blocks")
         return False
     return True
 
@@ -793,6 +838,9 @@ def resolve_jumps_llil(ctx: AnalysisContext):
         return
 
     llil = ctx.llil
+    if _guided_analysis_active(func) and not _ensure_analysis_settings(func):
+        return
+
     if state.branch_stable(func, _current_indirect_jump_sources(llil)):
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)

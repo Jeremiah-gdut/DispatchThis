@@ -87,7 +87,7 @@ class FakeSettings:
         return {
             "analysis.limits.maxFunctionSize": 0,
             "analysis.limits.expressionValueComputeMaxDepth": 99999,
-            "analysis.limits.maxFunctionAnalysisTime": 1800000,
+            "analysis.limits.maxFunctionAnalysisTime": 3600000,
             "analysis.limits.maxFunctionUpdateCount": 1024,
         }.get(key, 0)
 

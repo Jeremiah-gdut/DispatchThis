@@ -12,6 +12,7 @@ settings_module = load_plugin_module("plugins.DispatchThis.settings")
 class FakeSettings:
     def __init__(self):
         self.bools = {}
+        self.integers = {}
         self.writes = []
 
     def get_bool(self, key, resource=None):
@@ -22,24 +23,51 @@ class FakeSettings:
         self.writes.append((key, value, resource, scope))
         return True
 
+    def get_integer(self, key, resource=None):
+        return self.integers.get((key, resource), -1)
+
+    def set_integer(self, key, value, resource=None, scope=None):
+        self.integers[(key, resource)] = value
+        return True
+
+
+class FakeAnalysisParameters:
+    def __init__(self):
+        self.maxFunctionSize = 0x10000
+        self.maxFunctionAnalysisTime = 600000
+        self.maxFunctionUpdateCount = 100
+
 
 class FakeBv:
-    def __init__(self):
+    def __init__(self, events=None):
         self.session_data = {}
         self.functions = []
+        self.events = [] if events is None else events
+        self._parameters_for_analysis = FakeAnalysisParameters()
+
+    @property
+    def parameters_for_analysis(self):
+        return self._parameters_for_analysis
+
+    @parameters_for_analysis.setter
+    def parameters_for_analysis(self, parameters):
+        self.events.append("parameters")
+        self._parameters_for_analysis = parameters
 
 
 class FakeFunc:
     name = "sub_1000"
     start = 0x1000
 
-    def __init__(self):
+    def __init__(self, events=None):
         self.reanalyzed = 0
         self.session_data = {}
         self.removed_tags = []
+        self.events = [] if events is None else events
 
     def reanalyze(self):
         self.reanalyzed += 1
+        self.events.append("reanalyze")
 
     def remove_auto_address_tags_of_type(self, source, tag_type):
         self.removed_tags.append((source, tag_type))
@@ -66,6 +94,26 @@ def test_toggle_function_pass_flips_current_function_resource_setting():
         (settings_module.BRANCH_TARGETS_SETTING, False, func, ui.SettingsScope.SettingsResourceScope),
     ]
     assert func.reanalyzed == 2
+
+
+def test_enabling_pass_stages_live_analysis_limits_before_reanalysis():
+    # Given: Binary Ninja has its default per-view analysis budget and a guided trigger.
+    events = []
+    bv = FakeBv(events)
+    func = FakeFunc(events)
+    settings = FakeSettings()
+    settings.bools[("analysis.guided.triggers.invalidInstruction", func)] = True
+
+    # When: the user enables DispatchThis branch recovery from the UI.
+    assert ui.set_function_pass(bv, func, settings_module.BRANCH_TARGETS_SETTING, True, settings)
+
+    # Then: all core limits are staged before the explicit user-requested reanalysis.
+    assert events == ["parameters", "reanalyze"]
+    parameters = bv.parameters_for_analysis
+    assert parameters.maxFunctionSize == 0
+    assert parameters.maxFunctionAnalysisTime == 3600000
+    assert parameters.maxFunctionUpdateCount == 1024
+    assert settings.get_bool("analysis.guided.triggers.invalidInstruction", func) is False
 
 
 def test_disable_function_settings_clears_all_visible_passes():
@@ -103,7 +151,7 @@ def test_use_provider_clears_function_evidence_without_storing_provider_identity
         "_set_pending_reproof_functions",
         lambda bv_arg, starts, configured: (pending_writes.append((bv_arg, starts, configured)), True)[1],
     )
-    settings = object()
+    settings = FakeSettings()
 
     assert ui.use_provider(bv, func, "external", settings)
 

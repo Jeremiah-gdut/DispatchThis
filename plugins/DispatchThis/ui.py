@@ -28,6 +28,7 @@ from .settings import (
 )
 from .utils.log import log_info, log_warn
 from .state import ROOT_KEY
+from .workflow import prepare_analysis_for_reanalysis
 
 
 SHORTCUTS = {
@@ -69,6 +70,10 @@ def _setting_label(key: str) -> str:
     return PASS_LABELS.get(key, key)
 
 
+def _any_pass_enabled(settings, func) -> bool:
+    return any(settings.get_bool(setting, func) for setting in PASS_SETTING_IDS)
+
+
 def set_function_pass(bv, func, key: str, enabled: bool, settings=None, reanalyze: bool = True) -> bool:
     """Apply one menu change while preserving the pass dependency closure."""
 
@@ -87,6 +92,11 @@ def set_function_pass(bv, func, key: str, enabled: bool, settings=None, reanalyz
                 configured.set_bool(updated, not enabled, func, SettingsScope.SettingsResourceScope)
             return False
         changed.append(setting)
+    if reanalyze and _any_pass_enabled(configured, func):
+        if not prepare_analysis_for_reanalysis(bv, func, configured):
+            for updated in reversed(changed):
+                configured.set_bool(updated, not enabled, func, SettingsScope.SettingsResourceScope)
+            return False
     if not enabled and key in (
         BRANCH_TARGETS_SETTING,
         CALL_TARGETS_SETTING,
@@ -129,6 +139,9 @@ def use_provider(bv, func, provider_id: str, settings=None, reanalyze: bool = Tr
     """Bind a known provider to one view and discard stale function evidence."""
 
     configured = _settings(settings)
+    if reanalyze and _any_pass_enabled(configured, func):
+        if not prepare_analysis_for_reanalysis(bv, func, configured):
+            return False
     try:
         current_provider_id = active_provider_id(bv, configured)
     except ProviderBindingError:
