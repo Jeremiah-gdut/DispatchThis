@@ -92,7 +92,7 @@ def test_external_branch_provider_submits_once_then_converges(monkeypatch):
 
 def test_conditional_fact_is_captured_before_branch_metadata_mutation(monkeypatch):
     semantics = load_plugin_module("plugins.DispatchThis.semantics")
-    branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_conditions")
+    branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_translate")
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
     func = FakeFunction()
     bv = FakeView(func)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import binaryninja
 from binaryninja import Settings, SettingsScope
 
-from .passes.medium.branch_conditions import clear_condition_failure_tags
+from .passes.medium.branch_translate import clear_condition_failure_tags
 from .providers import (
     ProviderBindingError,
     _pending_reproof_functions,
@@ -27,7 +27,7 @@ from .settings import (
     prerequisites_for,
 )
 from .utils.log import log_info, log_warn
-from .workflow_state import ROOT_KEY
+from .state import ROOT_KEY
 
 
 SHORTCUTS = {

@@ -48,9 +48,9 @@ def _stable_state(workflow_state, function):
 
 def test_external_string_provider_uses_frozen_gate_and_applies_a_partial_batch(monkeypatch):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
-    load_plugin_module("plugins.DispatchThis.passes.medium.string_decrypt")
+    load_plugin_module("plugins.DispatchThis.passes.medium.decrypt")
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     view = View()
     function = Function()
     _stable_state(workflow_state, function)
@@ -90,9 +90,9 @@ def test_external_string_provider_uses_frozen_gate_and_applies_a_partial_batch(m
 
 def test_provider_can_skip_unsupported_calls_without_blocking_a_proven_fact(monkeypatch):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
-    load_plugin_module("plugins.DispatchThis.passes.medium.string_decrypt")
+    load_plugin_module("plugins.DispatchThis.passes.medium.decrypt")
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     view = View()
     function = Function()
     _stable_state(workflow_state, function)

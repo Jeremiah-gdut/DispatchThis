@@ -1,4 +1,4 @@
-"""Apply validated path-correlated global-store recovery plans."""
+"""Apply validated path-correlated STORE-recovery plans."""
 
 from binaryninja import ILSourceLocation, MediumLevelILOperation as M
 

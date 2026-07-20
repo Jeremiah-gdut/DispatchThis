@@ -3,14 +3,14 @@
 from binaryninja import AnalysisContext, FunctionType, Settings, SettingsScope, Type
 
 from .passes.medium.deflatten import rewrite_redirections_mlil
-from .passes.medium.correlated_stores import apply_correlated_stores_mlil
-from .passes.medium.indirect_calls import (
+from .passes.medium.correlated_branch import apply_correlated_stores_mlil
+from .passes.medium.deincall import (
     apply_indirect_call_rewrites,
     current_call_receipt_plans,
     validate_current_call_facts,
     validate_current_call_plans,
 )
-from .passes.medium.branch_conditions import (
+from .passes.medium.branch_translate import (
     ConditionFailureReason,
     ConditionReceipt,
     ConditionTranslationStatus,
@@ -19,10 +19,10 @@ from .passes.medium.branch_conditions import (
     publish_condition_failure_tag,
     translate_indirect_branch_conditions,
 )
-from .passes.medium.phase_cleanup import settle_cleanup_decode
-from .passes.medium.string_decrypt import apply_decrypted_string_comments
+from .passes.medium.cleanup import settle_cleanup_decode
+from .passes.medium.decrypt import apply_decrypted_string_comments
 from .helpers.mlil import iter_indirect_calls, set_roots_before
-from .passes.low.gadget_llil import (
+from .passes.low.deinbr import (
     apply_llil_jump_rewrites,
     clear_resolved_indirect_branch_tags,
     iter_llil_indirect_jumps,
@@ -52,7 +52,7 @@ from .semantics import (
     StringRecoveryQuery,
 )
 from .utils.log import log_info, log_warn, log_debug, log_error
-from .workflow_state import FunctionWorkflowState
+from .state import FunctionWorkflowState
 
 
 _ANALYSIS_SETTINGS = (
@@ -727,6 +727,12 @@ def _submit_branch_mutations(bv, func, state, plans):
     return submitted, attempted
 
 
+def _current_indirect_jump_sources(llil):
+    if llil is None:
+        return None
+    return {jump.address for jump in iter_llil_indirect_jumps(llil)}
+
+
 def _converge_branches(
     ctx,
     state,
@@ -740,7 +746,7 @@ def _converge_branches(
 ):
     func = ctx.function
     bv = ctx.view
-    jump_sources = {jump.address for jump in iter_llil_indirect_jumps(coverage_llil)}
+    jump_sources = _current_indirect_jump_sources(coverage_llil)
     plan = current_plan
     if plan is None:
         plan = (
@@ -762,7 +768,8 @@ def _converge_branches(
     covered = set(state.verified_branch_targets())
     if (
         reproof_settled
-        and not FunctionWorkflowState.unmapped_unresolved_sources(func)
+        and jump_sources is not None
+        and not FunctionWorkflowState.unmapped_unresolved_sources(func, jump_sources)
         and jump_sources <= covered
         and set(state.current_user_branch_targets()) <= covered
     ):
@@ -785,13 +792,13 @@ def resolve_jumps_llil(ctx: AnalysisContext):
     if state is None:
         return
 
-    if state.branch_stable(func):
+    llil = ctx.llil
+    if state.branch_stable(func, _current_indirect_jump_sources(llil)):
         clear_resolved_indirect_branch_tags(func)
         _schedule_tag_cleanup(bv, func.start)
         return
 
     log_info(f"[dispatchthis] resolve_llil invoked @ {func.start:#x}")
-    llil = ctx.llil
     plan = (
         _legacy_branch_plan(bv, llil, state, legacy)
         if legacy is not None
@@ -1011,7 +1018,9 @@ def translate_branches_mlil(ctx: AnalysisContext):
     # A current-overlay fixed-point exception is valid only for this translator
     # attempt. Never let it survive a fresh MLIL generation or a failed cleanup.
     state.clear_branch_cleanup_overlay_ready()
-    if not state.branch_stable(func):
+    if not state.branch_stable(
+        func, _current_indirect_jump_sources(getattr(ctx, "llil", None))
+    ):
         return
 
     mlil = ctx.mlil
@@ -1173,7 +1182,13 @@ def recover_phi_stores_mlil(ctx: AnalysisContext):
         return
     if not _ensure_analysis_settings(func):
         return
-    if not state.branch_stable(func) or not state.call_stable() or not state.global_stable():
+    if (
+        not state.branch_stable(
+            func, _current_indirect_jump_sources(getattr(ctx, "llil", None))
+        )
+        or not state.call_stable()
+        or not state.global_stable()
+    ):
         return
 
     mlil = ctx.mlil
@@ -1228,7 +1243,9 @@ def deflatten_mlil(ctx: AnalysisContext):
         return
     if not _ensure_analysis_settings(func):
         return
-    if not state.branch_stable(func):
+    if not state.branch_stable(
+        func, _current_indirect_jump_sources(getattr(ctx, "llil", None))
+    ):
         return
     if not state.call_stable():
         return

@@ -20,7 +20,7 @@ class Function:
 def test_external_correlated_provider_installs_the_atomically_rewritten_mlil(monkeypatch):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     function = Function()
     state = workflow_state.FunctionWorkflowState(function)
     state.mark_branch_stable()

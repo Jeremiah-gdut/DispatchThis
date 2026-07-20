@@ -4,12 +4,12 @@
 | --- | --- |
 | `plugins/DispatchThis/__init__.py` | 注册固定 workflow、公开 provider API。 |
 | `plugins/DispatchThis/workflow.py` | callback 编排、当前 IL 安装、核心 mutation 和阶段门控。 |
-| `plugins/DispatchThis/workflow_state.py` | 函数级 receipt、稳定性和失效。 |
+| `plugins/DispatchThis/state.py` | 函数级 receipt、稳定性和失效。 |
 | `plugins/DispatchThis/semantics.py` | `SampleSemantics`、Query、事实和计划的公开强类型契约。 |
 | `plugins/DispatchThis/providers.py` | provider registry 与 BinaryView 选择绑定。 |
 | `plugins/DispatchThis/settings.py` | 七个 pass 开关及依赖闭包。 |
 | `plugins/DispatchThis/helpers/` | 可复用、纯的 LLIL/MLIL/memory/value API。 |
-| `plugins/DispatchThis/passes/low/gadget_llil.py` | 核心 LLIL branch 后端。 |
+| `plugins/DispatchThis/passes/low/deinbr.py` | 核心 LLIL branch 后端。 |
 | `plugins/DispatchThis/passes/medium/` | call、condition、cleanup、STORE、string 与 deflatten 后端。 |
 | `sample/valorant/` | 独立的 Valorant provider；新样本的结构参考。 |
 | `tests/test_valorant_sample.py` | provider 模式匹配的最小回归覆盖。 |

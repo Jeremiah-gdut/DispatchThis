@@ -6,7 +6,7 @@ from binaryninja import MediumLevelILOperation
 from conftest import load_plugin_module
 
 
-indirect_calls = load_plugin_module("plugins.DispatchThis.passes.medium.indirect_calls")
+indirect_calls = load_plugin_module("plugins.DispatchThis.passes.medium.deincall")
 SsaVar = namedtuple("SsaVar", ("var", "version"))
 
 

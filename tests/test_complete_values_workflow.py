@@ -103,6 +103,68 @@ def test_sample_value_policy_can_prove_a_branch_target_through_the_real_workflow
     assert function.submitted == [(0x1000, ((view.arch, 0x1020),))]
 
 
+def test_constant_llil_jump_does_not_block_branch_convergence(monkeypatch):
+    semantics = load_plugin_module("plugins.DispatchThis.semantics")
+    workflow = load_plugin_module("plugins.DispatchThis.workflow")
+    source = Var("x0", 1)
+    destination = Expr("LLIL_SAMPLE_DECODE", src=reg(source), expr_index=7)
+    jump = Expr(
+        "LLIL_JUMP",
+        address=0x1000,
+        dest=destination,
+        expr_index=3,
+        instr_index=3,
+    )
+    function = _Function()
+    function.unresolved_indirect_branches = [
+        ("aarch64", 0x1000),
+        ("aarch64", 0x2000),
+    ]
+    view = types.SimpleNamespace(
+        arch=types.SimpleNamespace(name="aarch64"),
+        session_data={},
+    )
+    llil = types.SimpleNamespace()
+    provider_calls = []
+
+    def branch_targets(query):
+        provider_calls.append(query.llil)
+        return semantics.CompleteBatch(
+            (semantics.BranchTargetFact(jump, (0x1020,)),)
+        )
+
+    provider = semantics.SampleSemantics(
+        provider_id="constant-llil-jump",
+        name="Constant LLIL jump",
+        api_version=semantics.CORE_API_VERSION,
+        branch_targets=branch_targets,
+    )
+    monkeypatch.setattr(workflow, "active_provider", lambda _view: provider)
+    monkeypatch.setattr(workflow, "_legacy_profile", lambda _provider_id: None)
+    monkeypatch.setattr(
+        workflow, "_pending_reproof_functions", lambda _view: frozenset()
+    )
+    monkeypatch.setattr(workflow, "_ensure_analysis_settings", lambda _function: True)
+    monkeypatch.setattr(workflow, "iter_llil_indirect_jumps", lambda _llil: (jump,))
+    monkeypatch.setattr(
+        workflow, "validate_current_branch_plans", lambda _view, _llil, plans: plans
+    )
+    monkeypatch.setattr(workflow, "apply_llil_jump_rewrites", lambda *_args: 0)
+    monkeypatch.setattr(
+        workflow, "clear_resolved_indirect_branch_tags", lambda _function: None
+    )
+    monkeypatch.setattr(workflow, "_schedule_tag_cleanup", lambda *_args: None)
+    ctx = types.SimpleNamespace(function=function, view=view, llil=llil)
+
+    workflow.resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
+    workflow.resolve_jumps_llil(ctx)
+
+    assert function.submitted == [(0x1000, ((view.arch, 0x1020),))]
+    assert provider_calls == [llil, llil]
+    assert function.session_data["dispatchthis_workflow_state"]["branch"]["stable"] is True
+
+
 def test_inconclusive_value_policy_leaves_the_branch_site_unresolved(monkeypatch):
     values = values_module()
     semantics = load_plugin_module("plugins.DispatchThis.semantics")

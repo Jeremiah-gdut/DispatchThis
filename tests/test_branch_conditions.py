@@ -5,7 +5,7 @@ from binaryninja import LowLevelILOperation, MediumLevelILOperation
 from conftest import load_plugin_module
 
 
-branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_conditions")
+branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_translate")
 
 
 class LLILExpr:

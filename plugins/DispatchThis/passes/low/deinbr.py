@@ -1,7 +1,4 @@
-"""
-LLIL-stage jump gadget resolver that replaces indirect jump expressions
-with replace_expr and an associated jump to the original address 
-"""
+"""LLIL-stage indirect-branch resolver."""
 
 from collections import defaultdict
 

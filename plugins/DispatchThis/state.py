@@ -1,4 +1,4 @@
-"""Function-scoped workflow phase state for DispatchThis."""
+"""Function-scoped DispatchThis workflow state."""
 
 
 ROOT_KEY = "dispatchthis_workflow_state"
@@ -190,8 +190,10 @@ class FunctionWorkflowState:
             self._seed_legacy_branch_receipts()
 
     @staticmethod
-    def unmapped_unresolved_sources(func):
+    def unmapped_unresolved_sources(func, jump_sources=None):
         unresolved = {source for _, source in func.unresolved_indirect_branches}
+        if jump_sources is not None:
+            unresolved.intersection_update(jump_sources)
         mapped = set(_user_branch_targets(func))
         return unresolved - mapped
 
@@ -258,9 +260,11 @@ class FunctionWorkflowState:
     def mark_branch_stable(self):
         self.data["branch"]["stable"] = True
 
-    def branch_stable(self, func=None):
+    def branch_stable(self, func=None, jump_sources=None):
         func = func or self.func
-        if not self.data["branch"]["stable"] or self.unmapped_unresolved_sources(func):
+        if not self.data["branch"]["stable"] or self.unmapped_unresolved_sources(
+            func, jump_sources
+        ):
             return False
         applied_targets = _user_branch_targets(func)
         receipts = self.branch_targets()

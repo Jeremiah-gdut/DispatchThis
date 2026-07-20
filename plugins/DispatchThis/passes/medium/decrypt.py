@@ -1,4 +1,4 @@
-"""Core backend for provider-proven string recovery facts."""
+"""Apply provider-proven string-recovery facts."""
 
 from collections.abc import Iterable
 from typing import Final

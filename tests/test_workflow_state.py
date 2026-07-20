@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from plugins.DispatchThis.workflow_state import (
+from plugins.DispatchThis.state import (
     CLEANUP_RECEIPT_VERSION,
     FunctionWorkflowState,
     ROOT_KEY,

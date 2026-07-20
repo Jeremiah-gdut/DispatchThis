@@ -6,7 +6,7 @@ from conftest import load_plugin_module
 
 
 semantics = load_plugin_module("plugins.DispatchThis.semantics")
-correlated_stores = load_plugin_module("plugins.DispatchThis.passes.medium.correlated_stores")
+correlated_stores = load_plugin_module("plugins.DispatchThis.passes.medium.correlated_branch")
 
 
 class Edge:

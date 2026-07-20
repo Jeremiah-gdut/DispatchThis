@@ -1,4 +1,4 @@
-"""Phase-owned cleanup for resolved target decode computations."""
+"""Clean up resolved target-decode computations owned by a phase."""
 
 from binaryninja import (
     ILSourceLocation,

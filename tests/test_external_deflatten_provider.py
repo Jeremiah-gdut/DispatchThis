@@ -20,7 +20,7 @@ class Function:
 def test_deflatten_provider_installs_atomically_rewritten_mlil_when_ready(monkeypatch):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
 
     # Given: all prerequisite phases are current and one provider plan exists.
     function = Function()
@@ -78,7 +78,7 @@ def test_deflatten_provider_installs_atomically_rewritten_mlil_when_ready(monkey
 def test_deflatten_provider_rejects_an_untyped_batch_before_rewrite(monkeypatch):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     function = Function()
     state = workflow_state.FunctionWorkflowState(function)
     state.mark_branch_stable()

@@ -3,9 +3,9 @@
 from binaryninja import TypeClass
 
 from ..helpers import facts, memory, mlil
-from ..passes.low.gadget_llil import resolve_llil_jump_plan
+from ..passes.low.deinbr import resolve_llil_jump_plan
 from ..passes.medium.deflatten import compute_redirections
-from ..passes.medium.indirect_calls import plan_indirect_calls
+from ..passes.medium.deincall import plan_indirect_calls
 from ..utils.log import log_info, log_warn
 
 

@@ -78,7 +78,7 @@ class Function:
 def run_call_provider(monkeypatch, call_targets, callee_type=None):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     function = Function()
     call = Call()
     mlil = Mlil(call)

@@ -1,4 +1,4 @@
-"""Receipt-driven restoration of provider-proven branch conditions."""
+"""Receipt-driven translator for provider-proven branch conditions."""
 
 from __future__ import annotations
 

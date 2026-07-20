@@ -6,7 +6,7 @@ from binaryninja import LowLevelILOperation, RegisterValueType
 from conftest import load_plugin_module
 
 
-gadget_llil = load_plugin_module("plugins.DispatchThis.passes.low.gadget_llil")
+gadget_llil = load_plugin_module("plugins.DispatchThis.passes.low.deinbr")
 llil_helpers = import_module("plugins.DispatchThis.helpers.llil")
 
 

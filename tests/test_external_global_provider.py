@@ -69,7 +69,7 @@ class Function:
 def run_global_provider(monkeypatch, result, view=None, call_stable=True):
     sys.modules["plugins.DispatchThis.semantics"] = semantics
     workflow = load_plugin_module("plugins.DispatchThis.workflow")
-    workflow_state = load_plugin_module("plugins.DispatchThis.workflow_state")
+    workflow_state = load_plugin_module("plugins.DispatchThis.state")
     function = Function()
     view = View() if view is None else view
     provider = semantics.SampleSemantics(

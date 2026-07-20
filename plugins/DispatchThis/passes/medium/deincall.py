@@ -1,4 +1,4 @@
-"""MLIL-stage indirect-call resolver: rewrites decode-gadget call(reg) into call(const).
+"""MLIL-stage indirect-call backend: rewrites decode-gadget call(reg) into call(const).
 
 Folds the decode add (``target = (encoded + KEY) mod 2^48``) and rewrites only the
 call destination to a ``MLIL_CONST_PTR``. The exact SSA target slice separately owns

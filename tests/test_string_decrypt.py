@@ -2,7 +2,7 @@ from conftest import load_plugin_module
 
 
 semantics = load_plugin_module("plugins.DispatchThis.semantics")
-string_decrypt = load_plugin_module("plugins.DispatchThis.passes.medium.string_decrypt")
+string_decrypt = load_plugin_module("plugins.DispatchThis.passes.medium.decrypt")
 
 apply_decrypted_string_comments = string_decrypt.apply_decrypted_string_comments
 _escaped = string_decrypt._escaped

@@ -3,7 +3,7 @@ from binaryninja import MediumLevelILOperation as M, VariableSourceType
 from conftest import load_plugin_module
 
 
-phase_cleanup = load_plugin_module("plugins.DispatchThis.passes.medium.phase_cleanup")
+phase_cleanup = load_plugin_module("plugins.DispatchThis.passes.medium.cleanup")
 
 _candidate_slice = phase_cleanup._candidate_slice
 _drop_live_escapes = phase_cleanup._drop_live_escapes

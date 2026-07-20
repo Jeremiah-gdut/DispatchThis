@@ -6,7 +6,7 @@ from conftest import load_plugin_module, temporary_modules
 
 
 semantics = load_plugin_module("plugins.DispatchThis.semantics")
-branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_conditions")
+branch_conditions = load_plugin_module("plugins.DispatchThis.passes.medium.branch_translate")
 
 calls = []
 branch_plan_calls = []
@@ -269,10 +269,10 @@ class FakeWorkflowState:
         pass
 
     @staticmethod
-    def unmapped_unresolved_sources(_func):
+    def unmapped_unresolved_sources(_func, _jump_sources=None):
         return FakeWorkflowState.unmapped
 
-    def branch_stable(self, _func):
+    def branch_stable(self, _func, _jump_sources=None):
         return self.stable
 
     def branch_targets(self):
@@ -450,17 +450,17 @@ _FAKE_MODULES = {
         compute_redirections=fake_compute,
         rewrite_redirections_mlil=fake_rewrite_redirections_mlil,
     ),
-    "plugins.DispatchThis.passes.medium.correlated_stores": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.medium.correlated_branch": types.SimpleNamespace(
         apply_correlated_stores_mlil=fake_apply_correlated_stores_mlil,
     ),
-    "plugins.DispatchThis.passes.medium.indirect_calls": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.medium.deincall": types.SimpleNamespace(
         apply_indirect_call_rewrites=fake_apply_indirect_call_rewrites,
         current_call_receipt_plans=fake_current_call_receipt_plans,
         plan_indirect_calls=forbidden_plan_indirect_calls,
         validate_current_call_facts=lambda _mlil, facts: list(facts),
         validate_current_call_plans=fake_validate_current_call_plans,
     ),
-    "plugins.DispatchThis.passes.medium.branch_conditions": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.medium.branch_translate": types.SimpleNamespace(
         ConditionFailureReason=branch_conditions.ConditionFailureReason,
         ConditionReceipt=branch_conditions.ConditionReceipt,
         ConditionTranslationStatus=branch_conditions.ConditionTranslationStatus,
@@ -474,7 +474,7 @@ _FAKE_MODULES = {
             frozenset(),
         ),
     ),
-    "plugins.DispatchThis.passes.medium.phase_cleanup": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.medium.cleanup": types.SimpleNamespace(
         settle_cleanup_decode=fake_settle_cleanup_decode,
     ),
     "plugins.DispatchThis.helpers.mlil": types.SimpleNamespace(
@@ -484,10 +484,10 @@ _FAKE_MODULES = {
             set_roots_before_results.pop(0) if set_roots_before_results else set(),
         )[1],
     ),
-    "plugins.DispatchThis.passes.medium.string_decrypt": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.medium.decrypt": types.SimpleNamespace(
         apply_decrypted_string_comments=fake_apply_decrypted_string_comments,
     ),
-    "plugins.DispatchThis.passes.low.gadget_llil": types.SimpleNamespace(
+    "plugins.DispatchThis.passes.low.deinbr": types.SimpleNamespace(
         apply_llil_jump_rewrites=lambda *_args, **_kwargs: 0,
         clear_resolved_indirect_branch_tags=lambda func: clear_tag_calls.append(func),
         iter_llil_indirect_jumps=lambda _llil: iter(branch_iter_items),
@@ -510,7 +510,7 @@ _FAKE_MODULES = {
         log_debug=lambda _msg: None,
         log_error=lambda _msg: None,
     ),
-    "plugins.DispatchThis.workflow_state": types.SimpleNamespace(
+    "plugins.DispatchThis.state": types.SimpleNamespace(
         FunctionWorkflowState=FakeWorkflowState,
     ),
 }
