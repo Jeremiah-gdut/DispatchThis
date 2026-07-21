@@ -24,7 +24,13 @@ _FROZEN_FRAME_INTRINSICS = frozenset(
         "vceqq_u32",
         "vdupq_laneq_s32",
         "vdupq_laneq_s64",
+        "vmlaq_lane_s32",
         "vmovn_s32",
+        "vmulq_lane_s32",
+        "vmulq_s32",
+        "vnegq_s32",
+        "vnegq_s64",
+        "vorrq_s8",
         "vuzp1_s8",
     )
 )
@@ -33,6 +39,12 @@ _FROZEN_FRAME_INTRINSICS = frozenset(
 @dataclass(frozen=True, slots=True)
 class _StackOffset:
     offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateFrozenFrameBase:
+    register: object
+    ssa_register: object | None
 
 
 def _operation_name(instruction) -> str:
@@ -734,6 +746,145 @@ def _direct_stack_base(expression):
     return None if slot is None else slot[0]
 
 
+def _ssa_register_base(register):
+    base_register = getattr(register, "reg", None)
+    version = getattr(register, "version", None)
+    if (
+        _register_index(base_register) is None
+        or type(version) is not int
+        or version < 0
+    ):
+        return None
+    return base_register
+
+
+def _ssa_direct_stack_base(expression):
+    operation = getattr(getattr(expression, "operation", None), "name", None)
+    if operation == "LLIL_REG_SSA":
+        ssa_register = getattr(expression, "src", None)
+        base_register = _ssa_register_base(ssa_register)
+        return None if base_register is None else (base_register, ssa_register)
+    operands = _binary_operands(expression)
+    if operation == "LLIL_ADD" and operands is not None:
+        left = _ssa_direct_stack_base(operands[0])
+        right = _ssa_direct_stack_base(operands[1])
+        if left is not None and type(_constant_value(operands[1])) is int:
+            return left
+        if right is not None and type(_constant_value(operands[0])) is int:
+            return right
+    if operation == "LLIL_SUB" and operands is not None:
+        left = _ssa_direct_stack_base(operands[0])
+        if left is not None and type(_constant_value(operands[1])) is int:
+            return left
+    return None
+
+
+def _ssa_memory_access_address(instruction):
+    operation = _operation_name(instruction)
+    ssa_instruction = getattr(instruction, "ssa_form", None)
+    if (
+        ssa_instruction is None
+        or getattr(ssa_instruction, "non_ssa_form", None) != instruction
+    ):
+        return None
+    if operation == "LLIL_STORE":
+        return (
+            getattr(ssa_instruction, "dest", None)
+            if _operation_name(ssa_instruction) == "LLIL_STORE_SSA"
+            else None
+        )
+    if (
+        operation != "LLIL_SET_REG"
+        or _operation_name(ssa_instruction) != "LLIL_SET_REG_SSA"
+    ):
+        return None
+    source = getattr(ssa_instruction, "src", None)
+    while getattr(getattr(source, "operation", None), "name", None) in (
+        "LLIL_LOW_PART",
+        "LLIL_SX",
+        "LLIL_ZX",
+    ):
+        next_source = getattr(source, "src", None)
+        if next_source is source:
+            return None
+        source = next_source
+    if getattr(getattr(source, "operation", None), "name", None) != "LLIL_LOAD_SSA":
+        return None
+    return getattr(source, "src", None)
+
+
+def _private_frame_access_uses_anchor(
+    instruction, base_register, anchor_register
+) -> bool:
+    address = _ssa_memory_access_address(instruction)
+    ssa_base = _ssa_direct_stack_base(address)
+    anchor_base = _ssa_register_base(anchor_register)
+    if ssa_base is None or anchor_base is None:
+        return False
+    ssa_base_register, access_register = ssa_base
+    return (
+        _same_register(base_register, ssa_base_register)
+        and _same_register(base_register, anchor_base)
+        and _same_register(access_register, anchor_register)
+    )
+
+
+def _private_frame_prefix_ssa_register(
+    view, base_register, prefix_state, instructions_by_index
+):
+    if not (
+        isinstance(prefix_state, tuple)
+        and len(prefix_state) == 3
+        and type(prefix_state[0]) is int
+        and prefix_state[0] >= 0
+    ):
+        return None
+    architecture = getattr(view, "arch", None)
+    base_index = _register_index(base_register)
+    if architecture is None or base_index is None:
+        return None
+    anchor_register = None
+    for instruction_index in range(prefix_state[0]):
+        instruction = instructions_by_index.get(instruction_index)
+        if getattr(instruction, "instr_index", None) != instruction_index:
+            return None
+        if _operation_name(instruction) != "LLIL_SET_REG":
+            continue
+        modified = _modified_register_indexes(
+            architecture, getattr(instruction, "dest", None)
+        )
+        if modified is None:
+            return None
+        if base_index not in modified:
+            continue
+        ssa_instruction = getattr(instruction, "ssa_form", None)
+        if (
+            ssa_instruction is None
+            or _operation_name(ssa_instruction) != "LLIL_SET_REG_SSA"
+            or getattr(ssa_instruction, "non_ssa_form", None) != instruction
+        ):
+            return None
+        candidate = getattr(ssa_instruction, "dest", None)
+        candidate_base = _ssa_register_base(candidate)
+        if candidate_base is None or not _same_register(candidate_base, base_register):
+            return None
+        anchor_register = candidate
+    return anchor_register
+
+
+def _private_frame_base_uses_current_anchor(
+    instruction, base_register, private_frame_bases
+) -> bool:
+    for frame_base in private_frame_bases:
+        if not _same_register(base_register, frame_base.register):
+            continue
+        anchor_register = frame_base.ssa_register
+        return anchor_register is None or _private_frame_access_uses_anchor(
+            instruction, base_register, anchor_register
+        )
+    return False
+
+
 def _frozen_prefix_writes(view, prefix_state, instructions_by_index):
     if not (
         isinstance(prefix_state, tuple)
@@ -809,6 +960,152 @@ def _cached_frozen_frame_base_is_stable(
     return result
 
 
+def _expression_children(expression):
+    source = getattr(expression, "src", None)
+    if getattr(source, "operation", None) is not None:
+        yield source
+    operands = getattr(expression, "operands", None)
+    if isinstance(operands, (list, tuple)):
+        for operand in operands:
+            if getattr(operand, "operation", None) is not None:
+                yield operand
+
+
+def _uses_frame_register(expression, frame_registers) -> bool:
+    operation = getattr(getattr(expression, "operation", None), "name", None)
+    if operation is None:
+        return False
+    if operation == "LLIL_REG":
+        register = _register_expression(expression)
+        return register is not None and any(
+            _same_register(register, frame_register)
+            for frame_register in frame_registers
+        )
+    return any(
+        _uses_frame_register(child, frame_registers)
+        for child in _expression_children(expression)
+    )
+
+
+def _frame_registers_only_read_by_loads(expression, frame_registers) -> bool:
+    operation = getattr(getattr(expression, "operation", None), "name", None)
+    if operation is None:
+        return True
+    if operation == "LLIL_REG":
+        return not _uses_frame_register(expression, frame_registers)
+    if operation == "LLIL_LOAD":
+        return True
+    return all(
+        _frame_registers_only_read_by_loads(child, frame_registers)
+        for child in _expression_children(expression)
+    )
+
+
+def _private_frozen_frame_base_writes(
+    view, base_register, prefix_state, instructions_by_index
+):
+    prefix_end = prefix_state[0]
+    registers = prefix_state[1]
+    stack_values = prefix_state[2]
+    writes = []
+    for instruction_index in sorted(instructions_by_index):
+        if instruction_index <= prefix_end:
+            continue
+        instruction = instructions_by_index[instruction_index]
+        operation = _operation_name(instruction)
+        source = getattr(instruction, "src", None)
+        destination = getattr(instruction, "dest", None)
+        params = getattr(instruction, "params", None)
+        parameters = params if isinstance(params, (list, tuple)) else ()
+        if operation == "LLIL_SET_REG":
+            if not _frame_registers_only_read_by_loads(source, (base_register,)):
+                return None
+            continue
+        if operation == "LLIL_STORE":
+            if not _frame_registers_only_read_by_loads(source, (base_register,)):
+                return None
+            if not _uses_frame_register(destination, (base_register,)):
+                continue
+            size = getattr(instruction, "size", None)
+            address = _evaluate_literal(view.arch, destination, registers, stack_values)
+            if (
+                not isinstance(address, _StackOffset)
+                or type(size) is not int
+                or size <= 0
+            ):
+                return None
+            writes.append((address.offset, size))
+            continue
+        if operation == "LLIL_INTRINSIC":
+            if (
+                getattr(getattr(instruction, "intrinsic", None), "name", None)
+                not in _FROZEN_FRAME_INTRINSICS
+            ):
+                return None
+        expressions = (source, destination, *parameters)
+        if not all(
+            _frame_registers_only_read_by_loads(expression, (base_register,))
+            for expression in expressions
+        ):
+            return None
+    return tuple(writes)
+
+
+def _private_frozen_frame_writes(view, prefix_state, instructions_by_index):
+    if not (
+        isinstance(prefix_state, tuple)
+        and len(prefix_state) == 3
+        and type(prefix_state[0]) is int
+        and isinstance(prefix_state[1], tuple)
+        and isinstance(prefix_state[2], tuple)
+    ):
+        return None
+    architecture = getattr(view, "arch", None)
+    stack_pointer = getattr(architecture, "stack_pointer", None)
+    stack_index = (
+        None
+        if architecture is None or stack_pointer is None
+        else architecture.get_reg_index(stack_pointer)
+    )
+    if type(stack_index) is not int:
+        return None
+    _prefix_end, registers, _stack_values = prefix_state
+    frame_bases = []
+    writes = []
+    for register, value in registers:
+        register_index = _register_index(register)
+        if not isinstance(value, _StackOffset) or register_index is None:
+            continue
+        if register_index == stack_index:
+            continue
+        base_is_stable = _frozen_frame_base_is_stable(
+            view, register, prefix_state, instructions_by_index
+        )
+        anchor_register = (
+            None
+            if base_is_stable
+            else _private_frame_prefix_ssa_register(
+                view, register, prefix_state, instructions_by_index
+            )
+        )
+        if not base_is_stable and anchor_register is None:
+            continue
+        base_writes = _private_frozen_frame_base_writes(
+            view, register, prefix_state, instructions_by_index
+        )
+        if base_writes is None:
+            continue
+        if any(_same_register(register, known.register) for known in frame_bases):
+            continue
+        frame_bases.append(_PrivateFrozenFrameBase(register, anchor_register))
+        for write in base_writes:
+            if write not in writes:
+                writes.append(write)
+    if not frame_bases:
+        return None
+    return tuple(frame_bases), tuple(writes)
+
+
 def _frozen_prefix_load(
     view,
     address_expression,
@@ -845,6 +1142,7 @@ def _frozen_frame_table_target(
     frozen_base_cache,
     blocks_by_instruction=None,
     instructions_by_index=None,
+    private_frame_bases=None,
 ):
     jump_index = getattr(jump, "instr_index", None)
     target_register = _register_expression(getattr(jump, "dest", None))
@@ -957,12 +1255,23 @@ def _frozen_frame_table_target(
         index_base is None
         or table_base is None
         or not _same_register(index_base, table_base)
-        or not _cached_frozen_frame_base_is_stable(
+    ):
+        return None
+    if private_frame_bases is None:
+        if not _cached_frozen_frame_base_is_stable(
             frozen_base_cache,
             view,
             index_base,
             prefix_state,
             instructions_by_index,
+        ):
+            return None
+    elif not (
+        _private_frame_base_uses_current_anchor(
+            index_load, index_base, private_frame_bases
+        )
+        and _private_frame_base_uses_current_anchor(
+            table_load, table_base, private_frame_bases
         )
     ):
         return None
@@ -1025,13 +1334,55 @@ def _selector_table_entries(view, policy, table_base: int) -> tuple[int, ...] | 
     return first_target, second_target
 
 
+def _selector_store_reaches_index_load(index_load, index_store) -> bool:
+    load_ssa = getattr(index_load, "ssa_form", None)
+    store_ssa = getattr(index_store, "ssa_form", None)
+    if (
+        _operation_name(index_load) != "LLIL_SET_REG"
+        or _operation_name(index_store) != "LLIL_STORE"
+        or load_ssa is None
+        or store_ssa is None
+        or getattr(load_ssa, "non_ssa_form", None) != index_load
+        or getattr(store_ssa, "non_ssa_form", None) != index_store
+        or _operation_name(load_ssa) != "LLIL_SET_REG_SSA"
+        or _operation_name(store_ssa) != "LLIL_STORE_SSA"
+    ):
+        return False
+    load_source = getattr(load_ssa, "src", None)
+    while getattr(getattr(load_source, "operation", None), "name", None) in (
+        "LLIL_LOW_PART",
+        "LLIL_SX",
+        "LLIL_ZX",
+    ):
+        next_source = getattr(load_source, "src", None)
+        if next_source is load_source:
+            return False
+        load_source = next_source
+    if (
+        getattr(getattr(load_source, "operation", None), "name", None)
+        != "LLIL_LOAD_SSA"
+    ):
+        return False
+    load_memory = getattr(load_source, "src_memory", None)
+    store_memory = getattr(store_ssa, "dest_memory", None)
+    return (
+        type(load_memory) is int
+        and load_memory >= 0
+        and type(store_memory) is int
+        and store_memory >= 0
+        and load_memory == store_memory
+    )
+
+
 def _frozen_selector_store_is_unique(
     view,
     selector_address,
     selector_width,
+    index_load,
     index_store,
     prefix_state,
     instructions_by_index,
+    frozen_store_index=None,
 ) -> bool:
     if (
         not isinstance(selector_address, _StackOffset)
@@ -1045,9 +1396,42 @@ def _frozen_selector_store_is_unique(
     store_index = getattr(index_store, "instr_index", None)
     if type(store_index) is not int or store_index <= prefix_state[0]:
         return False
+    if _selector_store_reaches_index_load(index_load, index_store):
+        return True
+    stores = frozen_store_index
+    if stores is None:
+        stores = _frozen_selector_store_index(view, prefix_state, instructions_by_index)
+    if not isinstance(stores, tuple):
+        return False
+    matching_stores = 0
+    for address_offset, size, instruction_index, instruction in stores:
+        if not _ranges_overlap(
+            selector_address.offset, selector_width, address_offset, size
+        ):
+            continue
+        if (
+            instruction_index != store_index
+            or instruction is not index_store
+            or address_offset != selector_address.offset
+            or size != selector_width
+        ):
+            return False
+        matching_stores += 1
+    return matching_stores == 1
+
+
+def _frozen_selector_store_index(view, prefix_state, instructions_by_index):
+    if (
+        not isinstance(prefix_state, tuple)
+        or len(prefix_state) != 3
+        or type(prefix_state[0]) is not int
+        or not isinstance(prefix_state[1], tuple)
+        or not isinstance(prefix_state[2], tuple)
+    ):
+        return None
     registers = prefix_state[1]
     stack_values = prefix_state[2]
-    matching_stores = 0
+    stores = []
     for instruction_index in sorted(instructions_by_index):
         if instruction_index <= prefix_state[0]:
             continue
@@ -1058,24 +1442,121 @@ def _frozen_selector_store_is_unique(
         address = _evaluate_literal(
             view.arch, getattr(instruction, "dest", None), registers, stack_values
         )
-        if (
-            not isinstance(address, _StackOffset)
-            or type(size) is not int
-            or size <= 0
-            or not _ranges_overlap(
-                selector_address.offset, selector_width, address.offset, size
+        if not isinstance(address, _StackOffset) or type(size) is not int or size <= 0:
+            continue
+        stores.append((address.offset, size, instruction_index, instruction))
+    return tuple(stores)
+
+
+def _frozen_selector_table_entries(
+    view,
+    policy,
+    index_load,
+    index_store,
+    table_load,
+    selector_width,
+    prefix_state,
+    frozen_writes,
+    frozen_base_cache,
+    instructions_by_index,
+    private_frame_bases=None,
+    frozen_store_index=None,
+):
+    address_size = getattr(getattr(view, "arch", None), "address_size", None)
+    if (
+        frozen_writes is None
+        or type(address_size) is not int
+        or address_size <= 0
+        or not isinstance(frozen_base_cache, list)
+        or not isinstance(prefix_state, tuple)
+        or len(prefix_state) != 3
+        or not isinstance(prefix_state[1], tuple)
+        or not isinstance(prefix_state[2], tuple)
+    ):
+        return None
+    index_address_expression = getattr(index_load.src, "src", None)
+    stored_address_expression = getattr(index_store, "dest", None)
+    table_address_expression = getattr(table_load.src, "src", None)
+    if (
+        index_address_expression is None
+        or stored_address_expression is None
+        or table_address_expression is None
+    ):
+        return None
+    selector_base = _direct_stack_base(index_address_expression)
+    stored_base = _direct_stack_base(stored_address_expression)
+    table_base = _direct_stack_base(table_address_expression)
+    if (
+        selector_base is None
+        or stored_base is None
+        or table_base is None
+        or not _same_register(selector_base, stored_base)
+    ):
+        return None
+    if private_frame_bases is None:
+        if not (
+            _cached_frozen_frame_base_is_stable(
+                frozen_base_cache,
+                view,
+                selector_base,
+                prefix_state,
+                instructions_by_index,
+            )
+            and _cached_frozen_frame_base_is_stable(
+                frozen_base_cache,
+                view,
+                table_base,
+                prefix_state,
+                instructions_by_index,
             )
         ):
-            continue
-        if (
-            instruction_index != store_index
-            or instruction is not index_store
-            or address.offset != selector_address.offset
-            or size != selector_width
-        ):
-            return False
-        matching_stores += 1
-    return matching_stores == 1
+            return None
+    elif not (
+        _private_frame_base_uses_current_anchor(
+            index_load, selector_base, private_frame_bases
+        )
+        and _private_frame_base_uses_current_anchor(
+            index_store, stored_base, private_frame_bases
+        )
+        and _private_frame_base_uses_current_anchor(
+            table_load, table_base, private_frame_bases
+        )
+    ):
+        return None
+    registers = prefix_state[1]
+    stack_values = prefix_state[2]
+    index_address = _evaluate_literal(
+        view.arch, index_address_expression, registers, stack_values
+    )
+    stored_address = _evaluate_literal(
+        view.arch, stored_address_expression, registers, stack_values
+    )
+    if (
+        not isinstance(index_address, _StackOffset)
+        or not isinstance(stored_address, _StackOffset)
+        or index_address.offset != stored_address.offset
+        or not _frozen_selector_store_is_unique(
+            view,
+            index_address,
+            selector_width,
+            index_load,
+            index_store,
+            prefix_state,
+            instructions_by_index,
+            frozen_store_index,
+        )
+    ):
+        return None
+    table_pointer = _frozen_prefix_load(
+        view,
+        table_address_expression,
+        address_size,
+        prefix_state,
+        frozen_writes,
+    )
+    if type(table_pointer) is not int:
+        return None
+    return _selector_table_entries(view, policy, table_pointer)
 
 
 def _selector_table_targets(
@@ -1090,6 +1571,8 @@ def _selector_table_targets(
     prefix_state=None,
     frozen_writes=None,
     frozen_base_cache=None,
+    private_frame_bases=None,
+    frozen_store_index=None,
 ):
     jump_index = getattr(jump, "instr_index", None)
     target_register = _register_expression(getattr(jump, "dest", None))
@@ -1221,6 +1704,22 @@ def _selector_table_targets(
         or getattr(index_load.src, "size", None) != selector_width
     ):
         return None
+    entries = _frozen_selector_table_entries(
+        view,
+        policy,
+        index_load,
+        index_store,
+        table_load,
+        selector_width,
+        prefix_state,
+        frozen_writes,
+        frozen_base_cache,
+        instructions_by_index,
+        private_frame_bases,
+        frozen_store_index,
+    )
+    if entries is not None:
+        return selector_expression, *entries
     state = _path_state_before(
         view,
         llil,
@@ -1253,8 +1752,10 @@ def _selector_table_targets(
         return None if entries is None else (selector_expression, *entries)
     if (
         (index_address_expression := getattr(index_load.src, "src", None)) is not None
-        and (stored_address_expression := getattr(index_store, "dest", None)) is not None
-        and (table_address_expression := getattr(table_load.src, "src", None)) is not None
+        and (stored_address_expression := getattr(index_store, "dest", None))
+        is not None
+        and (table_address_expression := getattr(table_load.src, "src", None))
+        is not None
         and (selector_slot := _direct_stack_slot(index_address_expression)) is not None
         and (stored_slot := _direct_stack_slot(stored_address_expression)) is not None
         and _same_register(selector_slot[0], stored_slot[0])
@@ -1281,81 +1782,7 @@ def _selector_table_targets(
                     entries = _selector_table_entries(view, policy, table_pointer)
                     if entries is not None:
                         return selector_expression, *entries
-    if (
-        frozen_writes is None
-        or not isinstance(frozen_base_cache, list)
-        or not isinstance(prefix_state, tuple)
-        or len(prefix_state) != 3
-        or not isinstance(prefix_state[1], tuple)
-        or not isinstance(prefix_state[2], tuple)
-    ):
-        return None
-    index_address_expression = getattr(index_load.src, "src", None)
-    stored_address_expression = getattr(index_store, "dest", None)
-    table_address_expression = getattr(table_load.src, "src", None)
-    if (
-        index_address_expression is None
-        or stored_address_expression is None
-        or table_address_expression is None
-    ):
-        return None
-    selector_base = _direct_stack_base(index_address_expression)
-    stored_base = _direct_stack_base(stored_address_expression)
-    table_base = _direct_stack_base(table_address_expression)
-    if (
-        selector_base is None
-        or stored_base is None
-        or table_base is None
-        or not _same_register(selector_base, stored_base)
-        or not _cached_frozen_frame_base_is_stable(
-            frozen_base_cache,
-            view,
-            selector_base,
-            prefix_state,
-            instructions_by_index,
-        )
-        or not _cached_frozen_frame_base_is_stable(
-            frozen_base_cache,
-            view,
-            table_base,
-            prefix_state,
-            instructions_by_index,
-        )
-    ):
-        return None
-    registers = prefix_state[1]
-    stack_values = prefix_state[2]
-    index_address = _evaluate_literal(
-        view.arch, index_address_expression, registers, stack_values
-    )
-    stored_address = _evaluate_literal(
-        view.arch, stored_address_expression, registers, stack_values
-    )
-    if (
-        not isinstance(index_address, _StackOffset)
-        or not isinstance(stored_address, _StackOffset)
-        or index_address.offset != stored_address.offset
-        or not _frozen_selector_store_is_unique(
-            view,
-            index_address,
-            selector_width,
-            index_store,
-            prefix_state,
-            instructions_by_index,
-        )
-    ):
-        return None
-    table_pointer = _frozen_prefix_load(
-        view,
-        table_address_expression,
-        address_size,
-        prefix_state,
-        frozen_writes,
-    )
-    if type(table_pointer) is not int:
-        return None
-    entries = _selector_table_entries(view, policy, table_pointer)
-    return None if entries is None else (selector_expression, *entries)
+    return None
 
 
 def branch_targets(
@@ -1375,6 +1802,32 @@ def branch_targets(
     frozen_writes = _frozen_prefix_writes(
         query.view, prefix_state, instructions_by_index
     )
+    frozen_store_index = _frozen_selector_store_index(
+        query.view, prefix_state, instructions_by_index
+    )
+    private_frame = (
+        None
+        if frozen_writes is not None
+        else _private_frozen_frame_writes(
+            query.view, prefix_state, instructions_by_index
+        )
+    )
+    if private_frame is not None and not isinstance(frozen_store_index, tuple):
+        private_frame = None
+    private_frame_bases = None if private_frame is None else private_frame[0]
+    frame_writes = frozen_writes
+    if private_frame is not None:
+        frame_writes = tuple(
+            sorted(
+                {
+                    *private_frame[1],
+                    *(
+                        (offset, size)
+                        for offset, size, _index, _instruction in frozen_store_index
+                    ),
+                }
+            )
+        )
     frozen_base_cache = []
     predecessors = _jump_predecessors(
         query.llil, blocks_by_instruction, instructions_by_index
@@ -1403,10 +1856,11 @@ def branch_targets(
                 jump,
                 policy,
                 prefix_state,
-                frozen_writes,
+                frame_writes,
                 frozen_base_cache,
                 blocks_by_instruction,
                 instructions_by_index,
+                private_frame_bases,
             )
             targets = None if target is None else (target,)
         selector = None
@@ -1421,8 +1875,10 @@ def branch_targets(
                 reachable_by_stop,
                 instructions_by_index,
                 prefix_state,
-                frozen_writes,
+                frame_writes,
                 frozen_base_cache,
+                private_frame_bases,
+                frozen_store_index,
             )
         if selector is not None:
             condition, false_target, true_target = selector

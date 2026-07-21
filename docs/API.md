@@ -2,6 +2,12 @@
 
 公开 API 由 `DispatchThis` 包导出，当前版本为 `CORE_API_VERSION = 4`。provider 必须在 `SampleSemantics.api_version` 中写入该精确值；不匹配会被拒绝。
 
+## 3 步接入
+
+1. 用稳定的 `provider_id` 和精确的 `CORE_API_VERSION` 创建一个 `SampleSemantics`。
+2. 只实现样本已证明的槽位；每个槽位只读取自己的当前 Query。
+3. 对完整扫描返回 `CompleteBatch`，无法完成扫描时返回 `Inconclusive`。
+
 ## 注册
 
 ```python
@@ -20,6 +26,8 @@ register_provider(
 
 ## 槽位
 
+只实现实际支持的槽位；缺失字段表示不支持，不要编写 no-op wrapper。
+
 | `SampleSemantics` 字段 | 输入 | 输出 | 说明 |
 | --- | --- | --- | --- |
 | `branch_targets` | `BranchTargetQuery(view, function, llil)` | `BranchTargetFact` | 完整 jump 目标集；只有有方向条件才携带 `condition`。 |
@@ -28,6 +36,8 @@ register_provider(
 | `correlated_stores` | `CorrelatedStoreQuery(view, function, mlil)` | `CorrelatedStorePlan` | 当前 MLIL 的两臂 STORE 计划。 |
 | `string_recovery` | `StringRecoveryQuery(view, function, mlil, deflattened_function_starts)` | `StringRecoveryFact` | 调用点、源、目的地和 `bytes` 明文；最后一项是可为空的快照，不是执行前置条件。 |
 | `deflatten` | `DeflattenQuery(view, function, mlil)` | `DeflattenPlan` | 原子 dispatcher 重定向计划。 |
+
+## 返回结果
 
 每个 slot 的返回类型都是 `CompleteBatch[Fact] | Inconclusive`：
 
@@ -51,7 +61,7 @@ return Inconclusive("required current-IL definition is unavailable")
 
 `DeflattenPlan`、`CorrelatedStorePlan` 和其 witness 类型较严格。先复用核心 helper 证明现有形态；不要构造缺少当前 IL/CFG 证据的计划。
 
-## 可复用功能 API
+## 先复用已有功能 API
 
 样本 provider 可以导入：
 
@@ -65,7 +75,7 @@ from DispatchThis.helpers import llil, memory, mlil, values
 
 函数名和参数以对应模块的 docstring/`__all__` 为准；不要为文档复制一份会过期的长函数清单。最小真实用法见 [sample-providers.md](sample-providers.md) 和 `sample/valorant/__init__.py`。
 
-## 禁止行为
+## 不可做
 
 - 修改 BinaryView、Function、IL、Settings、session data 或 workflow；
 - 注册 activity 或依赖 callback 顺序；

@@ -51,12 +51,19 @@ class MLILExpr:
 
 class FakeLLIL:
     def __init__(self, *instructions):
-        self.instructions = list(instructions)
+        self._instructions = list(instructions)
+        self.instruction_reads = 0
+
+    @property
+    def instructions(self):
+        self.instruction_reads += 1
+        return self._instructions
 
 
 class FakeMLIL:
     def __init__(self, *instructions):
-        self.instructions = list(instructions)
+        self._instructions = list(instructions)
+        self.instruction_reads = 0
         self._by_index = {instruction.instr_index: instruction for instruction in instructions}
         self.basic_blocks = [
             types.SimpleNamespace(start=instruction.instr_index)
@@ -64,6 +71,11 @@ class FakeMLIL:
         ]
         for instruction in instructions:
             instruction.function = self
+
+    @property
+    def instructions(self):
+        self.instruction_reads += 1
+        return self._instructions
 
     def __getitem__(self, index):
         return self._by_index[index]
@@ -415,6 +427,121 @@ def test_exact_current_if_is_already_satisfied_without_old_cleanup_ownership():
     assert result.cleanup_roots == frozenset()
 
 
+def test_current_if_accepts_its_direct_mapping_among_ambiguous_siblings():
+    root, condition = _condition_tree()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(root),
+        0x2000,
+        condition,
+        0x3000,
+        0x4000,
+    )
+    true_block = MLILExpr("MLIL_NOP", address=0x3000, instr_index=31)
+    false_block = MLILExpr("MLIL_NOP", address=0x4000, instr_index=32)
+    stale_condition = MLILExpr("MLIL_CMP_NE")
+    stale_parent = MLILExpr(
+        "MLIL_SET_VAR",
+        detailed_operands=[("src", stale_condition, "MediumLevelILInstruction")],
+    )
+    current_condition = MLILExpr("MLIL_CMP_NE")
+    current_if = MLILExpr(
+        "MLIL_IF",
+        address=0x2000,
+        instr_index=30,
+        condition=current_condition,
+        true=true_block.instr_index,
+        false=false_block.instr_index,
+    )
+    mlil = FakeMLIL(current_if, true_block, false_block)
+    for candidate in (stale_condition, stale_parent, current_condition):
+        candidate.function = mlil
+    condition.mlils = [stale_condition, stale_parent, current_condition]
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(),
+        FakeLLIL(root),
+        mlil,
+        (receipt,),
+    )
+
+    assert result.results[0].status is branch_conditions.ConditionTranslationStatus.ALREADY_SATISFIED
+    assert result.rewrite_sources == frozenset()
+
+
+def test_translates_a_receipt_batch_from_one_current_il_snapshot():
+    first_old_root, first_old_condition = _condition_tree(0x1000, 0)
+    second_old_root, second_old_condition = _condition_tree(0x1100, 1)
+    first = branch_conditions.capture_condition_receipt(
+        FakeLLIL(first_old_root), 0x2000, first_old_condition, 0x3000, 0x4000
+    )
+    second = branch_conditions.capture_condition_receipt(
+        FakeLLIL(second_old_root), 0x2100, second_old_condition, 0x5000, 0x6000
+    )
+    first_root, first_condition = _condition_tree(0x1000, 0)
+    second_root, second_condition = _condition_tree(0x1100, 1)
+    first_true = MLILExpr("MLIL_NOP", address=0x3000, instr_index=31)
+    first_false = MLILExpr("MLIL_NOP", address=0x4000, instr_index=32)
+    second_true = MLILExpr("MLIL_NOP", address=0x5000, instr_index=41)
+    second_false = MLILExpr("MLIL_NOP", address=0x6000, instr_index=42)
+    first_current = MLILExpr("MLIL_CMP_NE")
+    second_current = MLILExpr("MLIL_CMP_NE")
+    first_site = MLILExpr(
+        "MLIL_IF",
+        address=0x2000,
+        instr_index=30,
+        condition=first_current,
+        true=first_true.instr_index,
+        false=first_false.instr_index,
+    )
+    second_site = MLILExpr(
+        "MLIL_IF",
+        address=0x2100,
+        instr_index=40,
+        condition=second_current,
+        true=second_true.instr_index,
+        false=second_false.instr_index,
+    )
+    mlil = FakeMLIL(first_site, first_true, first_false, second_site, second_true, second_false)
+    first_current.function = mlil
+    second_current.function = mlil
+    first_condition.mlils = [first_current]
+    second_condition.mlils = [second_current]
+    current_llil = FakeLLIL(first_root, second_root)
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(), current_llil, mlil, (first, second)
+    )
+
+    assert [item.status for item in result.results] == [
+        branch_conditions.ConditionTranslationStatus.ALREADY_SATISFIED,
+        branch_conditions.ConditionTranslationStatus.ALREADY_SATISFIED,
+    ]
+    assert current_llil.instruction_reads == 1
+    assert mlil.instruction_reads == 1
+
+
+def test_batch_index_keeps_multiple_current_sites_ambiguous():
+    old_root, old_condition = _condition_tree()
+    receipt = branch_conditions.capture_condition_receipt(
+        FakeLLIL(old_root), 0x2000, old_condition, 0x3000, 0x4000
+    )
+    current_root, current_condition = _condition_tree()
+    first_site, true_block, false_block = _jump_site()
+    second_site = MLILExpr("MLIL_JUMP_TO", address=0x2000, instr_index=40)
+    mlil = FakeMLIL(first_site, true_block, false_block, second_site)
+    current_condition.function = mlil
+    current_condition.mlils = [MLILExpr("MLIL_CMP_NE")]
+    current_condition.mlils[0].function = mlil
+
+    result = branch_conditions.translate_indirect_branch_conditions(
+        types.SimpleNamespace(), FakeLLIL(current_root), mlil, (receipt,)
+    )
+
+    translated = result.results[0]
+    assert translated.status is branch_conditions.ConditionTranslationStatus.FAILED
+    assert translated.failure.reason is branch_conditions.ConditionFailureReason.SITE_AMBIGUOUS
+
+
 def test_mixed_ready_and_failed_sites_use_one_copy_batch_for_ready_sites(monkeypatch):
     first_root, first_condition = _condition_tree(0x1000, 0)
     second_root, second_condition = _condition_tree(0x1100, 1)
@@ -464,10 +591,11 @@ def test_no_receipt_means_no_condition_translation_work(monkeypatch):
     jump, true_block, false_block = _jump_site()
     mlil = FakeMLIL(jump, true_block, false_block)
     copied = _copy_backend(monkeypatch, mlil)
+    llil = FakeLLIL()
 
     result = branch_conditions.translate_indirect_branch_conditions(
         types.SimpleNamespace(),
-        FakeLLIL(),
+        llil,
         mlil,
         (),
     )
@@ -475,3 +603,5 @@ def test_no_receipt_means_no_condition_translation_work(monkeypatch):
     assert result.results == ()
     assert result.rewrite_sources == frozenset()
     assert copied.replacements == []
+    assert llil.instruction_reads == 0
+    assert mlil.instruction_reads == 0

@@ -1,5 +1,12 @@
 # 源码地图
 
+## 按改动类型选位置
+
+- workflow 注册、重新分析或 receipt：从 `workflow.py` 和 `state.py` 开始。
+- provider 的 Query、事实或计划：从 `semantics.py` 和 `providers.py` 开始。
+- 当前 IL 的恢复或 cleanup：从对应的 `passes/low/` 或 `passes/medium/` 后端开始，例如 `deinbr.py`。
+- 新样本识别：限制在 `sample/<name>/` 及其测试；不要扩展 `profiles/`。
+
 | 路径 | 职责 |
 | --- | --- |
 | `plugins/DispatchThis/__init__.py` | 注册固定 workflow、公开 provider API。 |

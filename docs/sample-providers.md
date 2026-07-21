@@ -2,6 +2,13 @@
 
 本页是新样本适配的默认流程。目标是把样本知识限制在独立插件中，并让核心保持可复用。
 
+## 先按这四步推进
+
+1. 注册一个只含最小槽位的 provider。
+2. 在真实函数上按 LLIL、MLIL/SSA、HLIL、日志的顺序收集证据。
+3. 用受限、当前 IL 驱动的模式匹配提交事实；遇到不确定性就拒绝。
+4. 用最小测试、直接 provider 调用和重启后的 GUI workflow 完成验证。
+
 ## 1. 创建最小 provider
 
 在 `sample/<sample-name>/__init__.py` 中注册一次 provider。开发时把该目录软链接到 Binary Ninja 插件目录；不要把样本代码塞进 `plugins/DispatchThis/profiles/`。
@@ -56,7 +63,7 @@ bn log --target active --limit 100
 
 匹配以 IL 形状、数据流和当前 CFG 为边界。各类 jump、global 与三种字符串模式的证据清单见 [obfuscation.md](obfuscation.md)。回放器只接受该模式所需的 operation、字节宽度、控制流和最大步数；未知副作用、指针不确定性、无终止符或非文本输出一律不产出事实。
 
-## 4. 三个常见坑
+## 4. 四个常见坑
 
 ### 嵌套全局 load
 
@@ -88,7 +95,7 @@ MLIL 中的静态 load 常嵌在算术或字段表达式下。遍历完整表达
 
 例如，SSA 字段、受控 load 和带 CFG 见证的 PHI 值关联是通用值求解能力；某个字符串 decoder 的 key 轮换不是。
 
-## 6. 验证闭环
+## 验证闭环
 
 1. 用最小 fake IL 测试模式的接受和拒绝条件。
 2. 在真实函数上直接调用 provider，检查事实数量、来源、目的地和明文。
@@ -98,7 +105,7 @@ MLIL 中的静态 load 常嵌在算术或字段表达式下。遍历完整表达
 
 修改 workflow 注册或回调后必须完整重启：已注册 workflow 不可变。仅改 provider 或其纯辅助函数时可以在开发中热重载，但必须读回实际 registry/bound callback 并用 `bn log` 验证 GUI workflow；无法证明绑定已更新时仍应完整重启。不要保存或覆盖用户的 BNDB，除非用户明确要求。
 
-## 7. 完成标准
+## 完成标准
 
 一个样本适配完成时：
 

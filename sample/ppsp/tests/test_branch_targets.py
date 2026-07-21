@@ -30,6 +30,12 @@ class _Register:
 
 
 @dataclass(frozen=True, slots=True)
+class _SsaRegister:
+    reg: _Register
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Expression:
     operation: _Operation
     src: "_Expression | _Register | None" = None
@@ -277,6 +283,86 @@ def _query(jump: _Jump) -> _Query:
     return _Query(view="view", llil=_Llil((jump,), _SsaIl("ssa")))
 
 
+def _ssa_memory_access(
+    operation: str,
+    base_register: _Register,
+    version: int,
+    memory_version: int = 0,
+) -> SimpleNamespace:
+    raw = SimpleNamespace(
+        operation=_Operation(operation),
+        instr_index=0,
+    )
+    base = SimpleNamespace(
+        operation=_Operation("LLIL_REG_SSA"),
+        src=_SsaRegister(base_register, version),
+    )
+    address = SimpleNamespace(
+        operation=_Operation("LLIL_ADD"),
+        operands=(
+            base,
+            _Expression(_Operation("LLIL_CONST_PTR"), constant=0x20),
+        ),
+    )
+    if operation == "LLIL_SET_REG":
+        source = SimpleNamespace(
+            operation=_Operation("LLIL_LOAD_SSA"),
+            src=address,
+            src_memory=memory_version,
+        )
+        raw.ssa_form = SimpleNamespace(
+            operation=_Operation("LLIL_SET_REG_SSA"),
+            src=source,
+            non_ssa_form=raw,
+        )
+    else:
+        raw.ssa_form = SimpleNamespace(
+            operation=_Operation("LLIL_STORE_SSA"),
+            dest=address,
+            dest_memory=memory_version,
+            non_ssa_form=raw,
+        )
+    return raw
+
+
+def test_private_frame_access_requires_the_prefix_ssa_register_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _registered = _load_provider(monkeypatch, None, lambda _target: False)
+    x19 = _Register("x19", 19)
+    x22 = _Register("x22", 22)
+
+    # Given a private frame base initially defined as x22#2.
+    # When an access carries the exact SSA version from that definition.
+    # Then the private-frame proof accepts it, including a selector STORE.
+    x22_load = _ssa_memory_access("LLIL_SET_REG", x22, 2)
+    x19_store = _ssa_memory_access("LLIL_STORE", x19, 1)
+    assert provider._private_frame_access_uses_anchor(
+        x22_load, x22, _SsaRegister(x22, 2)
+    )
+    assert provider._private_frame_access_uses_anchor(
+        x19_store, x19, _SsaRegister(x19, 1)
+    )
+
+    x22_later_load = _ssa_memory_access("LLIL_SET_REG", x22, 3)
+    assert not provider._private_frame_access_uses_anchor(
+        x22_later_load, x22, _SsaRegister(x22, 2)
+    )
+
+
+def test_selector_store_must_reach_the_index_load_in_memory_ssa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _registered = _load_provider(monkeypatch, None, lambda _target: False)
+    x19 = _Register("x19", 19)
+    selector_store = _ssa_memory_access("LLIL_STORE", x19, 1, 42)
+    selector_load = _ssa_memory_access("LLIL_SET_REG", x19, 1, 42)
+    later_load = _ssa_memory_access("LLIL_SET_REG", x19, 1, 43)
+
+    assert provider._selector_store_reaches_index_load(selector_load, selector_store)
+    assert not provider._selector_store_reaches_index_load(later_load, selector_store)
+
+
 def test_jump_targets_accepts_a_block_start_normalized_before_its_first_llil_instruction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -513,6 +599,7 @@ def _selector_table_query(
 def _frozen_selector_table_query(
     duplicate_selector_store: bool = False,
     global_noise: bool = False,
+    unrelated_dynamic_store: bool = False,
 ) -> tuple[_Query, _Jump]:
     query, jump = _selector_table_query()
     instructions = query.llil.instructions
@@ -523,6 +610,7 @@ def _frozen_selector_table_query(
     assert isinstance(selector_base, _Register)
     assert isinstance(table_value, _Register)
     table_base = _Register("x23", 23)
+    unrelated_base = _Register("x11", 11)
     selector_slot = instructions[6].dest
     selector_register = instructions[4].dest
     assert isinstance(selector_slot, _Expression)
@@ -585,22 +673,34 @@ def _frozen_selector_table_query(
         tail.append(updated)
     jump = tail[-1]
     assert isinstance(jump, _Jump)
-    noise = ()
+    noise = []
     if global_noise:
-        noise = (
-            _Instruction(
-                _Operation("LLIL_SET_REG"),
-                selector_base,
-                register(selector_base),
-                jump.instr_index + 1,
-            ),
+        noise.extend(
+            (
+                _Instruction(
+                    _Operation("LLIL_SET_REG"),
+                    selector_base,
+                    register(selector_base),
+                    jump.instr_index + 1,
+                ),
+                _Instruction(
+                    _Operation("LLIL_STORE"),
+                    register(selector_register, 4),
+                    register(selector_register, 4),
+                    jump.instr_index + 2,
+                    size=4,
+                ),
+            )
+        )
+    if unrelated_dynamic_store:
+        noise.append(
             _Instruction(
                 _Operation("LLIL_STORE"),
+                register(unrelated_base),
                 register(selector_register, 4),
-                register(selector_register, 4),
-                jump.instr_index + 2,
+                jump.instr_index + len(noise) + 1,
                 size=4,
-            ),
+            )
         )
     recovered_instructions = (*prefix, *duplicate_store, *tail, *noise)
     tail_end = jump.instr_index + 1
@@ -625,12 +725,17 @@ def _frozen_selector_table_query(
     )
 
 
-def _frozen_frame_table_query(overwrite_index: bool = False) -> tuple[_Query, _Jump]:
+def _frozen_frame_table_query(
+    overwrite_index: bool = False,
+    unrelated_dynamic_store: bool = False,
+    frame_address_escape: bool = False,
+) -> tuple[_Query, _Jump]:
     sp = _Register("sp", 1)
     x8 = _Register("x8", 8)
     w8 = _Register("w8", 108)
     x9 = _Register("x9", 9)
     x10 = _Register("x10", 10)
+    x11 = _Register("x11", 11)
     x22 = _Register("x22", 22)
 
     def register(register_value: _Register, size: int = 8) -> _Expression:
@@ -676,6 +781,34 @@ def _frozen_frame_table_query(overwrite_index: bool = False) -> tuple[_Query, _J
                 register(w8, 4),
                 len(instructions),
                 size=4,
+            )
+        )
+    if unrelated_dynamic_store:
+        instructions.append(
+            _Instruction(
+                _Operation("LLIL_STORE"),
+                register(x11),
+                register(w8, 4),
+                len(instructions),
+                size=4,
+            )
+        )
+    if frame_address_escape:
+        instructions.extend(
+            (
+                _Instruction(
+                    _Operation("LLIL_SET_REG"),
+                    x11,
+                    register(x22),
+                    len(instructions),
+                ),
+                _Instruction(
+                    _Operation("LLIL_STORE"),
+                    register(x11),
+                    register(w8, 4),
+                    len(instructions) + 1,
+                    size=4,
+                ),
             )
         )
     first_tail_index = len(instructions)
@@ -941,6 +1074,27 @@ def test_branch_targets_recovers_a_frozen_boolean_selector_after_ambiguous_route
     )
 
 
+def test_branch_targets_recovers_a_private_frozen_selector_after_unrelated_dynamic_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _frozen_selector_table_query(unrelated_dynamic_store=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target in (0x4100, 0x4200),
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    condition = query.llil.instructions[8].src
+    assert provider.branch_targets(query) == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4100, 0x4200), condition, 0x4200, 0x4100),)
+    )
+
+
 def test_branch_targets_recovers_a_noisy_frozen_selector_from_its_ssa_table_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1054,6 +1208,44 @@ def test_branch_targets_recovers_a_frozen_frame_table_after_the_first_route_jump
     result = provider.branch_targets(query)
 
     assert result == _CompleteBatch((_BranchTargetFact(jump, (0x4200,)),))
+
+
+def test_branch_targets_recovers_a_private_frozen_frame_after_an_unrelated_dynamic_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, jump = _frozen_frame_table_query(unrelated_dynamic_store=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target == 0x4200,
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(
+        (_BranchTargetFact(jump, (0x4200,)),)
+    )
+
+
+def test_branch_targets_rejects_a_private_frozen_frame_after_its_address_escapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query, _jump = _frozen_frame_table_query(frame_address_escape=True)
+    provider, _registered = _load_provider(
+        monkeypatch,
+        None,
+        lambda target: target == 0x4200,
+        policy=_InitializedDataPolicy(
+            table_slot=0x3000,
+            target=0x4100,
+            extra_targets=(0x4200,),
+        ),
+    )
+
+    assert provider.branch_targets(query) == _CompleteBatch(())
 
 
 def test_branch_targets_rejects_a_frozen_frame_table_after_a_slot_overwrite(

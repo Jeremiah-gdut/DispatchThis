@@ -403,11 +403,18 @@ def _same_direct_llil_comparison(left, right):
     )
 
 
-def _rebind_anchor(llil, anchor):
-    candidates = []
+def _current_llil_roots_by_location(llil):
+    roots_by_location = {}
     for root in _current_instructions(llil):
-        if _location(root) != (anchor.owner_source, anchor.source_operand):
-            continue
+        location = _location(root)
+        if location is not None:
+            roots_by_location.setdefault(location, []).append(root)
+    return roots_by_location
+
+
+def _rebind_anchor_from_index(roots_by_location, anchor):
+    candidates = []
+    for root in roots_by_location.get((anchor.owner_source, anchor.source_operand), ()):
         candidate = _follow_operand_path(root, anchor.operand_path)
         if (
             candidate is not None
@@ -426,17 +433,25 @@ def _rebind_anchor(llil, anchor):
     return candidates[0], None, ""
 
 
-def _current_mlil_mapping(llil_condition, mlil):
+def _rebind_anchor(llil, anchor):
+    return _rebind_anchor_from_index(_current_llil_roots_by_location(llil), anchor)
+
+
+def _current_mlil_candidates(llil_condition, mlil):
     try:
         candidates = tuple(getattr(llil_condition, "mlils", ()) or ())
     except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK — LLIL-to-MLIL mapping boundary.
         candidates = ()
-    current = [
+    return tuple(
         candidate
         for candidate in candidates
         if getattr(candidate, "function", None) is not None
         and _same_owner(candidate.function, mlil)
-    ]
+    )
+
+
+def _current_mlil_mapping(llil_condition, mlil):
+    current = _current_mlil_candidates(llil_condition, mlil)
     if not current:
         return None, ConditionFailureReason.MLIL_MAPPING_MISSING, "condition has no current MLIL mapping"
     condition = _direct_mlil_mapping(current)
@@ -445,13 +460,20 @@ def _current_mlil_mapping(llil_condition, mlil):
     return condition, None, ""
 
 
-def _site_for_source(mlil, source):
-    sites = [
-        instruction
-        for instruction in _current_instructions(mlil)
-        if getattr(instruction, "address", None) == source
-        and getattr(instruction, "operation", None) in (M.MLIL_JUMP_TO, M.MLIL_IF)
-    ]
+def _current_branch_sites_by_source(mlil):
+    sites_by_source = {}
+    for instruction in _current_instructions(mlil):
+        source = getattr(instruction, "address", None)
+        if (
+            _valid_uint(source)
+            and getattr(instruction, "operation", None) in (M.MLIL_JUMP_TO, M.MLIL_IF)
+        ):
+            sites_by_source.setdefault(source, []).append(instruction)
+    return sites_by_source
+
+
+def _site_for_source_from_index(sites_by_source, source):
+    sites = sites_by_source.get(source, ())
     if not sites:
         return None, ConditionFailureReason.SITE_MISSING, "source has no current switch-like branch site"
     if len(sites) != 1:
@@ -503,14 +525,36 @@ def _failed(source, reason, detail):
     )
 
 
-def _classify_receipt(llil, mlil, receipt):
-    llil_condition, reason, detail = _rebind_anchor(llil, receipt.anchor)
+def _classify_receipt(roots_by_location, sites_by_source, mlil, receipt):
+    llil_condition, reason, detail = _rebind_anchor_from_index(roots_by_location, receipt.anchor)
     if reason is not None:
         return _failed(receipt.source, reason, detail), None
+    site, reason, detail = _site_for_source_from_index(sites_by_source, receipt.source)
+    if reason is not None:
+        return _failed(receipt.source, reason, detail), None
+
+    if site.operation is M.MLIL_IF:
+        targets = _directed_target_indexes(
+            mlil,
+            receipt,
+            {
+                receipt.true_target: getattr(site, "true", None),
+                receipt.false_target: getattr(site, "false", None),
+            },
+        )
+        if targets is None:
+            return _failed(
+                receipt.source,
+                ConditionFailureReason.TARGET_MISMATCH,
+                "current IF targets do not match the directed receipt",
+            ), None
+        if any(
+            _same_current_expression(getattr(site, "condition", None), candidate)
+            for candidate in _current_mlil_candidates(llil_condition, mlil)
+        ):
+            return ConditionTranslationResult(receipt.source, ConditionTranslationStatus.ALREADY_SATISFIED), None
+
     condition, reason, detail = _current_mlil_mapping(llil_condition, mlil)
-    if reason is not None:
-        return _failed(receipt.source, reason, detail), None
-    site, reason, detail = _site_for_source(mlil, receipt.source)
     if reason is not None:
         return _failed(receipt.source, reason, detail), None
 
@@ -528,20 +572,6 @@ def _classify_receipt(llil, mlil, receipt):
             _RewritePlan(receipt.source, site, condition, targets[0], targets[1], cleanup_roots),
         )
 
-    targets = _directed_target_indexes(
-        mlil,
-        receipt,
-        {
-            receipt.true_target: getattr(site, "true", None),
-            receipt.false_target: getattr(site, "false", None),
-        },
-    )
-    if targets is None:
-        return _failed(
-            receipt.source,
-            ConditionFailureReason.TARGET_MISMATCH,
-            "current IF targets do not match the directed receipt",
-        ), None
     if not _same_current_expression(getattr(site, "condition", None), condition):
         return _failed(
             receipt.source,
@@ -568,10 +598,16 @@ def _replacement_for(plan):
 def translate_indirect_branch_conditions(ctx, llil, mlil, receipts):
     """Translate only persisted provider receipts, never rediscovered candidates."""
 
+    ordered_receipts = sorted(receipts, key=lambda item: item.source)
+    if not ordered_receipts:
+        return ConditionTranslationBatch(mlil, (), frozenset(), frozenset())
+
+    roots_by_location = _current_llil_roots_by_location(llil)
+    sites_by_source = _current_branch_sites_by_source(mlil)
     results = []
     plans = []
-    for receipt in sorted(receipts, key=lambda item: item.source):
-        result, plan = _classify_receipt(llil, mlil, receipt)
+    for receipt in ordered_receipts:
+        result, plan = _classify_receipt(roots_by_location, sites_by_source, mlil, receipt)
         results.append(result)
         if plan is not None:
             plans.append(plan)
