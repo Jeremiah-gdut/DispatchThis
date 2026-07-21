@@ -1,5 +1,19 @@
 # DispatchThis Agent 工作指南
 
+## MUST READ!
+
+每个会话必须先用 BN CLI 精确阅读以下 Binary Ninja 文档：
+```bash
+bn docs "Binary Ninja Intermediate Language: Overview"
+bn docs "Binary Ninja Intermediate Language: Low Level IL"
+bn docs "Binary Ninja Intermediate Language: Medium Level IL"
+bn docs "Binary Ninja Intermediate Language: High Level IL"
+bn docs "Modifying ILs"
+bn docs "Important Concepts" --match 'E:\\BN\\docs\\dev\\concepts.html'
+bn docs "User Informed Data Flow"
+bn docs "Binary Ninja Workflows"
+```
+
 ## 先做这四件事
 
 1. 阅读 `CONTEXT.md`；若改动涉及 workflow、provider、当前 IL、PHI、cleanup 或 deflatten，先从 `docs/adr/README.md` 定位相关 ADR。
